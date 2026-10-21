@@ -37,12 +37,15 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
 
     private static final Logger logger = LoggerFactory.getLogger(PolicyManagementHandler.class);
     public static final String POLICIES_PATH = "/api/v1/policies";
+    public static final String POLICIES_SIMULATE_PATH = "/api/v1/policies/simulate";
     public static final String BEARER_PREFIX = "Bearer ";
 
     private final PolicyCache policyCache;
     private final PolicyCompiler policyCompiler;
     private final ObjectMapper jsonMapper;
     private final PolicyAuthorizer authorizer;
+    private final dev.aegismcp.gateway.validation.DynamicParameterValidator parameterValidator;
+    private final PolicyEvaluator policyEvaluator;
 
     /**
      * Interface for authenticating and authorizing callers of policy management endpoints.
@@ -65,16 +68,28 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
     }
 
     public PolicyManagementHandler(PolicyCache policyCache) {
-        this(policyCache, PolicyCompiler.getInstance(), JsonRpcCodec.getInstance().getMapper(), defaultAuthorizer());
+        this(policyCache, new dev.aegismcp.gateway.validation.DynamicParameterValidator());
+    }
+
+    public PolicyManagementHandler(PolicyCache policyCache, dev.aegismcp.gateway.validation.DynamicParameterValidator parameterValidator) {
+        this(policyCache, PolicyCompiler.getInstance(), JsonRpcCodec.getInstance().getMapper(), defaultAuthorizer(), parameterValidator);
     }
 
     public PolicyManagementHandler(PolicyCache policyCache, PolicyCompiler policyCompiler,
                                    ObjectMapper jsonMapper, PolicyAuthorizer authorizer) {
+        this(policyCache, policyCompiler, jsonMapper, authorizer, new dev.aegismcp.gateway.validation.DynamicParameterValidator());
+    }
+
+    public PolicyManagementHandler(PolicyCache policyCache, PolicyCompiler policyCompiler,
+                                   ObjectMapper jsonMapper, PolicyAuthorizer authorizer,
+                                   dev.aegismcp.gateway.validation.DynamicParameterValidator parameterValidator) {
         super(false); // Manual retain/release control for pass-through compatibility
         this.policyCache = Objects.requireNonNull(policyCache, "policyCache must not be null");
         this.policyCompiler = Objects.requireNonNull(policyCompiler, "policyCompiler must not be null");
         this.jsonMapper = Objects.requireNonNull(jsonMapper, "jsonMapper must not be null");
         this.authorizer = Objects.requireNonNull(authorizer, "authorizer must not be null");
+        this.parameterValidator = parameterValidator;
+        this.policyEvaluator = new PolicyEvaluator(policyCache, parameterValidator);
     }
 
     public static PolicyAuthorizer defaultAuthorizer() {
@@ -96,7 +111,7 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
         QueryStringDecoder queryDecoder = new QueryStringDecoder(uri);
         String path = queryDecoder.path();
 
-        if (!POLICIES_PATH.equals(path)) {
+        if (!POLICIES_PATH.equals(path) && !POLICIES_SIMULATE_PATH.equals(path)) {
             // Forward non-policy requests down the pipeline
             ctx.fireChannelRead(request);
             return;
@@ -124,7 +139,14 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
                 return;
             }
 
-            if (HttpMethod.GET.equals(request.method())) {
+            if (POLICIES_SIMULATE_PATH.equals(path)) {
+                if (HttpMethod.POST.equals(request.method())) {
+                    handleSimulatePolicy(ctx, request, keepAlive);
+                } else {
+                    sendJson(ctx, HttpResponseStatus.METHOD_NOT_ALLOWED,
+                            new PolicyDto.ErrorResponse("Method Not Allowed: only POST supported for policy simulation"), keepAlive);
+                }
+            } else if (HttpMethod.GET.equals(request.method())) {
                 handleGetPolicies(ctx, queryDecoder, keepAlive);
             } else if (HttpMethod.POST.equals(request.method())) {
                 handlePostPolicy(ctx, request, keepAlive);
@@ -211,6 +233,77 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
         sendJson(ctx, HttpResponseStatus.CREATED, response, keepAlive);
     }
 
+    private void handleSimulatePolicy(ChannelHandlerContext ctx, FullHttpRequest request, boolean keepAlive) {
+        ByteBuf content = request.content();
+        if (!content.isReadable()) {
+            sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
+                    new PolicyDto.ErrorResponse("Empty request body"), keepAlive);
+            return;
+        }
+
+        byte[] bytes = new byte[content.readableBytes()];
+        content.readBytes(bytes);
+
+        PolicyDto.SimulatePolicyRequest simRequest;
+        try {
+            simRequest = jsonMapper.readValue(bytes, PolicyDto.SimulatePolicyRequest.class);
+        } catch (Exception e) {
+            sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
+                    new PolicyDto.ErrorResponse("Invalid JSON payload: " + e.getMessage()), keepAlive);
+            return;
+        }
+
+        if (simRequest.agentId() == null || simRequest.agentId().isBlank() ||
+                simRequest.toolName() == null || simRequest.toolName().isBlank()) {
+            sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
+                    new PolicyDto.ErrorResponse("agentId and toolName are required"), keepAlive);
+            return;
+        }
+
+        List<String> violations = new java.util.ArrayList<>();
+
+        // 1. Run dynamic parameter validation (JSON schema, path traversal, SQL injection, command injection)
+        if (parameterValidator != null) {
+            var valResult = parameterValidator.validate(simRequest.agentId(), simRequest.toolName(), simRequest.arguments());
+            if (!valResult.isValid()) {
+                for (var v : valResult.violations()) {
+                    violations.add(v.message());
+                }
+                PolicyDto.SimulatePolicyResponse simResponse = new PolicyDto.SimulatePolicyResponse(
+                        "BLOCKED",
+                        "parameter_validation",
+                        violations
+                );
+                sendJson(ctx, HttpResponseStatus.OK, simResponse, keepAlive);
+                return;
+            }
+        }
+
+        // 2. Evaluate against active security policy
+        dev.aegismcp.gateway.proxy.AgentIdentity identity = new dev.aegismcp.gateway.proxy.AgentIdentity(
+                simRequest.agentId(), null, null, true
+        );
+        PolicyEvaluationResult polResult = policyEvaluator.evaluate(identity, simRequest.toolName(), simRequest.arguments());
+
+        String verdict;
+        String ruleMatched = polResult.ruleId();
+        if (polResult.isDenied()) {
+            verdict = "BLOCKED";
+            violations.add(polResult.reason());
+        } else if (polResult.isRequireApproval()) {
+            verdict = "REQUIRE_APPROVAL";
+        } else {
+            verdict = "ALLOWED";
+        }
+
+        PolicyDto.SimulatePolicyResponse simResponse = new PolicyDto.SimulatePolicyResponse(
+                verdict,
+                ruleMatched,
+                violations
+        );
+        sendJson(ctx, HttpResponseStatus.OK, simResponse, keepAlive);
+    }
+
     private void sendJson(ChannelHandlerContext ctx, HttpResponseStatus status, Object payload, boolean keepAlive) {
         try {
             byte[] bytes = jsonMapper.writeValueAsBytes(payload);
@@ -241,5 +334,13 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
             errorResp.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");
             ctx.writeAndFlush(errorResp).addListener(ChannelFutureListener.CLOSE);
         }
+    }
+
+    public dev.aegismcp.gateway.validation.DynamicParameterValidator getParameterValidator() {
+        return parameterValidator;
+    }
+
+    public PolicyEvaluator getPolicyEvaluator() {
+        return policyEvaluator;
     }
 }

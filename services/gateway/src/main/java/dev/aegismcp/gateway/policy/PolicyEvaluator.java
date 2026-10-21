@@ -19,9 +19,15 @@ public class PolicyEvaluator {
     private static final Logger logger = LoggerFactory.getLogger(PolicyEvaluator.class);
 
     private final PolicyCache policyCache;
+    private final dev.aegismcp.gateway.validation.DynamicParameterValidator parameterValidator;
 
     public PolicyEvaluator(PolicyCache policyCache) {
+        this(policyCache, null);
+    }
+
+    public PolicyEvaluator(PolicyCache policyCache, dev.aegismcp.gateway.validation.DynamicParameterValidator parameterValidator) {
         this.policyCache = Objects.requireNonNull(policyCache, "policyCache must not be null");
+        this.parameterValidator = parameterValidator;
     }
 
     /**
@@ -67,7 +73,21 @@ public class PolicyEvaluator {
             return PolicyEvaluationResult.deny(denial, policy.id(), matchedRule.id(), false);
         }
 
-        // 4. Evaluate argument constraints
+        // 4. Validate arguments against schema and injection sanitizers if validator is configured
+        if (parameterValidator != null) {
+            if (matchedRule.isAllowRawSql()) {
+                parameterValidator.whitelistDatabaseAdmin(agentId);
+            }
+            dev.aegismcp.gateway.validation.ValidationResult valResult = parameterValidator.validate(agentId, toolName, arguments);
+            if (!valResult.isValid()) {
+                String reason = "Schema/Parameter Violation: " + valResult.summaryMessage();
+                logger.warn("Dynamic parameter validation rejected tool call: agent='{}', tool='{}', details='{}'",
+                        agentId, toolName, reason);
+                return PolicyEvaluationResult.deny(reason, policy.id(), matchedRule.id(), true);
+            }
+        }
+
+        // 5. Evaluate argument constraints
         if (!matchedRule.constraints().isEmpty()) {
             StringBuilder violationDetails = new StringBuilder();
             for (ArgumentConstraint constraint : matchedRule.constraints()) {
@@ -95,5 +115,9 @@ public class PolicyEvaluator {
 
     public PolicyCache getPolicyCache() {
         return policyCache;
+    }
+
+    public dev.aegismcp.gateway.validation.DynamicParameterValidator getParameterValidator() {
+        return parameterValidator;
     }
 }
