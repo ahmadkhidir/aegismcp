@@ -1,6 +1,4 @@
-# Test harness
-
-<!-- profile: tests -->
+# tests/e2e
 
 Root `AGENTS.md` § Verification owns the verifier's mandate. This file adds only how to run this
 harness.

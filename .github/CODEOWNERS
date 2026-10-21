@@ -1,7 +1,0 @@
-# Ownership for the areas in this repository.
-* @team
-
-/services/gateway/ @backend
-/apps/console/ @frontend
-/infra/ @infra
-/tests/e2e/ @qa

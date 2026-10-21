@@ -9,7 +9,7 @@ The asset ledger. One row per slot. The user is the sole authority on what alrea
 
 ## Family blocks
 
-Store one block per family, verbatim from `generating-asset-prompts`:
+Store one block per asset family with its specifications, palette, prompt/source, and variants:
 
 ```text
 ### Family: <name>

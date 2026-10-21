@@ -6,7 +6,7 @@ labels: ""
 assignees: ""
 ---
 
-Class: implement | verify | spec | asset
+Class: implement | fix | verify | spec | asset | chore
 Area:
 Own:
 Read-only:

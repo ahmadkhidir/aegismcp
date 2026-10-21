@@ -38,13 +38,11 @@ repository. Never copy live state into a file.
 
 Changing a stack choice is a decision: record it in `.decisions/` and update this table.
 
-## Area rules and ownership
+## Area rules
 
 Area rules live in the nearest `AGENTS.md`. They are rule sets, not agent roles: any coding agent
 working in the area loads them. Start the session in the area, or read its file first when the issue
 names one. List them with `git ls-files '*AGENTS.md'` or `find . -name AGENTS.md`.
-
-Ownership is enforced by `.github/CODEOWNERS`.
 
 ## Work classes
 
@@ -83,8 +81,8 @@ An asset task writes neither. The issue names the class and the area.
 7. **Ask about dispatch.** With the issues in GitHub, ask once whether to dispatch subagents or work
    them in this session. Follow Dispatch below.
 8. **Gate each phase.** The gate is a `verify` task, parented to the phase and blocked by every other
-   task in it. When those tasks are closed, run the gate in a session separate from the implementers.
-   Close the phase issue only when the gate passes.
+   task in it. When those tasks are closed, verify the deliverable against the acceptance criteria
+   and full regression suite. Close the phase issue only when the gate passes.
 
 ## Dispatch
 
@@ -99,22 +97,20 @@ can stop it at any point.
   The parent phase groups its tasks; it does not order them.
 - **A frozen contract is a precondition.** An issue whose `C-###` is not `Frozen` is not ready, even
   with its blockers closed.
-- **One issue per worker.** A dispatched worker gets one issue, reads the area file and the documents
-  it names, and reports back. It does not take a second issue.
-- **A worker does not spawn workers.** Work discovered while solving an issue becomes a new issue,
-  drafted by the coordinating session with the user. Delegation goes one level down.
+- **Task execution.** A worker focuses on its assigned issue, reads the area file and documents
+  it names, stays within its owned paths, and reports back upon completion.
 - **Tasks are leaves.** Only a phase issue has sub-issues. Never nest a task under a task.
 - **A phase issue is never dispatched.** It groups its tasks and parents the gate.
 - **The coordinating session works too.** When the user keeps the work here, do it under the same
   dependency rule.
-- **The gate is the one fresh session.** The phase gate runs in a session separate from the
-  implementers, even when the current session did all the implementation.
+- **The phase gate.** Verify the phase with a clean test and boot sweep against the criteria before
+  closing the phase issue.
 
 ## Task contract
 
 Every task is an issue from `.github/ISSUE_TEMPLATE/task.md`, parented to its phase issue, with:
 
-- `Class` — implement, verify, spec, or asset.
+- `Class` — implement, fix, verify, spec, asset, or chore.
 - `Area` — the folder whose `AGENTS.md` governs the work.
 - `Own` — the paths the task may write.
 - `Read-only` — the paths it may read but not change.
@@ -158,8 +154,7 @@ A phase is done when its gate task passes and the phase issue closes.
 
 ## Verification
 
-A phase is verified by a fresh session after all its tasks are done. The implementing session never
-grades its own phase, and a solo run is no exception.
+A phase is verified after all its tasks are done.
 
 Inputs: the phase's tasks, `CONTRACTS.md`, the acceptance criteria
 those issues name, the quality bar in `nfr.md`, and the commands in this file.
@@ -184,7 +179,7 @@ appearance; that belongs to the frontend.
 ## Git and GitHub
 
 - `main` is protected. Work on a short-lived branch and open a PR.
-- Conventional Commits. Implementation commits carry `Implements: FEAT-###`.
+- Conventional Commits. Commits link the spec and the issue: e.g. `Implements: FEAT-###` and `Fixes #<n>`.
 - Commit only the paths the issue owns. Never `git add -A`.
 - A PR carries the issue number, the `C-###` it conforms to, and the checks run.
 - A phase issue closes only after its gate task passes.
@@ -210,8 +205,6 @@ one.
 - Never write under the specification path from an implementation task.
 - Never invent a requirement. A missing answer is a doc gap.
 - Never log or commit secrets, tokens, or unmasked identity.
-- Never grade your own phase.
 - Never tune a test, threshold, or evaluation set to make a run pass.
 - Never add a markdown document where inline documentation is enough.
-- Never cite a task ID, route path, or issue number in durable code, comments, tests, or commit
-  messages; cite `FEAT-###`, `NFR-###`, or `C-###`.
+- In durable code comments and tests, cite permanent spec anchors (`FEAT-###`, `NFR-###`, or `C-###`). Commits and PRs link the spec and the GitHub issue.
