@@ -9,11 +9,10 @@ assignees: ""
 Class: implement | fix | verify | spec | asset | chore
 Area:
 Own:
-Read-only:
 Depends on: none
 Contract:
 
-## Read from docs
+## Specification
 
 -
 

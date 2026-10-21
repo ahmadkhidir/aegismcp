@@ -116,13 +116,12 @@ Every task is an issue from `.github/ISSUE_TEMPLATE/task.md`, parented to its ph
 
 - `Class` — implement, fix, verify, spec, asset, or chore.
 - `Area` — the folder whose `AGENTS.md` governs the work.
-- `Own` — the paths the task may write.
-- `Read-only` — the paths it may read but not change.
+- `Own` — the paths the task may write. Everything outside `Own` is read-only.
 - `Depends on` — the issue numbers that must close first, or `none`. The issue's blocked-by links
   mirror this line; when they disagree, the issue body is the record and the coordinator fixes the
   links.
 - `Contract` — the `C-###` it implements, or `none`.
-- `Read from docs` — the sections it needs.
+- `Specification` — the sections it needs.
 - `Criteria` — where the acceptance criteria live.
 
 A task closes when its PR merges and the issue closes. There is no route file and no separate
