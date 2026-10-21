@@ -40,10 +40,11 @@ This directory and its subdirectories. The issue's `Own` paths are binding; ever
 
 ## Checks
 
-- Run component and unit tests: `npm test` (or `npx vitest run`)
-- Type check and build production bundle: `npm run build`
-- Run local development server: `npm run dev`
-- Preview production build: `npm run preview`
+- Install: `npm install` (from repo root: `cd apps/console && npm install`)
+- Dev: `npm run dev` (from repo root: `cd apps/console && npm run dev`)
+- Build: `npm run build` (from repo root: `cd apps/console && npm run build`)
+- Test: `npm test` (from repo root: `cd apps/console && npm test`)
+- Preview: `npm run preview` (from repo root: `cd apps/console && npm run preview`)
 
 ## Local Definition of Done
 
