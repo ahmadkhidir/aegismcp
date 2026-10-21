@@ -3,6 +3,7 @@ package dev.aegismcp.gateway.policy;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
@@ -60,6 +61,36 @@ public final class PolicyDto {
             Objects.requireNonNull(version, "version must not be null");
             Objects.requireNonNull(status, "status must not be null");
             Objects.requireNonNull(createdAt, "createdAt must not be null");
+        }
+    }
+
+    /**
+     * Request payload for C-012 (POST /api/v1/policies/simulate).
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record SimulatePolicyRequest(
+            @JsonProperty(value = "agentId", required = true) String agentId,
+            @JsonProperty(value = "toolName", required = true) String toolName,
+            @JsonProperty("arguments") com.fasterxml.jackson.databind.JsonNode arguments
+    ) {
+        public SimulatePolicyRequest {
+            Objects.requireNonNull(agentId, "agentId must not be null");
+            Objects.requireNonNull(toolName, "toolName must not be null");
+        }
+    }
+
+    /**
+     * Response payload for C-012 (POST /api/v1/policies/simulate).
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record SimulatePolicyResponse(
+            @JsonProperty(value = "verdict", required = true) String verdict,
+            @JsonProperty("ruleMatched") String ruleMatched,
+            @JsonProperty(value = "violations", required = true) List<String> violations
+    ) {
+        public SimulatePolicyResponse {
+            Objects.requireNonNull(verdict, "verdict must not be null");
+            violations = violations != null ? List.copyOf(violations) : Collections.emptyList();
         }
     }
 

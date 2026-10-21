@@ -25,6 +25,7 @@ public class PolicyRule {
     private final List<ArgumentConstraint> constraints;
     private final Double actionThreshold;
     private final String description;
+    private final boolean allowRawSql;
 
     // Compiled wildcard pattern for tool matching
     private final Pattern compiledToolPattern;
@@ -39,12 +40,15 @@ public class PolicyRule {
             @JsonProperty("constraints") List<ArgumentConstraint> constraints,
             @JsonProperty("actionThreshold") Double actionThreshold,
             @JsonProperty("action_threshold") Double actionThresholdSnake,
-            @JsonProperty("description") String description
+            @JsonProperty("description") String description,
+            @JsonProperty("allowRawSql") Boolean allowRawSql,
+            @JsonProperty("allow_raw_sql") Boolean allowRawSqlSnake
     ) {
         this.id = id != null && !id.isBlank() ? id : "rule-" + UUID.randomUUID().toString().substring(0, 8);
         this.tool = Objects.requireNonNull(tool, "tool pattern must not be null").trim();
 
         boolean approvalRequired = Boolean.TRUE.equals(requireApproval) || Boolean.TRUE.equals(requireApprovalSnake);
+        this.allowRawSql = Boolean.TRUE.equals(allowRawSql) || Boolean.TRUE.equals(allowRawSqlSnake);
 
         PolicyVerdict resolvedAction = PolicyVerdict.ALLOW;
         if (actionObj != null) {
@@ -77,7 +81,11 @@ public class PolicyRule {
     }
 
     public PolicyRule(String tool, PolicyVerdict action, List<ArgumentConstraint> constraints) {
-        this(null, tool, action, false, false, constraints, null, null, null);
+        this(null, tool, action, false, false, constraints, null, null, null, false, false);
+    }
+
+    public PolicyRule(String tool, PolicyVerdict action, List<ArgumentConstraint> constraints, boolean allowRawSql) {
+        this(null, tool, action, false, false, constraints, null, null, null, allowRawSql, false);
     }
 
     public String id() {
@@ -106,6 +114,10 @@ public class PolicyRule {
 
     public String description() {
         return description;
+    }
+
+    public boolean isAllowRawSql() {
+        return allowRawSql;
     }
 
     /**
