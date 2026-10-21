@@ -33,8 +33,9 @@ This directory and its subdirectories. The issue's `Own` and `Read-only` fields 
 
 ## Checks
 
-- `./gradlew :apps:cli:test` runs unit and CLI interaction tests.
-- `./gradlew :apps:cli:build` packages the executable CLI distribution.
+- Build executable distribution: `./gradlew :apps:cli:build`
+- Run unit and CLI interaction tests: `./gradlew :apps:cli:test`
+- Run CLI application: `./gradlew :apps:cli:run --args="<command>"`
 
 ## Local Definition of Done
 

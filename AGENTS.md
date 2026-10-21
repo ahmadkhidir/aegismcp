@@ -199,7 +199,12 @@ one.
 
 | Command | Run |
 |---|---|
-| Build | Not defined — the foundation task defines it. |
+| Build full project | `./gradlew build` |
+| Test full suite | `./gradlew test` |
+| Boot Gateway Server | `./gradlew :services:gateway:run` |
+| Run CLI | `./gradlew :apps:cli:run --args="--help"` |
+| Build Web Console | `cd apps/console && npm run build` |
+| Test Web Console | `cd apps/console && npm test` |
 
 ## Boundaries
 

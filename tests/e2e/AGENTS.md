@@ -16,7 +16,8 @@ This directory and its subdirectories. Write only test files and test configurat
 
 ## Commands
 
-- The foundation task defines the commands for this area.
+- Run end-to-end integration and verification suite: `./gradlew :tests:e2e:test`
+- Run performance latency benchmark: `./gradlew :tests:e2e:test --tests "dev.aegismcp.e2e.Phase1PerformanceLatencyBenchmarkTest"`
 
 ## Local Definition of Done
 

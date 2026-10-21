@@ -41,7 +41,10 @@ This directory and its subdirectories. The issue's `Own` and `Read-only` fields 
 
 ## Checks
 
-- The foundation task defines the commands for this area.
+- Run component and unit tests: `npm test` (or `npx vitest run`)
+- Type check and build production bundle: `npm run build`
+- Run local development server: `npm run dev`
+- Preview production build: `npm run preview`
 
 ## Local Definition of Done
 

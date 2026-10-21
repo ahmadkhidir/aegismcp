@@ -33,7 +33,9 @@ This directory and its subdirectories. The issue's `Own` and `Read-only` fields 
 
 ## Checks
 
-- The foundation task defines the commands for this area.
+- Build and compile: `./gradlew :services:gateway:build`
+- Run unit tests: `./gradlew :services:gateway:test`
+- Run local server: `./gradlew :services:gateway:run`
 
 ## Local Definition of Done
 

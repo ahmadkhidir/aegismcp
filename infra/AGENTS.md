@@ -32,7 +32,7 @@ This directory and its subdirectories. The issue's `Own` and `Read-only` fields 
 
 ## Checks
 
-- The foundation task defines the commands for this area.
+- Build Docker container: `docker build -f infra/docker/Dockerfile -t aegismcp-gateway:latest .`
 
 ## Local Definition of Done
 
