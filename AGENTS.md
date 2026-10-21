@@ -122,9 +122,6 @@ Every task is an issue from `.github/ISSUE_TEMPLATE/task.md`, parented to its ph
   mirror this line; when they disagree, the issue body is the record and the coordinator fixes the
   links.
 - `Contract` — the `C-###` it implements, or `none`.
-- `Read first` — the files this task must read: the area file for `implement`, `AGENTS.md` for
-  `verify`, `docs/AGENTS.md` for `spec`, the nearest asset `AGENTS.md` for
-  `asset`.
 - `Read from docs` — the sections it needs.
 - `Criteria` — where the acceptance criteria live.
 

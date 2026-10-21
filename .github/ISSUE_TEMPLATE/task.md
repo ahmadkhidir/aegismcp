@@ -12,7 +12,6 @@ Own:
 Read-only:
 Depends on: none
 Contract:
-Read first: <area>/AGENTS.md
 
 ## Read from docs
 

@@ -10,7 +10,7 @@ assignees: ""
 
 ## Why it blocks
 
-Read first: `docs/AGENTS.md`
+Area: docs
 
 ## Sanction
 
