@@ -1,0 +1,15 @@
+# Gradle build and cache
+.gradle/
+build/
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+
+# OS files
+.DS_Store
+Thumbs.db
