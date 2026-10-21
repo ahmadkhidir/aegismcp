@@ -25,8 +25,19 @@ import {
   PolicySimulateResponse,
   SystemStatusResponse,
 } from '../types/contracts';
+import { oidcService } from './oidc';
 
 const API_BASE = '/api/v1';
+
+/** Helper to attach Bearer token to API requests (C-002..C-013) */
+function getAuthHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {
+  const session = oidcService.getSavedSession();
+  const headers: Record<string, string> = { ...extraHeaders };
+  if (session?.tokens?.accessToken) {
+    headers['Authorization'] = `Bearer ${session.tokens.accessToken}`;
+  }
+  return headers;
+}
 
 // Initial resilient mock data for standalone dev and tests
 export const MOCK_SYSTEM_STATUS: SystemStatusResponse = {
@@ -346,7 +357,7 @@ export const AegisApi = {
   /** C-009: GET /api/v1/system/status */
   async getSystemStatus(): Promise<SystemStatusResponse> {
     try {
-      const res = await fetch(`${API_BASE}/system/status`);
+      const res = await fetch(`${API_BASE}/system/status`, { headers: getAuthHeaders() });
       if (res.ok) return await res.json();
     } catch {
       // Fallback to resilient mock
@@ -357,7 +368,7 @@ export const AegisApi = {
   /** C-010: GET /api/v1/metrics/summary */
   async getMetricsSummary(): Promise<MetricsSummaryResponse> {
     try {
-      const res = await fetch(`${API_BASE}/metrics/summary`);
+      const res = await fetch(`${API_BASE}/metrics/summary`, { headers: getAuthHeaders() });
       if (res.ok) return await res.json();
     } catch {
       // Fallback
@@ -373,7 +384,7 @@ export const AegisApi = {
     try {
       const res = await fetch(`${API_BASE}/emergency/kill`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(req),
       });
       if (res.ok) return await res.json();
@@ -395,7 +406,7 @@ export const AegisApi = {
   async getApprovals(status?: string): Promise<ApprovalsResponse> {
     try {
       const query = status ? `?status=${encodeURIComponent(status)}` : '';
-      const res = await fetch(`${API_BASE}/approvals${query}`);
+      const res = await fetch(`${API_BASE}/approvals${query}`, { headers: getAuthHeaders() });
       if (res.ok) return await res.json();
     } catch {
       // Fallback
@@ -414,7 +425,7 @@ export const AegisApi = {
     try {
       const res = await fetch(`${API_BASE}/approvals/${encodeURIComponent(ticketId)}/decision`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(req),
       });
       if (res.ok) return await res.json();
@@ -439,7 +450,7 @@ export const AegisApi = {
   async getPolicies(status?: string): Promise<PoliciesResponse> {
     try {
       const query = status ? `?status=${encodeURIComponent(status)}` : '';
-      const res = await fetch(`${API_BASE}/policies${query}`);
+      const res = await fetch(`${API_BASE}/policies${query}`, { headers: getAuthHeaders() });
       if (res.ok) return await res.json();
     } catch {
       // Fallback
@@ -455,7 +466,7 @@ export const AegisApi = {
     try {
       const res = await fetch(`${API_BASE}/policies`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(req),
       });
       if (res.ok) return await res.json();
@@ -494,7 +505,9 @@ export const AegisApi = {
   /** C-007: GET /api/v1/audit/verify */
   async verifyAuditLedger(fromBlock = 0, toBlock = 1048590): Promise<AuditVerifyResponse> {
     try {
-      const res = await fetch(`${API_BASE}/audit/verify?fromBlock=${fromBlock}&toBlock=${toBlock}`);
+      const res = await fetch(`${API_BASE}/audit/verify?fromBlock=${fromBlock}&toBlock=${toBlock}`, {
+        headers: getAuthHeaders(),
+      });
       if (res.ok) return await res.json();
     } catch {
       // Fallback
@@ -513,7 +526,7 @@ export const AegisApi = {
     try {
       const res = await fetch(`${API_BASE}/compliance/export`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(req),
       });
       if (res.status === 409) {
@@ -575,7 +588,7 @@ export const AegisApi = {
     try {
       const res = await fetch(`${API_BASE}/policies/simulate`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(req),
       });
       if (res.ok) return await res.json();
@@ -628,7 +641,9 @@ export const AegisApi = {
       if (params?.limit !== undefined) query.set('limit', String(params.limit));
       if (params?.offset !== undefined) query.set('offset', String(params.offset));
       const qs = query.toString();
-      const res = await fetch(`${API_BASE}/audit/records${qs ? `?${qs}` : ''}`);
+      const res = await fetch(`${API_BASE}/audit/records${qs ? `?${qs}` : ''}`, {
+        headers: getAuthHeaders(),
+      });
       if (res.ok) return await res.json();
     } catch {
       // Fallback

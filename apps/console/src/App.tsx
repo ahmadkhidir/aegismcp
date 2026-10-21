@@ -1,6 +1,6 @@
 /**
- * Specification Anchors: FEAT-008, C-002..C-010
- * Main Application Shell & Navigation
+ * Specification Anchors: FEAT-008, FEAT-009, NFR-029, screens.md, C-002..C-010
+ * Main Application Shell & Navigation with OIDC Authentication & Session Guard
  */
 
 import React, { useState, useEffect } from 'react';
@@ -8,6 +8,8 @@ import { Navbar } from './components/Navbar';
 import { Sidebar, ScreenId } from './components/Sidebar';
 import { OfflineBanner } from './components/OfflineBanner';
 import { KillSwitchModal } from './components/KillSwitchModal';
+import { SessionTimeoutModal } from './components/SessionTimeoutModal';
+import { LoginScreen } from './components/LoginScreen';
 import { DashboardScreen } from './screens/DashboardScreen';
 import { LiveInspectorScreen } from './screens/LiveInspectorScreen';
 import { ApprovalsQueueScreen } from './screens/ApprovalsQueueScreen';
@@ -15,8 +17,11 @@ import { PolicyManagerScreen } from './screens/PolicyManagerScreen';
 import { AuditExplorerScreen } from './screens/AuditExplorerScreen';
 import { AegisApi } from './services/api';
 import { ThreatLevel } from './types/contracts';
+import { AuthProvider, useAuth } from './context/AuthContext';
 
-export const App: React.FC = () => {
+const AppContent: React.FC = () => {
+  const { isAuthenticated, isSessionExpired, renewSession, logout, user } = useAuth();
+
   // Navigation state initialized from URL hash or path
   const getInitialScreen = (): ScreenId => {
     const hash = window.location.hash.replace('#/', '').replace('#', '');
@@ -72,6 +77,7 @@ export const App: React.FC = () => {
 
   // Fetch initial threat level and approvals count
   useEffect(() => {
+    if (!isAuthenticated) return;
     const checkStatus = async () => {
       try {
         const status = await AegisApi.getSystemStatus();
@@ -83,13 +89,18 @@ export const App: React.FC = () => {
       }
     };
     checkStatus();
-  }, []);
+  }, [isAuthenticated]);
 
   const handleKillSwitchConfirm = async (req: Parameters<typeof AegisApi.triggerEmergencyKill>[0]) => {
     const res = await AegisApi.triggerEmergencyKill(req);
     setThreatLevel('LOCKDOWN');
     return res;
   };
+
+  // If not authenticated, render the enterprise SSO / OIDC Login gate (screens.md § Navigation Map)
+  if (!isAuthenticated) {
+    return <LoginScreen />;
+  }
 
   return (
     <div className="min-h-screen bg-grey-50 text-grey-900 flex flex-col font-sans">
@@ -134,7 +145,23 @@ export const App: React.FC = () => {
         onClose={() => setIsKillSwitchOpen(false)}
         onConfirm={handleKillSwitchConfirm}
       />
+
+      {/* Inactivity Session Timeout Re-authentication Modal (NFR-029) */}
+      <SessionTimeoutModal
+        isOpen={isSessionExpired}
+        userName={user?.name || 'Administrator'}
+        onRenew={renewSession}
+        onLogout={logout}
+      />
     </div>
+  );
+};
+
+export const App: React.FC = () => {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
   );
 };
 export default App;
