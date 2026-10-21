@@ -900,6 +900,15 @@ class Phase2EndToEndVerificationTest {
         }
         assertTrue(consoleDir.exists() && consoleDir.isDirectory(), "apps/console directory must exist at " + consoleDir);
 
+        // Ensure node_modules exists
+        if (!new File(consoleDir, "node_modules").exists()) {
+            ProcessBuilder installPb = new ProcessBuilder("npm", "ci");
+            installPb.directory(consoleDir);
+            installPb.redirectErrorStream(true);
+            Process installProcess = installPb.start();
+            installProcess.waitFor();
+        }
+
         // 1. Run vitest test suite
         ProcessBuilder testPb = new ProcessBuilder("npm", "test", "--", "--run");
         testPb.directory(consoleDir);
