@@ -34,7 +34,11 @@ repository. Never copy live state into a file.
 
 | Concern | Choice | Note |
 |---|---|---|
-| Stack | Not recorded | Record it in the first planning session. |
+| Core Gateway | Java 21, Netty 4.1, Loom Virtual Threads | Sub-5ms P99 overhead (`NFR-001`), 50k sessions (`NFR-002`) |
+| Build Tool | Gradle 8.7 (Kotlin DSL) | Hermetic multi-project builds (`gradlew`) |
+| Cryptography & Identity | Bouncy Castle, SPIFFE Java SDK | X.509 SVID validation & hardware-accelerated TLS 1.3 |
+| Console Frontend | React 19, TypeScript, Vite, Tailwind CSS | Decoupled SPA for security operations center |
+| E2E & Verification | JUnit 5, Testcontainers, Playwright | Containerized black-box test harness simulating MCP agents |
 
 Changing a stack choice is a decision: record it in `.decisions/` and update this table.
 
