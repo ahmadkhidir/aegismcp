@@ -1,6 +1,8 @@
 import React from 'react';
-import { Shield, ChevronDown, User, Server, Menu } from 'lucide-react';
+import { Shield, ChevronDown, Server, Menu } from 'lucide-react';
 import { ThreatLevel } from '../types/contracts';
+import { UserProfileMenu } from './UserProfileMenu';
+import { useAuth } from '../context/AuthContext';
 
 interface NavbarProps {
   threatLevel: ThreatLevel;
@@ -9,6 +11,9 @@ interface NavbarProps {
 }
 
 export const Navbar: React.FC<NavbarProps> = ({ threatLevel, onOpenKillSwitch, onToggleMobileMenu }) => {
+  const { hasRole } = useAuth();
+  const canTriggerKillSwitch = hasRole('admin');
+
   return (
     <header className="h-14 border-b border-grey-300 bg-grey-100 px-space-md sm:px-space-lg flex items-center justify-between sticky top-0 z-40">
       {/* Brand logo & mobile menu toggle */}
@@ -54,9 +59,13 @@ export const Navbar: React.FC<NavbarProps> = ({ threatLevel, onOpenKillSwitch, o
       <div className="flex items-center gap-space-md">
         <button
           onClick={onOpenKillSwitch}
+          disabled={!canTriggerKillSwitch}
           data-testid="nav-killswitch-button"
+          title={canTriggerKillSwitch ? 'Emergency Kill-Switch (C-008)' : 'Restricted: Requires SecOps Admin role (NFR-029)'}
           className={`px-space-md py-1.5 rounded-radius-md text-xs font-bold transition-all shadow-sm flex items-center gap-1.5 ${
-            threatLevel === 'LOCKDOWN'
+            !canTriggerKillSwitch
+              ? 'opacity-40 cursor-not-allowed bg-grey-200 text-grey-500 border border-grey-300'
+              : threatLevel === 'LOCKDOWN'
               ? 'bg-error-500 text-grey-900 animate-pulse'
               : 'bg-grey-200 hover:bg-error-500/20 text-error-700 hover:text-error-900 border border-error-300'
           }`}
@@ -65,15 +74,8 @@ export const Navbar: React.FC<NavbarProps> = ({ threatLevel, onOpenKillSwitch, o
           <span>{threatLevel === 'LOCKDOWN' ? 'SYSTEM IN LOCKDOWN' : 'Kill-Switch'}</span>
         </button>
 
-        <div className="flex items-center gap-2 pl-space-sm border-l border-grey-300">
-          <div className="w-7 h-7 rounded-radius-full bg-primary-200 flex items-center justify-center text-primary-900 font-semibold text-xs border border-primary-400">
-            <User className="w-3.5 h-3.5" />
-          </div>
-          <div className="hidden lg:block text-left">
-            <p className="text-xs font-medium text-grey-900 leading-none">Elena Rostova</p>
-            <p className="text-[10px] text-grey-500 font-mono leading-tight">SecOps Admin</p>
-          </div>
-        </div>
+        {/* Dynamic OIDC User Profile & Session Dropdown */}
+        <UserProfileMenu />
       </div>
     </header>
   );
