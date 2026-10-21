@@ -17,6 +17,11 @@ import dev.aegismcp.gateway.codec.JsonRpcCodec;
 import dev.aegismcp.gateway.dlp.DlpOutboundHandler;
 import dev.aegismcp.gateway.dlp.DlpPipelineConfigurator;
 import dev.aegismcp.gateway.dlp.DlpScrubber;
+import dev.aegismcp.gateway.identity.AgentIdentityResolver;
+import dev.aegismcp.gateway.killswitch.EmergencyManagementHandler;
+import dev.aegismcp.gateway.killswitch.GatewayMetrics;
+import dev.aegismcp.gateway.killswitch.InvocationVelocityCircuitBreaker;
+import dev.aegismcp.gateway.killswitch.KillSwitchManager;
 import dev.aegismcp.gateway.policy.DeclarativePolicyInterceptor;
 import dev.aegismcp.gateway.policy.PolicyCache;
 import dev.aegismcp.gateway.policy.PolicyCompiler;
@@ -28,17 +33,26 @@ import dev.aegismcp.gateway.proxy.McpProxyHandler;
 import dev.aegismcp.gateway.proxy.McpProxyPipelineConfigurator;
 import dev.aegismcp.gateway.proxy.ToolCallInterceptor;
 import dev.aegismcp.gateway.proxy.UpstreamClient;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.socket.SocketChannel;
+import io.netty.handler.codec.http.DefaultFullHttpResponse;
+import io.netty.handler.codec.http.FullHttpRequest;
+import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpVersion;
+import io.netty.handler.ssl.SslContext;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Fixture encapsulating a live AegisGatewayServer configured with the full Phase 1 Zero-Trust pipeline.
+ * Fixture encapsulating a live AegisGatewayServer configured with the Zero-Trust pipeline,
+ * including Phase 1 controls and Phase 2 visibility, kill-switch, and identity verification.
  */
 public class E2EGatewayFixture implements AutoCloseable {
 
@@ -51,6 +65,13 @@ public class E2EGatewayFixture implements AutoCloseable {
     private final AnomalyCircuitBreaker circuitBreaker;
     private final DlpScrubber dlpScrubber;
     private final AtomicReference<UpstreamClient> upstreamClientRef;
+
+    private final KillSwitchManager killSwitchManager;
+    private final GatewayMetrics gatewayMetrics;
+    private final EmergencyManagementHandler emergencyHandler;
+    private final InvocationVelocityCircuitBreaker velocityCircuitBreaker;
+    private volatile AgentIdentityResolver identityResolver;
+    private final SslContext sslContext;
 
     public static final int DEFAULT_BURST_THRESHOLD = 100_000;
 
@@ -75,6 +96,17 @@ public class E2EGatewayFixture implements AutoCloseable {
     }
 
     public E2EGatewayFixture(UpstreamClient initialUpstream, boolean loadDefaultPolicy, int burstThreshold) throws InterruptedException {
+        this(initialUpstream, loadDefaultPolicy, burstThreshold, 100_000, null, null);
+    }
+
+    public E2EGatewayFixture(
+            UpstreamClient initialUpstream,
+            boolean loadDefaultPolicy,
+            int burstThreshold,
+            int velocityThreshold,
+            AgentIdentityResolver identityResolver,
+            SslContext sslContext
+    ) throws InterruptedException {
         this.policyCache = new PolicyCache();
         this.approvalManager = new ApprovalManager(Duration.ofMinutes(5));
         this.auditLedger = new AuditLedger(1);
@@ -83,6 +115,23 @@ public class E2EGatewayFixture implements AutoCloseable {
         this.circuitBreaker = new AnomalyCircuitBreaker();
         this.dlpScrubber = DlpScrubber.getInstance();
         this.upstreamClientRef = new AtomicReference<>(initialUpstream);
+
+        this.killSwitchManager = new KillSwitchManager();
+        this.gatewayMetrics = new GatewayMetrics();
+        this.velocityCircuitBreaker = new InvocationVelocityCircuitBreaker(
+                killSwitchManager,
+                velocityThreshold > 0 ? velocityThreshold : 100_000,
+                Duration.ofSeconds(10),
+                gatewayMetrics
+        );
+        this.emergencyHandler = new EmergencyManagementHandler(
+                killSwitchManager,
+                gatewayMetrics,
+                JsonRpcCodec.getInstance().getMapper(),
+                EmergencyManagementHandler.defaultAuthorizer()
+        );
+        this.identityResolver = identityResolver;
+        this.sslContext = sslContext;
 
         if (loadDefaultPolicy) {
             String defaultYaml = """
@@ -133,6 +182,7 @@ public class E2EGatewayFixture implements AutoCloseable {
 
         ToolCallInterceptor auditInterceptor = (context, request) -> {
             if (request.isToolCall()) {
+                gatewayMetrics.recordToolCall();
                 auditLedger.append(AuditRecord.create(
                         context.identity().agentId(),
                         request.toolName(),
@@ -145,11 +195,23 @@ public class E2EGatewayFixture implements AutoCloseable {
             return CompletableFuture.completedFuture(InterceptionVerdict.allow());
         };
 
-        ToolCallInterceptor baseInterceptor = ToolCallInterceptor.chain(
-                anomalyInterceptor,
-                policyInterceptor,
-                auditInterceptor
-        );
+        ToolCallInterceptor killSwitchInterceptor = (context, request) -> {
+            if (!killSwitchManager.hasActiveQuarantines()) {
+                return CompletableFuture.completedFuture(InterceptionVerdict.allow());
+            }
+            return killSwitchManager.asInterceptor().intercept(context, request);
+        };
+
+        java.util.List<ToolCallInterceptor> interceptorsList = new java.util.ArrayList<>();
+        interceptorsList.add(killSwitchInterceptor);
+        if (velocityThreshold > 0 && velocityThreshold < 100_000) {
+            interceptorsList.add(velocityCircuitBreaker);
+        }
+        interceptorsList.add(anomalyInterceptor);
+        interceptorsList.add(policyInterceptor);
+        interceptorsList.add(auditInterceptor);
+
+        ToolCallInterceptor baseInterceptor = ToolCallInterceptor.chain(interceptorsList.toArray(new ToolCallInterceptor[0]));
 
         ToolCallInterceptor combinedInterceptor = (context, request) -> {
             long start = System.nanoTime();
@@ -157,6 +219,7 @@ public class E2EGatewayFixture implements AutoCloseable {
                     .thenApply(verdict -> {
                         double latency = (System.nanoTime() - start) / 1_000_000.0;
                         if (request.isToolCall() && verdict instanceof InterceptionVerdict.Block) {
+                            gatewayMetrics.recordBlockedViolation();
                             auditLedger.append(AuditRecord.create(
                                     context.identity().agentId(),
                                     request.toolName(),
@@ -203,11 +266,14 @@ public class E2EGatewayFixture implements AutoCloseable {
                 ApprovalManagementHandler.defaultAuthorizer()
         );
 
-        // Inject Phase 1 Zero-Trust pipeline dynamically on newly accepted connections
+        // Inject Zero-Trust pipeline dynamically on newly accepted connections
         this.server.getServerChannel().pipeline().addFirst("e2e-pipeline-injector", new ChannelInboundHandlerAdapter() {
             @Override
             public void channelRead(ChannelHandlerContext ctx, Object msg) {
                 if (msg instanceof SocketChannel ch) {
+                    if (sslContext != null) {
+                        ch.pipeline().addFirst("ssl-handler", sslContext.newHandler(ch.alloc()));
+                    }
                     ch.pipeline().addLast("e2e-channel-activator", new ChannelInboundHandlerAdapter() {
                         @Override
                         public void channelActive(ChannelHandlerContext childCtx) throws Exception {
@@ -219,6 +285,10 @@ public class E2EGatewayFixture implements AutoCloseable {
                             childCtx.pipeline().addBefore("gateway-dispatcher", "audit-verify-handler", auditHandler);
                             childCtx.pipeline().addBefore("gateway-dispatcher", "policy-management-handler", policyHandler);
                             childCtx.pipeline().addBefore("gateway-dispatcher", "approval-management-handler", approvalHandler);
+                            childCtx.pipeline().addBefore("gateway-dispatcher", "emergency-management-handler", emergencyHandler);
+                            if (identityResolver != null) {
+                                childCtx.pipeline().addBefore("gateway-dispatcher", "identity-auth-handler", createIdentityAuthHandler());
+                            }
                             McpProxyPipelineConfigurator.configure(childCtx.pipeline(), mcpProxyHandler);
                             childCtx.pipeline().remove(this);
                             super.channelActive(childCtx);
@@ -230,12 +300,68 @@ public class E2EGatewayFixture implements AutoCloseable {
         });
     }
 
+    private ChannelInboundHandlerAdapter createIdentityAuthHandler() {
+        return new ChannelInboundHandlerAdapter() {
+            @Override
+            public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+                if (msg instanceof FullHttpRequest req) {
+                    gatewayMetrics.recordRequest();
+                    String path = req.uri();
+                    int q = path.indexOf('?');
+                    if (q >= 0) path = path.substring(0, q);
+
+                    if ("/mcp/v1/rpc".equals(path) && identityResolver != null) {
+                        dev.aegismcp.gateway.identity.AgentIdentity id = identityResolver.resolve(req, ctx);
+                        if (!id.authenticated()) {
+                            String errorMsg = id.claims().getOrDefault("error", "Missing or invalid agent credentials").toString();
+                            String jsonErr = "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32000,\"message\":\"Authentication Failed: " +
+                                    escapeJson(errorMsg) + "\"}}";
+                            DefaultFullHttpResponse resp = new DefaultFullHttpResponse(
+                                    HttpVersion.HTTP_1_1,
+                                    HttpResponseStatus.UNAUTHORIZED,
+                                    Unpooled.copiedBuffer(jsonErr, StandardCharsets.UTF_8)
+                            );
+                            resp.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");
+                            resp.headers().set(HttpHeaderNames.CONTENT_LENGTH, resp.content().readableBytes());
+                            ctx.writeAndFlush(resp);
+                            req.release();
+                            return;
+                        }
+                        // Register session with killSwitchManager
+                        killSwitchManager.registerSession(id.id(), null, ctx.channel());
+                        if (id.spiffeId() != null) {
+                            killSwitchManager.registerSession(id.spiffeId(), null, ctx.channel());
+                        }
+                    }
+                }
+                super.channelRead(ctx, msg);
+            }
+        };
+    }
+
+    public static E2EGatewayFixture forPhase2(AgentIdentityResolver resolver) throws InterruptedException {
+        return new E2EGatewayFixture(UpstreamClient.mockEcho(), true, DEFAULT_BURST_THRESHOLD, 100_000, resolver, null);
+    }
+
+    public static E2EGatewayFixture forPhase2(AgentIdentityResolver resolver, int velocityThreshold) throws InterruptedException {
+        return new E2EGatewayFixture(UpstreamClient.mockEcho(), true, DEFAULT_BURST_THRESHOLD, velocityThreshold, resolver, null);
+    }
+
+    public static E2EGatewayFixture forMtlsPhase2(AgentIdentityResolver resolver, SslContext sslContext) throws InterruptedException {
+        return new E2EGatewayFixture(UpstreamClient.mockEcho(), true, DEFAULT_BURST_THRESHOLD, 100_000, resolver, sslContext);
+    }
+
+    private static String escapeJson(String s) {
+        if (s == null) return "";
+        return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
+    }
+
     public int getPort() {
         return server.getPort();
     }
 
     public String getBaseUrl() {
-        return "http://127.0.0.1:" + getPort();
+        return (sslContext != null ? "https" : "http") + "://127.0.0.1:" + getPort();
     }
 
     public PolicyCache getPolicyCache() {
@@ -256,6 +382,26 @@ public class E2EGatewayFixture implements AutoCloseable {
 
     public AnomalyCircuitBreaker getCircuitBreaker() {
         return circuitBreaker;
+    }
+
+    public KillSwitchManager getKillSwitchManager() {
+        return killSwitchManager;
+    }
+
+    public GatewayMetrics getGatewayMetrics() {
+        return gatewayMetrics;
+    }
+
+    public InvocationVelocityCircuitBreaker getVelocityCircuitBreaker() {
+        return velocityCircuitBreaker;
+    }
+
+    public AgentIdentityResolver getIdentityResolver() {
+        return identityResolver;
+    }
+
+    public void setIdentityResolver(AgentIdentityResolver identityResolver) {
+        this.identityResolver = identityResolver;
     }
 
     public void setUpstreamClient(UpstreamClient client) {
