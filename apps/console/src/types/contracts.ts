@@ -1,5 +1,5 @@
 /**
- * Specification Anchors: FEAT-008, C-002, C-003, C-004, C-005, C-006, C-007, C-008, C-009, C-010
+ * Specification Anchors: FEAT-008, FEAT-011, FEAT-012, C-002, C-003, C-004, C-005, C-006, C-007, C-008, C-009, C-010, C-011, C-012, C-013
  * Contracts interface definitions for AegisMCP Security Console
  */
 
@@ -102,17 +102,62 @@ export interface AuditVerifyResponse {
   brokenAtBlock: number | null;
 }
 
-export interface AuditRecord {
+export interface AuditRecordItem {
   index: number;
   blockHash: string;
-  prevHash: string;
-  timestamp: string;
+  parentHash: string;
   agentId: string;
   toolName: string;
-  decision: EventVerdict;
-  approver: string | null;
+  decision: EventVerdict | string;
+  redactionCount: number;
   latencyMs: number;
+  timestamp: string;
+  // Extended forensic verification fields
+  prevHash?: string;
+  approver?: string | null;
+  signature?: string;
+}
+
+export type AuditRecord = AuditRecordItem;
+
+export interface AuditRecordsResponse {
+  records: AuditRecordItem[];
+  total: number;
+}
+
+/** C-011: POST /api/v1/compliance/export */
+export interface ComplianceExportRequest {
+  framework: 'EU_AI_ACT' | 'SOC2_TYPE2';
+  format: 'JSON' | 'CSV';
+  agentId?: string;
+  from?: string;
+  to?: string;
+}
+
+export interface ComplianceExportResponse {
+  reportId: string;
+  framework: string;
+  status: 'COMPLETED';
+  generatedAt: string;
+  recordCount: number;
+  violationsCount: number;
+  approvalsCount: number;
+  merkleRoot: string;
   signature: string;
+  content: string;
+}
+
+/** C-012: POST /api/v1/policies/simulate */
+export interface PolicySimulateRequest {
+  agentId: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface PolicySimulateResponse {
+  verdict: 'ALLOWED' | 'BLOCKED' | 'REQUIRE_APPROVAL';
+  ruleMatched: string;
+  violations: string[];
 }
 
 /** C-008: Emergency Kill-Switch Request & Response */
