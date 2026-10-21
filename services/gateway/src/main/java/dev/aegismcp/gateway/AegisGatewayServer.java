@@ -1,5 +1,18 @@
 package dev.aegismcp.gateway;
 
+import dev.aegismcp.gateway.approval.ApprovalManagementHandler;
+import dev.aegismcp.gateway.approval.ApprovalManager;
+import dev.aegismcp.gateway.audit.AuditLedger;
+import dev.aegismcp.gateway.audit.AuditRecordsHandler;
+import dev.aegismcp.gateway.audit.AuditVerificationEngine;
+import dev.aegismcp.gateway.audit.AuditVerificationHandler;
+import dev.aegismcp.gateway.compliance.ComplianceExportHandler;
+import dev.aegismcp.gateway.compliance.ComplianceReportEngine;
+import dev.aegismcp.gateway.killswitch.EmergencyManagementHandler;
+import dev.aegismcp.gateway.killswitch.GatewayMetrics;
+import dev.aegismcp.gateway.killswitch.KillSwitchManager;
+import dev.aegismcp.gateway.policy.PolicyCache;
+import dev.aegismcp.gateway.policy.PolicyManagementHandler;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
@@ -30,7 +43,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Foundational Netty and Loom Virtual Thread gateway server for AegisMCP.
- * Anchors: FEAT-001, NFR-001, NFR-002.
+ * Anchors: FEAT-001, FEAT-011, NFR-001, NFR-002, C-007, C-011, C-013.
  */
 public class AegisGatewayServer {
 
@@ -44,6 +57,20 @@ public class AegisGatewayServer {
     private final int port;
     private final ExecutorService virtualThreadExecutor;
     private final boolean ownsExecutor;
+
+    private final AuditLedger auditLedger;
+    private final PolicyCache policyCache;
+    private final ApprovalManager approvalManager;
+    private final KillSwitchManager killSwitchManager;
+    private final GatewayMetrics gatewayMetrics;
+    private final ComplianceReportEngine complianceReportEngine;
+
+    private final AuditVerificationHandler auditVerificationHandler;
+    private final AuditRecordsHandler auditRecordsHandler;
+    private final ComplianceExportHandler complianceExportHandler;
+    private final PolicyManagementHandler policyManagementHandler;
+    private final ApprovalManagementHandler approvalManagementHandler;
+    private final EmergencyManagementHandler emergencyManagementHandler;
 
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
@@ -64,10 +91,53 @@ public class AegisGatewayServer {
     }
 
     private AegisGatewayServer(String host, int port, ExecutorService virtualThreadExecutor, boolean ownsExecutor) {
+        this(
+                host,
+                port,
+                virtualThreadExecutor,
+                ownsExecutor,
+                new AuditLedger(),
+                new PolicyCache(),
+                new ApprovalManager(),
+                new KillSwitchManager(),
+                new GatewayMetrics(),
+                null
+        );
+    }
+
+    public AegisGatewayServer(
+            String host,
+            int port,
+            ExecutorService virtualThreadExecutor,
+            boolean ownsExecutor,
+            AuditLedger auditLedger,
+            PolicyCache policyCache,
+            ApprovalManager approvalManager,
+            KillSwitchManager killSwitchManager,
+            GatewayMetrics gatewayMetrics,
+            ComplianceReportEngine complianceReportEngine
+    ) {
         this.host = Objects.requireNonNull(host, "host must not be null");
         this.port = port;
         this.virtualThreadExecutor = Objects.requireNonNull(virtualThreadExecutor, "virtualThreadExecutor must not be null");
         this.ownsExecutor = ownsExecutor;
+
+        this.auditLedger = Objects.requireNonNull(auditLedger, "auditLedger must not be null");
+        this.policyCache = Objects.requireNonNull(policyCache, "policyCache must not be null");
+        this.approvalManager = Objects.requireNonNull(approvalManager, "approvalManager must not be null");
+        this.killSwitchManager = Objects.requireNonNull(killSwitchManager, "killSwitchManager must not be null");
+        this.gatewayMetrics = Objects.requireNonNull(gatewayMetrics, "gatewayMetrics must not be null");
+
+        this.complianceReportEngine = complianceReportEngine != null
+                ? complianceReportEngine
+                : new ComplianceReportEngine(this.auditLedger, this.policyCache, this.approvalManager);
+
+        this.auditVerificationHandler = new AuditVerificationHandler(this.auditLedger);
+        this.auditRecordsHandler = new AuditRecordsHandler(this.auditLedger);
+        this.complianceExportHandler = new ComplianceExportHandler(this.complianceReportEngine);
+        this.policyManagementHandler = new PolicyManagementHandler(this.policyCache);
+        this.approvalManagementHandler = new ApprovalManagementHandler(this.approvalManager);
+        this.emergencyManagementHandler = new EmergencyManagementHandler(this.killSwitchManager, this.gatewayMetrics);
     }
 
     /**
@@ -93,6 +163,15 @@ public class AegisGatewayServer {
                     protected void initChannel(SocketChannel ch) {
                         ch.pipeline().addLast("http-codec", new HttpServerCodec());
                         ch.pipeline().addLast("http-aggregator", new HttpObjectAggregator(MAX_CONTENT_LENGTH));
+
+                        // Route handlers registered in pipeline
+                        ch.pipeline().addLast("audit-verification-handler", auditVerificationHandler);
+                        ch.pipeline().addLast("audit-records-handler", auditRecordsHandler);
+                        ch.pipeline().addLast("compliance-export-handler", complianceExportHandler);
+                        ch.pipeline().addLast("policy-management-handler", policyManagementHandler);
+                        ch.pipeline().addLast("approval-management-handler", approvalManagementHandler);
+                        ch.pipeline().addLast("emergency-management-handler", emergencyManagementHandler);
+
                         ch.pipeline().addLast("gateway-dispatcher", new GatewayDispatcherHandler(virtualThreadExecutor));
                     }
                 });
@@ -143,6 +222,22 @@ public class AegisGatewayServer {
             }
         }
 
+        if (auditLedger != null) {
+            try {
+                auditLedger.close();
+            } catch (Exception e) {
+                logger.warn("Error closing audit ledger during server shutdown", e);
+            }
+        }
+
+        if (approvalManager != null) {
+            try {
+                approvalManager.close();
+            } catch (Exception e) {
+                logger.warn("Error closing approval manager during server shutdown", e);
+            }
+        }
+
         running = false;
         logger.info("AegisGatewayServer stopped cleanly.");
     }
@@ -165,6 +260,54 @@ public class AegisGatewayServer {
 
     public ExecutorService getVirtualThreadExecutor() {
         return virtualThreadExecutor;
+    }
+
+    public AuditLedger getAuditLedger() {
+        return auditLedger;
+    }
+
+    public PolicyCache getPolicyCache() {
+        return policyCache;
+    }
+
+    public ApprovalManager getApprovalManager() {
+        return approvalManager;
+    }
+
+    public KillSwitchManager getKillSwitchManager() {
+        return killSwitchManager;
+    }
+
+    public GatewayMetrics getGatewayMetrics() {
+        return gatewayMetrics;
+    }
+
+    public ComplianceReportEngine getComplianceReportEngine() {
+        return complianceReportEngine;
+    }
+
+    public AuditVerificationHandler getAuditVerificationHandler() {
+        return auditVerificationHandler;
+    }
+
+    public AuditRecordsHandler getAuditRecordsHandler() {
+        return auditRecordsHandler;
+    }
+
+    public ComplianceExportHandler getComplianceExportHandler() {
+        return complianceExportHandler;
+    }
+
+    public PolicyManagementHandler getPolicyManagementHandler() {
+        return policyManagementHandler;
+    }
+
+    public ApprovalManagementHandler getApprovalManagementHandler() {
+        return approvalManagementHandler;
+    }
+
+    public EmergencyManagementHandler getEmergencyManagementHandler() {
+        return emergencyManagementHandler;
     }
 
     /**
