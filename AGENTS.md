@@ -44,9 +44,9 @@ Changing a stack choice is a decision: record it in `.decisions/` and update thi
 
 ## Area rules
 
-Area rules live in the nearest `AGENTS.md`. They are rule sets, not agent roles: any coding agent
-working in the area loads them. Start the session in the area, or read its file first when the issue
-names one. List them with `git ls-files '*AGENTS.md'` or `find . -name AGENTS.md`.
+Area rules live in the nearest `AGENTS.md`: any coding agent working in the area loads them. Start the
+session in the area, or read its file when the issue names one. List them with `git ls-files '*AGENTS.md'`
+or `find . -name AGENTS.md`.
 
 ## Work classes
 

@@ -1,8 +1,8 @@
 # services/gateway
 
-This file is a rule set for this area, not an agent role. It is authoritative for work here. Root
-`AGENTS.md` is the coordinator's manual: read it when you plan, route, or run a phase gate — not to
-implement a task.
+This file is authoritative for work in this directory and its subdirectories. Root
+`AGENTS.md` is the coordinator's manual: read it for repository-wide workflow, dispatch,
+and verification gates.
 
 ## Scope
 
