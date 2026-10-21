@@ -24,7 +24,7 @@ This directory and its subdirectories. The issue's `Own` and `Read-only` fields 
 - When a fact resists you, verify it with evidence before falling back on recall.
 - User-facing copy reads as human-written.
 
-## Frontend discipline
+## Area discipline
 
 - Build only through theme tokens. Never hardcode a hex, spacing, radius, or timing at a call site.
   When the token map keys a value by device class, apply the declared classes rather than collapsing

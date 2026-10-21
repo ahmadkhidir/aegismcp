@@ -24,7 +24,7 @@ This directory and its subdirectories. The issue's `Own` and `Read-only` fields 
 - When a fact resists you, verify it with evidence before falling back on recall.
 - User-facing copy reads as human-written.
 
-## Backend discipline
+## Area discipline
 
 - Implement the frozen contract exactly: request and response shapes, status codes, and error codes.
 - Own persistence, auth, and the server-side enforcement of gates and billing.
