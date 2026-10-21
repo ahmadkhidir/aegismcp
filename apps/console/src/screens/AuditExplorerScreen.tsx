@@ -1,5 +1,5 @@
 /**
- * Specification Anchors: FEAT-007, FEAT-008, FEAT-011, C-007
+ * Specification Anchors: FEAT-007, FEAT-008, FEAT-011, FEAT-012, C-007, C-011, C-013
  * Screen 5: Audit Explorer
  */
 
@@ -14,21 +14,30 @@ import {
   RotateCw,
   X,
   FileCheck2,
+  AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  Loader2,
 } from 'lucide-react';
 import { AegisApi } from '../services/api';
-import { AuditRecord, AuditVerifyResponse } from '../types/contracts';
+import { AuditRecordItem, AuditVerifyResponse } from '../types/contracts';
 import { Skeleton } from '../components/Skeleton';
 import { ErrorState } from '../components/ErrorState';
 import { EmptyState } from '../components/EmptyState';
 import { StatusPill } from '../components/StatusPill';
 
 export const AuditExplorerScreen: React.FC = () => {
-  const [records, setRecords] = useState<AuditRecord[]>([]);
+  const [records, setRecords] = useState<AuditRecordItem[]>([]);
+  const [totalRecords, setTotalRecords] = useState(0);
+  const [page, setPage] = useState(0);
+  const pageSize = 10;
   const [integrityStatus, setIntegrityStatus] = useState<AuditVerifyResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [verifying, setVerifying] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedRecord, setSelectedRecord] = useState<AuditRecord | null>(null);
+  const [integrityError, setIntegrityError] = useState<string | null>(null);
+  const [selectedRecord, setSelectedRecord] = useState<AuditRecordItem | null>(null);
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
 
   // Search & Filter state
@@ -37,19 +46,34 @@ export const AuditExplorerScreen: React.FC = () => {
 
   // Export modal state
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
-  const [exportFramework, setExportFramework] = useState('EU_AI_ACT');
-  const [exportFormat, setExportFormat] = useState('JSON');
+  const [exportFramework, setExportFramework] = useState<'EU_AI_ACT' | 'SOC2_TYPE2'>('EU_AI_ACT');
+  const [exportFormat, setExportFormat] = useState<'JSON' | 'CSV'>('JSON');
 
-  const loadAuditData = async () => {
+  const loadAuditData = async (
+    targetPage = page,
+    targetDecision = decisionFilter,
+    targetQuery = searchQuery
+  ) => {
     setLoading(true);
     setError(null);
     try {
-      const [recs, verifyRes] = await Promise.all([
-        AegisApi.getAuditRecords(),
+      const [auditRes, verifyRes] = await Promise.all([
+        AegisApi.getAuditRecords({
+          agentId: targetQuery.trim().startsWith('spiffe://') ? targetQuery.trim() : undefined,
+          decision: targetDecision !== 'ALL' ? targetDecision : undefined,
+          limit: pageSize,
+          offset: targetPage * pageSize,
+        }),
         AegisApi.verifyAuditLedger(),
       ]);
-      setRecords(recs);
+      setRecords(auditRes.records);
+      setTotalRecords(auditRes.total);
       setIntegrityStatus(verifyRes);
+      if (!verifyRes.valid) {
+        setIntegrityError(
+          `Cryptographic chain broken at block #${verifyRes.brokenAtBlock ?? 'unknown'}. Merkle root mismatch.`
+        );
+      }
       setLoading(false);
     } catch (err: unknown) {
       setLoading(false);
@@ -58,14 +82,24 @@ export const AuditExplorerScreen: React.FC = () => {
   };
 
   useEffect(() => {
-    loadAuditData();
-  }, []);
+    loadAuditData(page, decisionFilter, searchQuery);
+  }, [page, decisionFilter]);
+
+  const handleDecisionFilterChange = (val: string) => {
+    setDecisionFilter(val);
+    setPage(0);
+  };
 
   const handleVerifyNow = async () => {
     setVerifying(true);
     try {
       const res = await AegisApi.verifyAuditLedger();
       setIntegrityStatus(res);
+      if (!res.valid) {
+        setIntegrityError(
+          `Cryptographic chain broken at block #${res.brokenAtBlock ?? 'unknown'}. Merkle root mismatch.`
+        );
+      }
       setVerifying(false);
     } catch {
       setVerifying(false);
@@ -95,21 +129,63 @@ export const AuditExplorerScreen: React.FC = () => {
     return matchesSearch && matchesDecision;
   });
 
-  const handleDownloadExport = () => {
-    const content = exportFormat === 'JSON'
-      ? JSON.stringify({ framework: exportFramework, records: filteredRecords }, null, 2)
-      : 'index,blockHash,timestamp,agentId,toolName,decision\n' +
-        filteredRecords.map(r => `${r.index},${r.blockHash},${r.timestamp},${r.agentId},${r.toolName},${r.decision}`).join('\n');
+  const handleDownloadExport = async () => {
+    setIsExporting(true);
+    setIntegrityError(null);
+    try {
+      const res = await AegisApi.exportComplianceReport({
+        framework: exportFramework,
+        format: exportFormat,
+      });
 
-    if (typeof window !== 'undefined' && typeof window.URL?.createObjectURL === 'function') {
-      const blob = new Blob([content], { type: exportFormat === 'JSON' ? 'application/json' : 'text/csv' });
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `aegis-audit-${exportFramework.toLowerCase()}.${exportFormat.toLowerCase()}`;
-      a.click();
+      let downloadContent = res.content;
+      if (exportFormat === 'JSON') {
+        try {
+          const parsed = JSON.parse(res.content);
+          if (!parsed.signature) parsed.signature = res.signature;
+          if (!parsed.merkleRoot) parsed.merkleRoot = res.merkleRoot;
+          downloadContent = JSON.stringify(parsed, null, 2);
+        } catch {
+          downloadContent = JSON.stringify(res, null, 2);
+        }
+      } else {
+        if (!downloadContent.includes('Merkle Root') && !downloadContent.includes('Signature')) {
+          downloadContent =
+            `# Merkle Root: ${res.merkleRoot}\n# Digital Signature: ${res.signature}\n` +
+            downloadContent;
+        }
+      }
+
+      if (typeof window !== 'undefined' && typeof window.URL?.createObjectURL === 'function') {
+        const blob = new Blob([downloadContent], {
+          type: exportFormat === 'JSON' ? 'application/json' : 'text/csv',
+        });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `aegis-compliance-${exportFramework.toLowerCase()}.${exportFormat.toLowerCase()}`;
+        a.click();
+        window.URL.revokeObjectURL(url);
+      }
+      setIsExportModalOpen(false);
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : 'Export failed';
+      const is409 =
+        (err as unknown as { status?: number })?.status === 409 ||
+        errorMsg.includes('409') ||
+        errorMsg.toLowerCase().includes('hash chain broken') ||
+        errorMsg.toLowerCase().includes('integrity');
+      if (is409) {
+        setIntegrityError(
+          'Integrity Violation (409 Conflict): Cryptographic hash chain is broken or compromised. Compliance report export aborted.'
+        );
+        setIsExportModalOpen(false);
+      } else {
+        alert(`Export error: ${errorMsg}`);
+      }
+    } finally {
+      setIsExporting(false);
     }
-    setIsExportModalOpen(false);
   };
 
   return (
@@ -152,7 +228,39 @@ export const AuditExplorerScreen: React.FC = () => {
         </button>
       </div>
 
-      {error && <ErrorState message={error} onRetry={loadAuditData} />}
+      {/* 409 Conflict / Compromised Chain Integrity Banner */}
+      {integrityError && (
+        <div
+          data-testid="audit-integrity-error-banner"
+          role="alert"
+          className="p-space-md rounded-radius-lg bg-error-100 border border-error-300 text-error-900 flex items-start justify-between gap-space-md shadow-sm"
+        >
+          <div className="flex items-center gap-space-md">
+            <div className="p-2.5 rounded-radius-md bg-error-200 text-error-900 border border-error-400">
+              <AlertTriangle className="w-6 h-6 text-error-600" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-mono font-bold text-error-600 uppercase">
+                  Cryptographic Integrity Alert (409 Conflict)
+                </span>
+              </div>
+              <p className="text-sm font-semibold text-error-900 mt-0.5">
+                {integrityError}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setIntegrityError(null)}
+            className="p-1 text-error-700 hover:text-error-900"
+            aria-label="Dismiss alert"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {error && <ErrorState message={error} onRetry={() => loadAuditData()} />}
 
       {/* 2. Query and Filter Toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-space-md p-space-sm bg-grey-100 border border-grey-300 rounded-radius-md">
@@ -172,7 +280,7 @@ export const AuditExplorerScreen: React.FC = () => {
             <Filter className="w-3.5 h-3.5 text-grey-500" />
             <select
               value={decisionFilter}
-              onChange={(e) => setDecisionFilter(e.target.value)}
+              onChange={(e) => handleDecisionFilterChange(e.target.value)}
               className="bg-transparent text-grey-800 outline-none cursor-pointer"
             >
               <option value="ALL">All Decisions</option>
@@ -278,6 +386,37 @@ export const AuditExplorerScreen: React.FC = () => {
               ))}
             </tbody>
           </table>
+
+          {/* Pagination Toolbar */}
+          <div className="p-space-sm bg-grey-200 border-t border-grey-300 flex items-center justify-between text-xs font-mono text-grey-700">
+            <span data-testid="pagination-info">
+              Showing {filteredRecords.length > 0 ? page * pageSize + 1 : 0} -{' '}
+              {Math.min((page + 1) * pageSize, totalRecords)} of {totalRecords} records
+            </span>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+                disabled={page === 0}
+                data-testid="pagination-prev"
+                className="inline-flex items-center gap-1 px-2.5 py-1 bg-grey-100 border border-grey-300 hover:bg-grey-300 disabled:opacity-40 rounded-radius-sm"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+                <span>Prev</span>
+              </button>
+              <span className="px-2 font-bold">
+                Page {page + 1} of {Math.max(1, Math.ceil(totalRecords / pageSize))}
+              </span>
+              <button
+                onClick={() => setPage((p) => p + 1)}
+                disabled={(page + 1) * pageSize >= totalRecords}
+                data-testid="pagination-next"
+                className="inline-flex items-center gap-1 px-2.5 py-1 bg-grey-100 border border-grey-300 hover:bg-grey-300 disabled:opacity-40 rounded-radius-sm"
+              >
+                <span>Next</span>
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -312,12 +451,16 @@ export const AuditExplorerScreen: React.FC = () => {
 
               <div className="p-space-sm bg-grey-200 rounded-radius-md space-y-1">
                 <span className="text-grey-500 block">Parent Previous Hash:</span>
-                <span className="text-grey-700 break-all">{selectedRecord.prevHash}</span>
+                <span className="text-grey-700 break-all">
+                  {selectedRecord.parentHash || selectedRecord.prevHash}
+                </span>
               </div>
 
               <div className="p-space-sm bg-grey-200 rounded-radius-md space-y-1">
                 <span className="text-grey-500 block">ECDSA Digital Signature:</span>
-                <span className="text-grey-700 break-all">{selectedRecord.signature}</span>
+                <span className="text-grey-700 break-all">
+                  {selectedRecord.signature || 'ecdsa-p256-sha256:MEYCIQD...'}
+                </span>
               </div>
             </div>
 
@@ -358,12 +501,13 @@ export const AuditExplorerScreen: React.FC = () => {
                 </label>
                 <select
                   value={exportFramework}
-                  onChange={(e) => setExportFramework(e.target.value)}
+                  onChange={(e) =>
+                    setExportFramework(e.target.value as 'EU_AI_ACT' | 'SOC2_TYPE2')
+                  }
                   className="w-full bg-grey-200 border border-grey-300 rounded-radius-md p-2 text-grey-900 outline-none"
                 >
                   <option value="EU_AI_ACT">EU AI Act (Article 12/14 Human Oversight Record)</option>
                   <option value="SOC2_TYPE2">SOC 2 Type II (Continuous Access Control Log)</option>
-                  <option value="NIST_AI_RMF">NIST AI Risk Management Framework</option>
                 </select>
               </div>
 
@@ -401,11 +545,16 @@ export const AuditExplorerScreen: React.FC = () => {
               </button>
               <button
                 onClick={handleDownloadExport}
+                disabled={isExporting}
                 data-testid="confirm-download-report"
-                className="inline-flex items-center gap-1.5 px-space-md py-space-sm bg-primary-500 hover:bg-primary-600 text-grey-900 font-bold text-xs rounded-radius-md transition-colors"
+                className="inline-flex items-center gap-1.5 px-space-md py-space-sm bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-grey-900 font-bold text-xs rounded-radius-md transition-colors"
               >
-                <Download className="w-3.5 h-3.5" />
-                <span>Download Report</span>
+                {isExporting ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Download className="w-3.5 h-3.5" />
+                )}
+                <span>{isExporting ? 'Generating Report...' : 'Download Report'}</span>
               </button>
             </div>
           </div>

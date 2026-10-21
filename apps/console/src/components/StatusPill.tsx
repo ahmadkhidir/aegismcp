@@ -37,14 +37,14 @@ export const StatusPill: React.FC<StatusPillProps> = ({ verdict, size = 'sm' }) 
     );
   }
 
-  if (norm === 'PENDING_APPROVAL' || norm === 'PENDING' || norm === 'PENDING_HITL') {
+  if (norm === 'PENDING_APPROVAL' || norm === 'PENDING' || norm === 'PENDING_HITL' || norm === 'REQUIRE_APPROVAL') {
     return (
       <span
         data-testid="status-pill-pending"
         className={`inline-flex items-center gap-1.5 font-mono font-medium rounded-radius-full bg-warning-100 text-warning-900 border border-warning-300 ${padding} ${textSize}`}
       >
         <Clock size={iconSize} className="text-warning-500" />
-        <span>PENDING HITL</span>
+        <span>{norm === 'REQUIRE_APPROVAL' ? 'REQUIRE_APPROVAL' : 'PENDING HITL'}</span>
       </span>
     );
   }

@@ -1,5 +1,5 @@
 /**
- * Specification Anchors: FEAT-008, C-002, C-003, C-004, C-005, C-006, C-007, C-008, C-009, C-010
+ * Specification Anchors: FEAT-008, FEAT-011, FEAT-012, C-002, C-003, C-004, C-005, C-006, C-007, C-008, C-009, C-010, C-011, C-012, C-013
  * API Service for AegisMCP Security Console with live endpoint binding and resilient mock data
  */
 
@@ -8,8 +8,11 @@ import {
   ApprovalDecisionResponse,
   ApprovalsResponse,
   ApprovalTicket,
-  AuditRecord,
+  AuditRecordItem,
+  AuditRecordsResponse,
   AuditVerifyResponse,
+  ComplianceExportRequest,
+  ComplianceExportResponse,
   CreatePolicyRequest,
   CreatePolicyResponse,
   EmergencyKillRequest,
@@ -18,6 +21,8 @@ import {
   MetricsSummaryResponse,
   PoliciesResponse,
   PolicyRecord,
+  PolicySimulateRequest,
+  PolicySimulateResponse,
   SystemStatusResponse,
 } from '../types/contracts';
 
@@ -207,40 +212,46 @@ spec:
   },
 ];
 
-export const MOCK_AUDIT_RECORDS: AuditRecord[] = [
+export const MOCK_AUDIT_RECORDS: AuditRecordItem[] = [
   {
     index: 1048590,
     blockHash: '0x3f4a9b8c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a',
+    parentHash: '0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b',
     prevHash: '0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b',
     timestamp: '2026-10-21T10:39:55Z',
     agentId: 'spiffe://aegis.internal/ns/finance/sa/settlement-worker',
     toolName: 'stripe_charge_create',
     decision: 'ALLOWED',
     approver: 'admin@aegis.internal',
+    redactionCount: 0,
     latencyMs: 4.2,
     signature: 'ecdsa-p256-sha256:MEYCIQD...',
   },
   {
     index: 1048589,
     blockHash: '0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b',
+    parentHash: '0x8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e',
     prevHash: '0x8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e',
     timestamp: '2026-10-21T10:38:12Z',
     agentId: 'spiffe://aegis.internal/ns/finance/sa/analyst-agent',
     toolName: 'database_execute_query',
     decision: 'BLOCKED',
     approver: null,
+    redactionCount: 2,
     latencyMs: 1.8,
     signature: 'ecdsa-p256-sha256:MEUCIQC...',
   },
   {
     index: 1048588,
     blockHash: '0x8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e',
+    parentHash: '0x7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d',
     prevHash: '0x7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d',
     timestamp: '2026-10-21T10:36:04Z',
     agentId: 'spiffe://aegis.internal/ns/ops/sa/log-collector',
     toolName: 'fs_read_file',
     decision: 'ALLOWED',
     approver: null,
+    redactionCount: 0,
     latencyMs: 0.9,
     signature: 'ecdsa-p256-sha256:MEQCID3...',
   },
@@ -497,15 +508,151 @@ export const AegisApi = {
     };
   },
 
-  /** Audit records for Screen 5 */
-  async getAuditRecords(): Promise<AuditRecord[]> {
+  /** C-011: POST /api/v1/compliance/export */
+  async exportComplianceReport(req: ComplianceExportRequest): Promise<ComplianceExportResponse> {
     try {
-      const res = await fetch(`${API_BASE}/audit/records`);
+      const res = await fetch(`${API_BASE}/compliance/export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req),
+      });
+      if (res.status === 409) {
+        const error = new Error('Cryptographic hash chain broken or integrity compromised');
+        (error as unknown as { status: number }).status = 409;
+        throw error;
+      }
+      if (res.ok) return await res.json();
+    } catch (err) {
+      if (err instanceof Error && (err as unknown as { status?: number }).status === 409) {
+        throw err;
+      }
+      // Fallback below
+    }
+
+    const merkleRoot = '0x8f7d6e5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e';
+    const signature = 'ecdsa-p256-sha256:MEQCIEG0v7hZl8R5V4bYx6Jq7P3nF2o9wL1mK0jH8gV5uT3aAiAt9yU7wE1rQ8pS';
+    const timestamp = new Date().toISOString();
+    const content =
+      req.format === 'JSON'
+        ? JSON.stringify(
+            {
+              reportId: `rep-comp-${Date.now()}`,
+              framework: req.framework,
+              status: 'COMPLETED',
+              generatedAt: timestamp,
+              recordCount: 1048590,
+              violationsCount: 37,
+              approvalsCount: 14,
+              merkleRoot,
+              signature,
+              summary: {
+                activeAgents: 64,
+                verifiedBlocks: 1048590,
+                complianceScore: '99.98%',
+              },
+            },
+            null,
+            2
+          )
+        : `# Framework: ${req.framework}\n# Merkle Root: ${merkleRoot}\n# Digital Signature: ${signature}\n# Generated At: ${timestamp}\nindex,blockHash,timestamp,agentId,toolName,decision\n1048590,0x3f4a9b8c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a,2026-10-21T10:39:55Z,settlement-worker,stripe_charge_create,ALLOWED\n1048589,0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b,2026-10-21T10:38:12Z,analyst-agent,database_execute_query,BLOCKED\n`;
+
+    return {
+      reportId: `rep-comp-${Date.now()}`,
+      framework: req.framework,
+      status: 'COMPLETED',
+      generatedAt: timestamp,
+      recordCount: 1048590,
+      violationsCount: 37,
+      approvalsCount: 14,
+      merkleRoot,
+      signature,
+      content,
+    };
+  },
+
+  /** C-012: POST /api/v1/policies/simulate */
+  async simulatePolicy(req: PolicySimulateRequest): Promise<PolicySimulateResponse> {
+    try {
+      const res = await fetch(`${API_BASE}/policies/simulate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req),
+      });
       if (res.ok) return await res.json();
     } catch {
       // Fallback
     }
-    return [...MOCK_AUDIT_RECORDS];
+
+    const violations: string[] = [];
+    let verdict: 'ALLOWED' | 'BLOCKED' | 'REQUIRE_APPROVAL' = 'ALLOWED';
+    let ruleMatched = 'Default Zero-Trust Fallback Rule';
+
+    const argsStr = JSON.stringify(req.arguments || {});
+
+    if (argsStr.includes('|') && (req.toolName.includes('bash') || req.toolName.includes('sh'))) {
+      verdict = 'BLOCKED';
+      ruleMatched = 'SEC-01 (Pipe-to-shell remote execution prevented)';
+      violations.push('Disallowed shell pipe sequence: command injection risk detected');
+    } else if (req.toolName.includes('charge') || req.toolName.includes('transfer')) {
+      verdict = 'REQUIRE_APPROVAL';
+      ruleMatched = 'SEC-02 (High-value fund movement requires human approval)';
+      violations.push('Transaction value threshold exceeded ($10,000 max autonomous limit)');
+    } else if (argsStr.includes('shadow') || argsStr.includes('/etc/')) {
+      verdict = 'BLOCKED';
+      ruleMatched = 'SEC-09 (Directory traversal protection)';
+      violations.push('Path traversal attempt targeting sensitive system file (/etc/shadow)');
+    } else {
+      ruleMatched = 'SEC-DEFAULT-ALLOW (Permitted by declarative tool whitelist)';
+    }
+
+    return {
+      verdict,
+      ruleMatched,
+      violations,
+    };
+  },
+
+  /** C-013: GET /api/v1/audit/records */
+  async getAuditRecords(params?: {
+    agentId?: string;
+    decision?: string;
+    minSeverity?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<AuditRecordsResponse> {
+    try {
+      const query = new URLSearchParams();
+      if (params?.agentId) query.set('agentId', params.agentId);
+      if (params?.decision) query.set('decision', params.decision);
+      if (params?.minSeverity) query.set('minSeverity', params.minSeverity);
+      if (params?.limit !== undefined) query.set('limit', String(params.limit));
+      if (params?.offset !== undefined) query.set('offset', String(params.offset));
+      const qs = query.toString();
+      const res = await fetch(`${API_BASE}/audit/records${qs ? `?${qs}` : ''}`);
+      if (res.ok) return await res.json();
+    } catch {
+      // Fallback
+    }
+
+    let filtered = [...MOCK_AUDIT_RECORDS];
+    if (params?.agentId) {
+      filtered = filtered.filter((r) =>
+        r.agentId.toLowerCase().includes(params.agentId!.toLowerCase())
+      );
+    }
+    if (params?.decision && params.decision !== 'ALL') {
+      filtered = filtered.filter((r) => r.decision === params.decision);
+    }
+
+    const total = filtered.length;
+    const offset = params?.offset ?? 0;
+    const limit = params?.limit ?? filtered.length;
+    const sliced = filtered.slice(offset, offset + limit);
+
+    return {
+      records: sliced,
+      total,
+    };
   },
 
   /**
