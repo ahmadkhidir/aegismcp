@@ -1,18 +1,29 @@
 import React from 'react';
-import { Shield, ChevronDown, User, Server } from 'lucide-react';
+import { Shield, ChevronDown, User, Server, Menu } from 'lucide-react';
 import { ThreatLevel } from '../types/contracts';
 
 interface NavbarProps {
   threatLevel: ThreatLevel;
   onOpenKillSwitch: () => void;
+  onToggleMobileMenu?: () => void;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ threatLevel, onOpenKillSwitch }) => {
+export const Navbar: React.FC<NavbarProps> = ({ threatLevel, onOpenKillSwitch, onToggleMobileMenu }) => {
   return (
-    <header className="h-14 border-b border-grey-300 bg-grey-100 px-space-lg flex items-center justify-between sticky top-0 z-40">
-      {/* Brand logo & wordmark */}
-      <div className="flex items-center gap-3">
-        <div className="w-8 h-8 flex items-center justify-center rounded-radius-md bg-grey-50 border border-grey-300 shadow-sm">
+    <header className="h-14 border-b border-grey-300 bg-grey-100 px-space-md sm:px-space-lg flex items-center justify-between sticky top-0 z-40">
+      {/* Brand logo & mobile menu toggle */}
+      <div className="flex items-center gap-2 sm:gap-3">
+        {onToggleMobileMenu && (
+          <button
+            onClick={onToggleMobileMenu}
+            data-testid="nav-mobile-toggle"
+            className="lg:hidden p-1.5 rounded-radius-md text-grey-600 hover:text-grey-900 hover:bg-grey-200 transition-colors"
+            aria-label="Toggle navigation menu"
+          >
+            <Menu className="w-5 h-5" />
+          </button>
+        )}
+        <div className="w-8 h-8 flex items-center justify-center rounded-radius-md bg-grey-50 border border-grey-300 shadow-sm flex-shrink-0">
           <svg className="w-5 h-5 text-primary-500" viewBox="0 0 32 32" fill="none">
             <path d="M16 2L28 9V23L16 30L4 23V9L16 2Z" stroke="currentColor" strokeWidth="2" fill="#0B0F19"/>
             <path d="M16 7L23 11V21L16 25L9 21V11L16 7Z" stroke="#93C5FD" strokeWidth="1.5" fill="#1E293B"/>

@@ -109,7 +109,7 @@ Errors:
 - 401 Unauthorized: Missing authentication
 
 ### C-011: POST /api/v1/compliance/export
-Status: Frozen
+Status: Implemented
 Auth: Compliance Officer or Security Administrator via Bearer Token (`auditor` or `admin` role)
 Request: `{"framework": "EU_AI_ACT"|"SOC2_TYPE2", "format": "JSON"|"CSV", "agentId": string (optional), "from": string (optional, ISO-8601), "to": string (optional, ISO-8601)}`
 Response 200: `{"reportId": string, "framework": string, "status": "COMPLETED", "generatedAt": string, "recordCount": number, "violationsCount": number, "approvalsCount": number, "merkleRoot": string, "signature": string, "content": string}`
@@ -120,7 +120,7 @@ Errors:
 - 409 Conflict: Cryptographic hash chain broken or integrity compromised
 
 ### C-012: POST /api/v1/policies/simulate
-Status: Frozen
+Status: Implemented
 Auth: Security Administrator or Operator via Bearer Token
 Request: `{"agentId": string, "toolName": string, "arguments": object}`
 Response 200: `{"verdict": "ALLOWED"|"BLOCKED"|"REQUIRE_APPROVAL", "ruleMatched": string, "violations": string[]}`
@@ -129,7 +129,7 @@ Errors:
 - 401 Unauthorized: Missing authentication
 
 ### C-013: GET /api/v1/audit/records
-Status: Frozen
+Status: Implemented
 Auth: Auditor or Security Administrator via Bearer Token (`auditor` or `admin` role)
 Request: HTTP GET query params `?agentId=string&minSeverity=string&decision=string&limit=number&offset=number`
 Response 200: `{"records": [{"index": number, "blockHash": string, "parentHash": string, "agentId": string, "toolName": string, "decision": string, "redactionCount": number, "latencyMs": number, "timestamp": string}], "total": number}`

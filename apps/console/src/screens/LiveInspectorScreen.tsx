@@ -192,9 +192,9 @@ export const LiveInspectorScreen: React.FC = () => {
       </div>
 
       {/* 3. Master-Detail Split Workspace */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left Table Panel (60%) */}
-        <div className="flex-1 overflow-y-auto border-r border-grey-300 bg-grey-50">
+      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden relative">
+        {/* Left Table Panel */}
+        <div className={`flex-1 overflow-y-auto border-r border-grey-300 bg-grey-50 ${selectedEvent ? 'hidden lg:block' : 'block'}`}>
           {filteredEvents.length === 0 ? (
             <div className="p-space-lg">
               {events.length === 0 ? (
@@ -217,72 +217,83 @@ export const LiveInspectorScreen: React.FC = () => {
               )}
             </div>
           ) : (
-            <table className="w-full text-left text-xs font-mono">
-              <thead className="bg-grey-100 border-b border-grey-300 text-grey-500 sticky top-0 z-10">
-                <tr>
-                  <th className="py-2.5 px-space-md font-medium">Time (UTC)</th>
-                  <th className="py-2.5 px-space-md font-medium">Status</th>
-                  <th className="py-2.5 px-space-md font-medium">Agent Workload</th>
-                  <th className="py-2.5 px-space-md font-medium">Target Tool</th>
-                  <th className="py-2.5 px-space-md font-medium">Latency</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-grey-300/40">
-                {filteredEvents.map((evt) => {
-                  const isSelected = selectedEvent?.eventId === evt.eventId;
-                  return (
-                    <tr
-                      key={evt.eventId}
-                      data-testid={`event-row-${evt.eventId}`}
-                      onClick={() => setSelectedEvent(evt)}
-                      className={`cursor-pointer transition-colors ${
-                        isSelected
-                          ? 'bg-primary-500/10 border-l-2 border-primary-500'
-                          : 'hover:bg-grey-100/60'
-                      }`}
-                    >
-                      <td className="py-2 px-space-md text-grey-500 whitespace-nowrap">
-                        {new Date(evt.timestamp).toLocaleTimeString()}
-                      </td>
-                      <td className="py-2 px-space-md whitespace-nowrap">
-                        <StatusPill verdict={evt.verdict} />
-                      </td>
-                      <td
-                        className="py-2 px-space-md text-grey-800 max-w-[140px] truncate"
-                        title={evt.agentId}
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[500px] text-left text-xs font-mono">
+                <thead className="bg-grey-100 border-b border-grey-300 text-grey-500 sticky top-0 z-10">
+                  <tr>
+                    <th className="py-2.5 px-space-md font-medium">Time (UTC)</th>
+                    <th className="py-2.5 px-space-md font-medium">Status</th>
+                    <th className="py-2.5 px-space-md font-medium">Agent Workload</th>
+                    <th className="py-2.5 px-space-md font-medium">Target Tool</th>
+                    <th className="py-2.5 px-space-md font-medium">Latency</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-grey-300/40">
+                  {filteredEvents.map((evt) => {
+                    const isSelected = selectedEvent?.eventId === evt.eventId;
+                    return (
+                      <tr
+                        key={evt.eventId}
+                        data-testid={`event-row-${evt.eventId}`}
+                        onClick={() => setSelectedEvent(evt)}
+                        className={`cursor-pointer transition-colors ${
+                          isSelected
+                            ? 'bg-primary-500/10 border-l-2 border-primary-500'
+                            : 'hover:bg-grey-100/60'
+                        }`}
                       >
-                        {evt.agentId.split('/').pop()}
-                      </td>
-                      <td className="py-2 px-space-md font-semibold text-primary-700">
-                        {evt.toolName}
-                      </td>
-                      <td className="py-2 px-space-md text-grey-500 font-mono">
-                        {evt.latencyMs}ms
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                        <td className="py-2 px-space-md text-grey-500 whitespace-nowrap">
+                          {new Date(evt.timestamp).toLocaleTimeString()}
+                        </td>
+                        <td className="py-2 px-space-md whitespace-nowrap">
+                          <StatusPill verdict={evt.verdict} />
+                        </td>
+                        <td
+                          className="py-2 px-space-md text-grey-800 max-w-[140px] truncate"
+                          title={evt.agentId}
+                        >
+                          {evt.agentId.split('/').pop()}
+                        </td>
+                        <td className="py-2 px-space-md font-semibold text-primary-700">
+                          {evt.toolName}
+                        </td>
+                        <td className="py-2 px-space-md text-grey-500 font-mono">
+                          {evt.latencyMs}ms
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
           <div ref={tableBottomRef} />
         </div>
 
-        {/* Right Inspection Drawer Panel (40%) */}
-        <div className="w-full sm:w-[480px] lg:w-[540px] border-l border-grey-300 bg-grey-100 flex flex-col overflow-y-auto">
+        {/* Right Inspection Drawer Panel */}
+        <div className={`w-full lg:w-[480px] xl:w-[540px] border-t lg:border-t-0 lg:border-l border-grey-300 bg-grey-100 flex flex-col overflow-y-auto ${selectedEvent ? 'block' : 'hidden lg:flex'}`}>
           {selectedEvent ? (
             <div className="p-space-md space-y-space-md">
               <div className="flex items-center justify-between pb-space-sm border-b border-grey-300">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-xs font-bold text-grey-900">
-                      {selectedEvent.eventId}
-                    </span>
-                    <StatusPill verdict={selectedEvent.verdict} />
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setSelectedEvent(null)}
+                    className="lg:hidden p-1 text-grey-600 hover:text-grey-900 rounded-radius-sm"
+                    aria-label="Back to event list"
+                  >
+                    ←
+                  </button>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-xs font-bold text-grey-900">
+                        {selectedEvent.eventId}
+                      </span>
+                      <StatusPill verdict={selectedEvent.verdict} />
+                    </div>
+                    <p className="text-[11px] font-mono text-grey-500 mt-0.5">
+                      {new Date(selectedEvent.timestamp).toISOString()}
+                    </p>
                   </div>
-                  <p className="text-[11px] font-mono text-grey-500 mt-0.5">
-                    {new Date(selectedEvent.timestamp).toISOString()}
-                  </p>
                 </div>
                 <button
                   onClick={() => setSelectedEvent(null)}

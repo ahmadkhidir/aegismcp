@@ -179,9 +179,9 @@ export const PolicyManagerScreen: React.FC = () => {
       </div>
 
       {/* Main split workspace */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden">
         {/* Left: Policy List Sidebar (25%) */}
-        <div className="w-72 border-r border-grey-300 bg-grey-100 p-space-md flex flex-col justify-between overflow-y-auto">
+        <div className="w-full lg:w-64 xl:w-72 border-b lg:border-b-0 lg:border-r border-grey-300 bg-grey-100 p-space-md flex flex-col justify-between flex-shrink-0 max-h-60 lg:max-h-none overflow-y-auto">
           <div className="space-y-space-sm">
             <div className="flex items-center justify-between text-xs font-semibold uppercase text-grey-500 px-1">
               <span>Policy Files</span>
@@ -222,13 +222,13 @@ export const PolicyManagerScreen: React.FC = () => {
             )}
           </div>
 
-          <div className="p-space-sm bg-grey-200 rounded-radius-md text-[11px] text-grey-500 font-mono">
+          <div className="p-space-sm bg-grey-200 rounded-radius-md text-[11px] text-grey-500 font-mono mt-2 lg:mt-0">
             GitOps Mode: Manual deploy enabled.
           </div>
         </div>
 
         {/* Center: YAML Code Editor (50%) */}
-        <div className="flex-1 flex flex-col border-r border-grey-300 bg-grey-50 overflow-hidden">
+        <div className="flex-1 flex flex-col border-b lg:border-b-0 lg:border-r border-grey-300 bg-grey-50 min-h-[300px] lg:min-h-0 overflow-hidden">
           <div className="px-space-md py-space-xs bg-grey-100 border-b border-grey-300 flex items-center justify-between text-xs text-grey-500 font-mono">
             <span>policy.yaml (Declarative AST)</span>
             <span>Lines: {editorYaml.split('\n').length}</span>
@@ -238,7 +238,7 @@ export const PolicyManagerScreen: React.FC = () => {
             data-testid="policy-yaml-editor"
             value={editorYaml}
             onChange={(e) => handleEditorChange(e.target.value)}
-            className="flex-1 w-full p-space-md bg-grey-50 text-grey-800 font-mono text-xs leading-relaxed outline-none resize-none selection:bg-primary-300"
+            className="flex-1 w-full min-h-[220px] lg:min-h-0 p-space-md bg-grey-50 text-grey-800 font-mono text-xs leading-relaxed outline-none resize-none selection:bg-primary-300"
             spellCheck={false}
           />
 
@@ -262,7 +262,7 @@ export const PolicyManagerScreen: React.FC = () => {
         </div>
 
         {/* Right: Policy Simulator & Impact Analyzer (25%) */}
-        <div className="w-80 lg:w-96 bg-grey-100 p-space-md flex flex-col justify-between overflow-y-auto">
+        <div className="w-full lg:w-80 xl:w-96 bg-grey-100 p-space-md flex flex-col justify-between flex-shrink-0 overflow-y-auto">
           <div className="space-y-space-md">
             <div>
               <h3 className="font-bold text-sm text-grey-900 flex items-center gap-1.5">

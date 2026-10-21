@@ -272,7 +272,7 @@ export const AuditExplorerScreen: React.FC = () => {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search by agent, tool, or SHA-256 hash..."
-              className="pl-8 pr-space-md py-1.5 bg-grey-200 border border-grey-300 rounded-radius-md text-xs text-grey-900 placeholder:text-grey-500 focus:border-primary-500 outline-none w-72 font-mono"
+              className="pl-8 pr-space-md py-1.5 bg-grey-200 border border-grey-300 rounded-radius-md text-xs text-grey-900 placeholder:text-grey-500 focus:border-primary-500 outline-none w-full sm:w-72 font-mono"
             />
           </div>
 
@@ -320,7 +320,7 @@ export const AuditExplorerScreen: React.FC = () => {
         />
       ) : (
         <div className="bg-grey-100 border border-grey-300 rounded-radius-md overflow-x-auto shadow-sm">
-          <table className="w-full text-left text-xs font-mono">
+          <table className="w-full min-w-[700px] text-left text-xs font-mono">
             <thead className="bg-grey-200 border-b border-grey-300 text-grey-500">
               <tr>
                 <th className="py-2.5 px-space-md font-medium">Block #</th>

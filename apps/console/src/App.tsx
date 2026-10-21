@@ -35,10 +35,12 @@ export const App: React.FC = () => {
   const [threatLevel, setThreatLevel] = useState<ThreatLevel>('NORMAL');
   const [isKillSwitchOpen, setIsKillSwitchOpen] = useState(false);
   const [pendingCount, setPendingCount] = useState(3);
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
   // Synchronize hash with currentScreen
   const handleNavigate = (screen: ScreenId) => {
     setCurrentScreen(screen);
+    setIsMobileSidebarOpen(false);
     window.location.hash = `#/${screen}`;
   };
 
@@ -98,14 +100,17 @@ export const App: React.FC = () => {
       <Navbar
         threatLevel={threatLevel}
         onOpenKillSwitch={() => setIsKillSwitchOpen(true)}
+        onToggleMobileMenu={() => setIsMobileSidebarOpen((prev) => !prev)}
       />
 
       {/* Body Layout: Sidebar + Main Screen */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex overflow-hidden relative">
         <Sidebar
           currentScreen={currentScreen}
           onNavigate={handleNavigate}
           pendingApprovalsCount={pendingCount}
+          isOpen={isMobileSidebarOpen}
+          onClose={() => setIsMobileSidebarOpen(false)}
         />
 
         <main className="flex-1 overflow-y-auto">
