@@ -1,0 +1,96 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Dark mode default tokens adhering to branding.md */
+  --color-primary-900: #93C5FD;
+  --color-primary-800: #60A5FA;
+  --color-primary-700: #3B82F6;
+  --color-primary-600: #2563EB;
+  --color-primary-500: #3B82F6;
+  --color-primary-400: #1D4ED8;
+  --color-primary-300: #1E3A8A;
+  --color-primary-200: #172554;
+  --color-primary-100: #0A192F;
+
+  --color-grey-900: #F8FAFC;
+  --color-grey-800: #F1F5F9;
+  --color-grey-700: #E2E8F0;
+  --color-grey-600: #CBD5E1;
+  --color-grey-500: #94A3B8;
+  --color-grey-400: #64748B;
+  --color-grey-300: #334155;
+  --color-grey-200: #1E293B;
+  --color-grey-100: #0F172A;
+  --color-grey-50: #0B0F19;
+
+  --color-success-900: #A7F3D0;
+  --color-success-700: #6EE7B7;
+  --color-success-500: #34D399;
+  --color-success-300: #047857;
+  --color-success-100: #064E3B;
+
+  --color-warning-900: #FDE68A;
+  --color-warning-700: #FCD34D;
+  --color-warning-500: #FBBF24;
+  --color-warning-300: #B45309;
+  --color-warning-100: #78350F;
+
+  --color-error-900: #FECACA;
+  --color-error-700: #F87171;
+  --color-error-500: #EF4444;
+  --color-error-400: #DC2626;
+  --color-error-300: #B91C1C;
+  --color-error-100: #7F1D1D;
+
+  --color-info-900: #A5F3FC;
+  --color-info-700: #67E8F9;
+  --color-info-500: #22D3EE;
+  --color-info-300: #0E7490;
+  --color-info-100: #164E63;
+
+  --color-accent-900: #DDD6FE;
+  --color-accent-700: #C4B5FD;
+  --color-accent-500: #A78BFA;
+  --color-accent-300: #6D28D9;
+  --color-accent-100: #4C1D95;
+
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+  --space-3xl: 64px;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-full: 9999px;
+}
+
+/* Custom scrollbars for telemetry streaming */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0F172A;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* Focus ring for accessibility */
+*:focus-visible {
+  outline: 2px solid var(--color-primary-500);
+  outline-offset: 2px;
+}
