@@ -53,4 +53,35 @@ public final class HashUtils {
             throw new IllegalStateException("SHA-256 message digest algorithm not available", e);
         }
     }
+
+    private static final String HMAC_SHA_256 = "HmacSHA256";
+
+    /**
+     * Computes the HMAC-SHA256 of UTF-8 string data using a secret key, returning lowercase 64-char hex string.
+     */
+    public static String hmacSha256Hex(byte[] secretKey, String data) {
+        if (secretKey == null || secretKey.length == 0) {
+            throw new IllegalArgumentException("secretKey must not be null or empty");
+        }
+        String inputData = data != null ? data : "";
+        try {
+            javax.crypto.Mac mac = javax.crypto.Mac.getInstance(HMAC_SHA_256);
+            javax.crypto.spec.SecretKeySpec keySpec = new javax.crypto.spec.SecretKeySpec(secretKey, HMAC_SHA_256);
+            mac.init(keySpec);
+            byte[] rawHmac = mac.doFinal(inputData.getBytes(StandardCharsets.UTF_8));
+            return HEX_FORMAT.formatHex(rawHmac);
+        } catch (NoSuchAlgorithmException | java.security.InvalidKeyException e) {
+            throw new IllegalStateException("Failed to calculate HMAC-SHA256", e);
+        }
+    }
+
+    /**
+     * Computes the HMAC-SHA256 of UTF-8 string data using a UTF-8 secret key string.
+     */
+    public static String hmacSha256Hex(String secretKey, String data) {
+        if (secretKey == null || secretKey.isEmpty()) {
+            throw new IllegalArgumentException("secretKey must not be null or empty");
+        }
+        return hmacSha256Hex(secretKey.getBytes(StandardCharsets.UTF_8), data);
+    }
 }
