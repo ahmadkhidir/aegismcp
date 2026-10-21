@@ -29,7 +29,7 @@ Errors:
 - 502 Bad Gateway: Upstream MCP server unreachable or unhealthy (`-32004 Upstream Unavailable`)
 
 ### C-002: GET /api/v1/inspector/events
-Status: Frozen
+Status: Implemented
 Auth: Console user or monitoring service via Session Cookie or Bearer API token
 Request: HTTP GET query params `?agentId=string&minSeverity=string&limit=number`
 Response 200: Server-Sent Events (`text/event-stream`) streaming `{"eventId": string, "timestamp": string, "agentId": string, "toolName": string, "verdict": "ALLOWED"|"BLOCKED"|"PENDING_APPROVAL", "latencyMs": number, "payloadSummary": string}`
@@ -83,7 +83,7 @@ Errors:
 - 401 Unauthorized: Missing authentication
 
 ### C-008: POST /api/v1/emergency/kill
-Status: Frozen
+Status: Implemented
 Auth: Operator or Administrator via Bearer Token (`admin` role)
 Request: `{"targetType": "global"|"agent"|"tool"|"server", "targetId": string, "reason": string}`
 Response 200: `{"status": "QUARANTINED"|"SEVERED"|"ACTIVE", "affectedSessions": number, "timestamp": string}`
@@ -93,7 +93,7 @@ Errors:
 - 403 Forbidden: Insufficient permissions to trigger emergency kill-switch
 
 ### C-009: GET /api/v1/system/status
-Status: Frozen
+Status: Implemented
 Auth: Console user or monitoring service via Session Cookie or Bearer API token
 Request: empty
 Response 200: `{"status": "NORMAL"|"ELEVATED"|"LOCKDOWN", "activeConnections": number, "totalRequests24h": number, "blockedViolations24h": number, "pendingApprovals": number}`
@@ -101,7 +101,7 @@ Errors:
 - 401 Unauthorized: Missing authentication
 
 ### C-010: GET /api/v1/metrics/summary
-Status: Frozen
+Status: Implemented
 Auth: Console user or monitoring service via Session Cookie or Bearer API token
 Request: empty
 Response 200: `{"activeAgents": number, "toolCalls24h": number, "blockedViolations24h": number, "pendingApprovals": number, "uptimeSeconds": number}`
