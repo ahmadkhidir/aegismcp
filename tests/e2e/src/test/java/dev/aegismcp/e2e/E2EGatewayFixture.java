@@ -233,7 +233,18 @@ public class E2EGatewayFixture implements AutoCloseable {
                     });
         };
 
-        this.server = new AegisGatewayServer("127.0.0.1", 0);
+        this.server = new AegisGatewayServer(
+                "127.0.0.1",
+                0,
+                java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor(),
+                true,
+                this.auditLedger,
+                this.policyCache,
+                this.approvalManager,
+                this.killSwitchManager,
+                this.gatewayMetrics,
+                null
+        );
         this.server.start();
 
         UpstreamClient delegatingUpstream = (context, request) -> upstreamClientRef.get().forward(context, request);
@@ -282,10 +293,18 @@ public class E2EGatewayFixture implements AutoCloseable {
                             } else {
                                 DlpPipelineConfigurator.configure(childCtx.pipeline(), dlpHandler);
                             }
-                            childCtx.pipeline().addBefore("gateway-dispatcher", "audit-verify-handler", auditHandler);
-                            childCtx.pipeline().addBefore("gateway-dispatcher", "policy-management-handler", policyHandler);
-                            childCtx.pipeline().addBefore("gateway-dispatcher", "approval-management-handler", approvalHandler);
-                            childCtx.pipeline().addBefore("gateway-dispatcher", "emergency-management-handler", emergencyHandler);
+                            if (childCtx.pipeline().get("audit-verify-handler") == null) {
+                                childCtx.pipeline().addBefore("gateway-dispatcher", "audit-verify-handler", auditHandler);
+                            }
+                            if (childCtx.pipeline().get("policy-management-handler") == null) {
+                                childCtx.pipeline().addBefore("gateway-dispatcher", "policy-management-handler", policyHandler);
+                            }
+                            if (childCtx.pipeline().get("approval-management-handler") == null) {
+                                childCtx.pipeline().addBefore("gateway-dispatcher", "approval-management-handler", approvalHandler);
+                            }
+                            if (childCtx.pipeline().get("emergency-management-handler") == null) {
+                                childCtx.pipeline().addBefore("gateway-dispatcher", "emergency-management-handler", emergencyHandler);
+                            }
                             if (identityResolver != null) {
                                 childCtx.pipeline().addBefore("gateway-dispatcher", "identity-auth-handler", createIdentityAuthHandler());
                             }
