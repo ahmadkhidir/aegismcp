@@ -89,7 +89,7 @@ An asset task writes neither. The issue names the class and the area.
    re-group them. If the roadmap is missing or silent on order, raise a doc gap.
 3. **Phase 0: Foundation.** Before any roadmap feature phase is implemented, Phase 0 (Foundation) must
    be drafted, executed, and verified. Foundation sets up:
-   - Toolchains and package manifests (`package.json`, `go.mod`, `Cargo.toml`, etc.);
+   - Toolchains and package manifests (`build.gradle.kts`, `settings.gradle.kts`, `apps/console/package.json`) verified and pinned for the chosen stack (ADR-001);
    - Verified commands (build, test, boot, lint in scripts or Makefile);
    - CI/CD workflow (`.github/workflows/ci.yml`) ensuring clean build and test runs;
    - Base test harness and verification boot check.
