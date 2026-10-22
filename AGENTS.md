@@ -11,6 +11,24 @@ The specification is `docs/AegisMCP/`. Read it before planning or building.
 A build task never edits the specification. A gap in it becomes a `doc-gap` issue, not an assumption
 and not a silent change.
 
+### Specification modifications & subagent isolation
+
+The specification is modified only in these situations:
+1. **Unsettled requirement (`doc-gap`):** An implementation or verification task discovers an unhandled
+   edge case, missing data field, ambiguous behavior, or conflicting requirement. The worker pauses, logs
+   the `doc-gap` issue, and halts implementation on that path.
+2. **User-directed change:** The user requests a scope adjustment, new feature addition, or requirement revision.
+3. **Architectural or platform shift:** Structural, scaling, or environmental changes require updating
+   `architecture.md`, `schema.md`, or `nfr.md`.
+
+**Mandatory subagent isolation:** Spec modifications must **never** run inside an active coding or
+debugging session. Mixing compiler logs, code diffs, and stack traces into specification writing
+contaminates the product requirements. The coordinator dispatches a dedicated, isolated subagent
+targeting `docs` with a clean context window. That subagent loads `docs/AGENTS.md`,
+aligns with the user, updates the specification under `docs/AegisMCP/`, and commits the changes.
+The implementation session resumes only after the specification is committed, reading the updated
+documents as its single source of truth.
+
 ## Where truth lives
 
 | Question | Source | How to read it |
@@ -44,9 +62,9 @@ Changing a stack choice is a decision: record it in `.decisions/` and update thi
 
 ## Area rules
 
-Area rules live in the nearest `AGENTS.md`: any coding agent working in the area loads them. Start the
-session in the area, or read its file when the issue names one. List them with `git ls-files '*AGENTS.md'`
-or `find . -name AGENTS.md`.
+Area rules live in the nearest `AGENTS.md`: any coding agent working in the area loads them.
+Start the session in the area, or read its file first when the issue names one. List them with
+`git ls-files '*AGENTS.md'` or `find . -name AGENTS.md`.
 
 ## Work classes
 
@@ -54,7 +72,8 @@ Every task is exactly one class:
 
 - `implement` — writes product code under the issue's `Own` paths.
 - `verify` — writes test files and test configuration only, under the phase gate.
-- `spec` — writes only under `docs/AegisMCP/`, governed by `docs/AGENTS.md`.
+- `spec` — writes only under `docs/AegisMCP/`, governed by `docs/AGENTS.md`. Always executed in
+  an isolated subagent to keep implementation context completely separate from product requirements.
 - `asset` — writes only under the asset paths, governed by the nearest asset `AGENTS.md` and
   `ASSETS.md`.
 
@@ -68,20 +87,24 @@ An asset task writes neither. The issue names the class and the area.
    are the authority; recall is not.
 2. **Adopt the roadmap.** Take its phases and their order as the build order. Do not re-sequence or
    re-group them. If the roadmap is missing or silent on order, raise a doc gap.
-3. **Record the stack.** Put one question batch to the user with best-fit options and a
-   recommendation. Record the choice in Stack and the reason in `.decisions/`.
-4. **Freeze the interfaces.** When the product has interfaces, write the interface contract and
-   present it for acknowledgment. A change after `Frozen` is a change request.
-5. **Draft the dispatch plan.** One phase issue per roadmap phase from the phase template, then one
-   task issue per task from the task template, each parented to its phase. Every task carries
-   `Depends on` — the issue numbers that must close first, or `none`. Foundation work leads: scaffold,
-   CI, and the pinned stack before feature work; when the product has assets, source its imagery
-   once, before the screens that use it, and record each slot in the ledger. Present the tree — phase,
-   tasks, edges — and create nothing yet.
+3. **Phase 0: Foundation.** Before any roadmap feature phase is implemented, Phase 0 (Foundation) must
+   be drafted, executed, and verified. Foundation sets up:
+   - Toolchains and package manifests (`package.json`, `go.mod`, `Cargo.toml`, etc.);
+   - Verified commands (build, test, boot, lint in scripts or Makefile);
+   - CI/CD workflow (`.github/workflows/ci.yml`) ensuring clean build and test runs;
+   - Base test harness and verification boot check.
+   Roadmap feature phases (Phase 1..N) are strictly blocked by Phase 0.
+4. **Freeze the interfaces.** When the product has interfaces, write the interface contract (`CONTRACTS.md`)
+   and present it for acknowledgment. A change after `Frozen` is a change request.
+5. **Draft the dispatch plan.** One phase issue for Phase 0 (Foundation) and one phase issue per roadmap
+   phase from the phase template, each parented with child task issues from the task template. Every task
+   carries `Depends on` — the issue numbers that must close first, or `none`. When the product has assets,
+   source its imagery once during foundation, before the screens that use it, and record each slot in the
+   ledger. Present the tree — phases, tasks, edges — and create nothing yet.
 6. **Create the plan on agreement.** After the user agrees, create the `phase` label if it is missing
-   (`gh label create phase`), then the phase issues in roadmap order with
-   `gh issue create --label phase`, then each task with `gh issue create --parent <phase>`, then every
-   dependency with `gh issue edit <n> --add-blocked-by <dep>`. Change the draft when the user asks.
+   (`gh label create phase`), then the phase issues in order with `gh issue create --label phase`, then
+   each task with `gh issue create --parent <phase>`, then every dependency with
+   `gh issue edit <n> --add-blocked-by <dep>`. Change the draft when the user asks.
 7. **Ask about dispatch.** With the issues in GitHub, ask once whether to dispatch subagents or work
    them in this session. Follow Dispatch below.
 8. **Gate each phase.** The gate is a `verify` task, parented to the phase and blocked by every other
@@ -107,6 +130,9 @@ can stop it at any point.
 - **A phase issue is never dispatched.** It groups its tasks and parents the gate.
 - **The coordinating session works too.** When the user keeps the work here, do it under the same
   dependency rule.
+- **Spec task isolation.** When dispatching a `spec` task or resolving a `doc-gap`, always run it in an
+  isolated subagent targeting `docs/`. Never execute spec tasks in an active implementation
+  session.
 - **The phase gate.** Verify the phase with a clean test and boot sweep against the criteria before
   closing the phase issue.
 
@@ -116,12 +142,12 @@ Every task is an issue from `.github/ISSUE_TEMPLATE/task.md`, parented to its ph
 
 - `Class` — implement, fix, verify, spec, asset, or chore.
 - `Area` — the folder whose `AGENTS.md` governs the work.
-- `Own` — the paths the task may write. Everything outside `Own` is read-only.
+- `Own` — the paths the task may write; everything outside `Own` is read-only.
 - `Depends on` — the issue numbers that must close first, or `none`. The issue's blocked-by links
   mirror this line; when they disagree, the issue body is the record and the coordinator fixes the
   links.
 - `Contract` — the `C-###` it implements, or `none`.
-- `Specification` — the sections it needs.
+- `Specification` — the spec sections and requirements it fulfills.
 - `Criteria` — where the acceptance criteria live.
 
 A task closes when its PR merges and the issue closes. There is no route file and no separate
@@ -198,12 +224,12 @@ one.
 
 | Command | Run |
 |---|---|
-| Build full project | `./gradlew build` |
-| Test full suite | `./gradlew test` |
-| Boot Gateway Server | `./gradlew :services:gateway:run` |
-| Run CLI | `./gradlew :apps:cli:run --args="--help"` |
-| Build Web Console | `cd apps/console && npm run build` |
-| Test Web Console | `cd apps/console && npm test` |
+| Build full project | ./gradlew build |
+| Test full suite | ./gradlew test |
+| Boot Gateway Server | ./gradlew :services:gateway:run |
+| Run CLI | ./gradlew :apps:cli:run --args="--help" |
+| Build Web Console | cd apps/console && npm run build |
+| Test Web Console | cd apps/console && npm test |
 
 ## Boundaries
 

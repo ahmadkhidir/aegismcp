@@ -10,7 +10,7 @@ This directory and its subdirectories. The issue's `Own` paths are binding; ever
 
 ## Task rules
 
-- Work only inside the issue's `Own` paths; everything outside `Own` is read-only. Never modify files outside your owned paths.
+- Work only inside the issue's `Own` paths; everything outside `Own` is read-only.
 - Code tasks never write under `docs/`. A doc gap becomes a `doc-gap` issue.
 - Commit only your owned paths. Conventional Commits linking spec and issue (e.g. `Implements: FEAT-###`, `Fixes #<n>`). Never `git add -A`.
 - Branch from `main`, open a PR, never push to `main`.
@@ -19,11 +19,12 @@ This directory and its subdirectories. The issue's `Own` paths are binding; ever
 - No markdown documentation files; document inline.
 - Write lean unit tests for the behavior your issue names.
 - If a contract is wrong or incomplete, report a change request; never deviate.
+- Never modify files outside your owned paths.
 - If blocked, state the assumption or ask for clarification before proceeding.
 - When a fact resists you, verify it with evidence before falling back on recall.
 - User-facing copy reads as human-written.
 
-## Area discipline
+## Frontend discipline
 
 - Build only through theme tokens. Never hardcode a hex, spacing, radius, or timing at a call site.
   When the token map keys a value by device class, apply the declared classes rather than collapsing
