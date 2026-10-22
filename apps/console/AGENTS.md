@@ -16,7 +16,7 @@ This directory and its subdirectories. The issue's `Own` paths are binding; ever
 - Branch from `main`, open a PR, never push to `main`.
 - In code and tests, cite permanent spec anchors (`FEAT-###`, `NFR-###`, or `C-###`). Commits and PRs link the spec and the GitHub issue.
 - Never log or commit secrets, tokens, or unmasked identity; credentials live in the secret store.
-- No markdown documentation files; document inline.
+- Document code inline with docstrings and comments on non-obvious logic; skip trivial comments. Never create ad-hoc markdown documentation files.
 - Write lean unit tests for the behavior your issue names.
 - If a contract is wrong or incomplete, report a change request; never deviate.
 - Never modify files outside your owned paths.
