@@ -10,7 +10,7 @@ This directory and its subdirectories. The issue's `Own` paths are binding; ever
 
 ## Task rules
 
-- Work only inside the issue's `Own` paths; everything outside `Own` is read-only. Never modify files outside your owned paths.
+- Work only inside the issue's `Own` paths; everything outside `Own` is read-only.
 - Code tasks never write under `docs/`. A doc gap becomes a `doc-gap` issue.
 - Commit only your owned paths. Conventional Commits linking spec and issue (e.g. `Implements: FEAT-###`, `Fixes #<n>`). Never `git add -A`.
 - Branch from `main`, open a PR, never push to `main`.
@@ -19,6 +19,7 @@ This directory and its subdirectories. The issue's `Own` paths are binding; ever
 - No markdown documentation files; document inline.
 - Write lean unit tests for the behavior your issue names.
 - If a contract is wrong or incomplete, report a change request; never deviate.
+- Never modify files outside your owned paths.
 - If blocked, state the assumption or ask for clarification before proceeding.
 - When a fact resists you, verify it with evidence before falling back on recall.
 - User-facing copy reads as human-written.
@@ -38,10 +39,5 @@ This directory and its subdirectories. The issue's `Own` paths are binding; ever
 
 ## Local Definition of Done
 
-- CLI commands conform to the spec (`FEAT-003`, `FEAT-010`).
-- Process wrapping handles graceful shutdown and error bubbling.
-- Unit and integration tests pass.
-
-## Report
-
-Task and feature IDs; files changed; CLI commands covered; test results; blockers or assumptions.
+- All unit tests in this directory pass.
+- Checks run cleanly with no unresolved stubs or TODOs.
