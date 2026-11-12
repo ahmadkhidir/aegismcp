@@ -69,3 +69,7 @@ security-critical path stays readable.
 
 Active development. The gateway, CLI, and console build and test cleanly; transports are covered by
 the e2e suite.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
