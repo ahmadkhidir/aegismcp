@@ -331,7 +331,7 @@ export const PolicyManagerScreen: React.FC = () => {
                 data-testid="simulation-error"
                 className="p-space-sm bg-error-100 border border-error-300 text-error-900 rounded-radius-md text-xs font-mono flex items-start gap-1.5"
               >
-                <AlertCircle className="w-4 h-4 text-error-600 shrink-0 mt-0.5" />
+                <AlertCircle className="w-4 h-4 text-error-700 shrink-0 mt-0.5" />
                 <span>{simError}</span>
               </div>
             )}
@@ -358,7 +358,7 @@ export const PolicyManagerScreen: React.FC = () => {
                     <span className="text-[11px] font-bold text-error-700 uppercase block font-mono">
                       Policy Violations ({simResponse.violations.length}):
                     </span>
-                    <ul className="list-disc list-inside space-y-0.5 text-xs text-error-800 font-mono">
+                    <ul className="list-disc list-inside space-y-0.5 text-xs text-error-900 font-mono">
                       {simResponse.violations.map((v, i) => (
                         <li key={i} className="break-words">
                           {v}
