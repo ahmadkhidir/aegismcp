@@ -30,7 +30,15 @@ public class TerminalInspector {
     private final boolean colorEnabled;
 
     public TerminalInspector() {
-        this(System.err, isAnsiSupported());
+        this(System.err, ColorMode.AUTO);
+    }
+
+    /**
+     * Builds an inspector that resolves color from the requested mode and the destination stream.
+     * Anchors: FEAT-003.
+     */
+    public TerminalInspector(PrintStream out, ColorMode mode) {
+        this(out, isColorEnabled(mode, isInteractiveTerminal(out)));
     }
 
     public TerminalInspector(PrintStream out, boolean colorEnabled) {
@@ -38,15 +46,38 @@ public class TerminalInspector {
         this.colorEnabled = colorEnabled;
     }
 
-    private static boolean isAnsiSupported() {
-        if (System.getenv("NO_COLOR") != null) {
+    /**
+     * Decides whether ANSI escapes may be written for the given mode and destination.
+     * {@code NO_COLOR} and a dumb terminal force plain text regardless of the requested mode.
+     * Anchors: FEAT-003, NFR-006.
+     *
+     * @param mode                the resolved {@code --color} policy
+     * @param interactiveTerminal whether the destination is an interactive terminal
+     */
+    public static boolean isColorEnabled(ColorMode mode, boolean interactiveTerminal) {
+        Objects.requireNonNull(mode, "mode must not be null");
+        if (isPlainTextEnvironment()) {
             return false;
         }
-        String term = System.getenv("TERM");
-        if ("dumb".equalsIgnoreCase(term)) {
-            return false;
-        }
-        return true;
+        return switch (mode) {
+            case ALWAYS -> true;
+            case NEVER -> false;
+            case AUTO -> interactiveTerminal;
+        };
+    }
+
+    /**
+     * True only when the stream is one of the process's own console streams. Captured writers, pipes,
+     * and redirected files are never interactive. The JDK exposes console attachment for the process,
+     * so any other target is treated as plain.
+     */
+    public static boolean isInteractiveTerminal(PrintStream target) {
+        return target != null && (target == System.out || target == System.err) && System.console() != null;
+    }
+
+    /** {@code NO_COLOR} or {@code TERM=dumb} forces plain text on every channel. */
+    private static boolean isPlainTextEnvironment() {
+        return System.getenv("NO_COLOR") != null || "dumb".equalsIgnoreCase(System.getenv("TERM"));
     }
 
     /**

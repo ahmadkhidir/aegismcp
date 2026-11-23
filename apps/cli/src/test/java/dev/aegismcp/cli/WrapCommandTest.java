@@ -1,5 +1,6 @@
 package dev.aegismcp.cli;
 
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -7,6 +8,9 @@ import picocli.CommandLine;
 
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -99,14 +103,57 @@ class WrapCommandTest {
         String javaBin = ProcessHandle.current().info().command().orElse(System.getProperty("java.home") + "/bin/java");
         String classPath = System.getProperty("java.class.path");
 
-        CommandLine cmd = new CommandLine(new WrapCommand());
-        int exitCode = cmd.execute(
+        int exitCode = AegisCliMain.execute(
+                new PrintWriter(new StringWriter()),
+                new PrintWriter(new StringWriter()),
+                "wrap",
                 "-p", policyFile.toString(),
-                "--no-color",
+                "--color=never",
                 "--",
                 javaBin, "-cp", classPath, "dev.aegismcp.cli.MockMcpChildServer", "exit-immediately", "0"
         );
 
         assertEquals(0, exitCode);
+    }
+
+    @Test
+    @DisplayName("FEAT-003: --color=always forces ANSI escapes on stderr inspection output")
+    void testForcedColorOnInspectionOutput() throws Exception {
+        Assumptions.assumeTrue(
+                TerminalInspector.isColorEnabled(ColorMode.ALWAYS, false),
+                "NO_COLOR or a dumb terminal forces plain text");
+
+        Path policyFile = tempDir.resolve("forced-color-policy.yaml");
+        Files.writeString(policyFile, """
+                id: forced-color-policy
+                name: Forced Color Test
+                version: 1.0.0
+                rules: []
+                """);
+
+        String javaBin = ProcessHandle.current().info().command().orElse(System.getProperty("java.home") + "/bin/java");
+        String classPath = System.getProperty("java.class.path");
+
+        ByteArrayOutputStream errContent = new ByteArrayOutputStream();
+        PrintStream origErr = System.err;
+
+        try {
+            System.setErr(new PrintStream(errContent, true, StandardCharsets.UTF_8));
+
+            int exitCode = AegisCliMain.execute(
+                    new PrintWriter(new StringWriter()),
+                    new PrintWriter(new StringWriter()),
+                    "wrap",
+                    "-p", policyFile.toString(),
+                    "--color=always",
+                    "--",
+                    javaBin, "-cp", classPath, "dev.aegismcp.cli.MockMcpChildServer", "exit-immediately", "0"
+            );
+
+            assertEquals(0, exitCode);
+            assertTrue(errContent.toString(StandardCharsets.UTF_8).contains("\u001B["));
+        } finally {
+            System.setErr(origErr);
+        }
     }
 }
