@@ -1,14 +1,20 @@
 package dev.aegismcp.gateway.dlp;
 
-import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * High-throughput regex pattern matcher covering credentials, API keys, private keys,
- * database URLs with passwords, and personal data (PII).
+ * Regex pattern library for credentials, API keys, private keys, database URLs with passwords,
+ * and personal data (PII).
+ *
+ * <p>Every pattern is evaluated against a bounded region of the payload, never against the whole
+ * payload. The caller ({@link DlpScanner}) narrows the work to the neighbourhood of a candidate it
+ * already found, which keeps a 1 MB response within the NFR-002 budget and removes the
+ * catastrophic-backtracking behaviour of word-boundary scans over megabytes of input.
  * Anchors: FEAT-005, NFR-002, C-001.
  */
 public final class DlpPatternMatcher {
@@ -72,6 +78,28 @@ public final class DlpPatternMatcher {
             "\\b\\+(?:[1-9]\\d{0,2})[-.\\s]?\\(?\\d{1,4}\\)?[-.\\s]?\\d{1,4}[-.\\s]?\\d{2,9}\\b"
     );
 
+    /** A compiled pattern plus the capture group that carries the sensitive span. */
+    private record Spec(Pattern pattern, int group) {
+    }
+
+    private static final Map<DlpPatternType, Spec> SPECS = new EnumMap<>(DlpPatternType.class);
+
+    static {
+        SPECS.put(DlpPatternType.AWS_ACCESS_KEY, new Spec(AWS_ACCESS_KEY_PATTERN, 0));
+        SPECS.put(DlpPatternType.AWS_SECRET_KEY, new Spec(AWS_SECRET_KEY_PATTERN, 1));
+        SPECS.put(DlpPatternType.OPENAI_API_KEY, new Spec(OPENAI_KEY_PATTERN, 0));
+        SPECS.put(DlpPatternType.GITHUB_TOKEN, new Spec(GITHUB_TOKEN_PATTERN, 0));
+        SPECS.put(DlpPatternType.BEARER_TOKEN, new Spec(BEARER_TOKEN_PATTERN, 1));
+        SPECS.put(DlpPatternType.PEM_PRIVATE_KEY, new Spec(PEM_PRIVATE_KEY_PATTERN, 0));
+        SPECS.put(DlpPatternType.PGP_PRIVATE_KEY, new Spec(PGP_PRIVATE_KEY_PATTERN, 0));
+        SPECS.put(DlpPatternType.DATABASE_CONNECTION_STRING, new Spec(DB_URI_WITH_PASSWORD_PATTERN, 0));
+        SPECS.put(DlpPatternType.JDBC_CONNECTION_STRING, new Spec(JDBC_WITH_PASSWORD_PATTERN, 0));
+        SPECS.put(DlpPatternType.SSN, new Spec(SSN_PATTERN, 0));
+        SPECS.put(DlpPatternType.CREDIT_CARD, new Spec(CREDIT_CARD_CANDIDATE_PATTERN, 0));
+        SPECS.put(DlpPatternType.EMAIL_ADDRESS, new Spec(EMAIL_PATTERN, 0));
+        SPECS.put(DlpPatternType.PHONE_NUMBER, new Spec(PHONE_PATTERN, 0));
+    }
+
     private final DlpConfig config;
 
     public DlpPatternMatcher(DlpConfig config) {
@@ -79,190 +107,48 @@ public final class DlpPatternMatcher {
     }
 
     /**
-     * Scans input text and returns all detected DLP patterns.
+     * Applies a single pattern type to the region {@code [from, to)} of {@code text} and appends
+     * every detection with absolute offsets.
+     *
+     * <p>Region bounds are transparent, so a word boundary at either edge is evaluated against the
+     * characters outside the region exactly as it would be in a whole-payload scan.
      */
-    public List<DlpDetection> scan(String text) {
-        List<DlpDetection> detections = new ArrayList<>();
-        if (text == null || text.isEmpty()) {
-            return detections;
+    public void scan(DlpPatternType type, CharSequence text, int from, int to, List<DlpDetection> out) {
+        Spec spec = SPECS.get(type);
+        if (spec == null || from >= to) {
+            return;
         }
 
-        // 1. AWS Access Key
-        if (text.length() < 200 || containsAnyAwsPrefix(text)) {
-            scanSimple(AWS_ACCESS_KEY_PATTERN, DlpPatternType.AWS_ACCESS_KEY, text, detections);
-        }
+        Matcher matcher = spec.pattern().matcher(text);
+        matcher.region(from, to);
+        matcher.useTransparentBounds(true);
+        matcher.useAnchoringBounds(false);
 
-        // 2. AWS Secret Key
-        if (text.length() < 200 || containsIgnoreCase(text, "secret")) {
-            scanSecretKey(AWS_SECRET_KEY_PATTERN, DlpPatternType.AWS_SECRET_KEY, text, detections);
-        }
-
-        // 3. OpenAI API Key
-        if (text.length() < 200 || text.contains("sk-")) {
-            scanSimple(OPENAI_KEY_PATTERN, DlpPatternType.OPENAI_API_KEY, text, detections);
-        }
-
-        // 4. GitHub Token
-        if (text.length() < 200 || text.contains("gh") || text.contains("github_pat_")) {
-            scanSimple(GITHUB_TOKEN_PATTERN, DlpPatternType.GITHUB_TOKEN, text, detections);
-        }
-
-        // 5. Bearer Token (masks token portion)
-        if (text.length() < 200 || containsIgnoreCase(text, "bearer")) {
-            scanBearerToken(text, detections);
-        }
-
-        // 6. PEM Private Key
-        if (text.length() < 200 || text.contains("-----BEGIN")) {
-            scanSimple(PEM_PRIVATE_KEY_PATTERN, DlpPatternType.PEM_PRIVATE_KEY, text, detections);
-            scanSimple(PGP_PRIVATE_KEY_PATTERN, DlpPatternType.PGP_PRIVATE_KEY, text, detections);
-        }
-
-        // 8. DB Connection Strings
-        if (text.length() < 200 || text.contains("://")) {
-            scanSimple(DB_URI_WITH_PASSWORD_PATTERN, DlpPatternType.DATABASE_CONNECTION_STRING, text, detections);
-        }
-        if (text.length() < 200 || text.contains("jdbc:")) {
-            scanSimple(JDBC_WITH_PASSWORD_PATTERN, DlpPatternType.JDBC_CONNECTION_STRING, text, detections);
-        }
-
-        // 9. SSN
-        if (text.length() < 200 || text.indexOf('-') >= 0) {
-            scanSimple(SSN_PATTERN, DlpPatternType.SSN, text, detections);
-        }
-
-        // 10. Credit Card (with Luhn check)
-        scanCreditCards(text, detections);
-
-        // 11. Email
-        if (text.length() < 200 || text.indexOf('@') >= 0) {
-            scanSimple(EMAIL_PATTERN, DlpPatternType.EMAIL_ADDRESS, text, detections);
-        }
-
-        // 12. Phone
-        scanPhone(text, detections);
-
-        return detections;
-    }
-
-    private static boolean containsAnyAwsPrefix(String text) {
-        return text.contains("AKIA") || text.contains("ASIA") || text.contains("AROA")
-                || text.contains("AIPA") || text.contains("ANPA") || text.contains("ANVA") || text.contains("AGPA");
-    }
-
-    private static boolean containsIgnoreCase(String text, String needle) {
-        int nlen = needle.length();
-        int tlen = text.length();
-        if (tlen < nlen) return false;
-        char firstLower = Character.toLowerCase(needle.charAt(0));
-        char firstUpper = Character.toUpperCase(needle.charAt(0));
-        for (int i = 0; i <= tlen - nlen; i++) {
-            char c = text.charAt(i);
-            if (c == firstLower || c == firstUpper) {
-                boolean match = true;
-                for (int j = 1; j < nlen; j++) {
-                    char tc = Character.toLowerCase(text.charAt(i + j));
-                    char nc = Character.toLowerCase(needle.charAt(j));
-                    if (tc != nc) {
-                        match = false;
-                        break;
-                    }
-                }
-                if (match) return true;
-            }
-        }
-        return false;
-    }
-
-    private void scanSimple(Pattern pattern, DlpPatternType type, String text, List<DlpDetection> detections) {
-        Matcher matcher = pattern.matcher(text);
         String replacement = config.resolveReplacement(type);
         while (matcher.find()) {
-            detections.add(new DlpDetection(
-                    type.category(),
-                    type,
-                    matcher.start(),
-                    matcher.end(),
-                    matcher.group(),
-                    replacement
-            ));
-        }
-    }
-
-    private void scanSecretKey(Pattern pattern, DlpPatternType type, String text, List<DlpDetection> detections) {
-        Matcher matcher = pattern.matcher(text);
-        String replacement = config.resolveReplacement(type);
-        while (matcher.find()) {
-            // Group 1 is the 40-char secret
-            int start = matcher.start(1);
-            int end = matcher.end(1);
-            detections.add(new DlpDetection(
-                    type.category(),
-                    type,
-                    start,
-                    end,
-                    matcher.group(1),
-                    replacement
-            ));
-        }
-    }
-
-    private void scanBearerToken(String text, List<DlpDetection> detections) {
-        Matcher matcher = BEARER_TOKEN_PATTERN.matcher(text);
-        String replacement = config.resolveReplacement(DlpPatternType.BEARER_TOKEN);
-        while (matcher.find()) {
-            // Replace the token part (group 1)
-            int start = matcher.start(1);
-            int end = matcher.end(1);
-            detections.add(new DlpDetection(
-                    DlpCategory.API_KEY,
-                    DlpPatternType.BEARER_TOKEN,
-                    start,
-                    end,
-                    matcher.group(1),
-                    replacement
-            ));
-        }
-    }
-
-    private void scanCreditCards(String text, List<DlpDetection> detections) {
-        Matcher matcher = CREDIT_CARD_CANDIDATE_PATTERN.matcher(text);
-        String replacement = config.resolveReplacement(DlpPatternType.CREDIT_CARD);
-        while (matcher.find()) {
-            if (LuhnValidator.isValidCreditCard(text, matcher.start(), matcher.end())) {
-                detections.add(new DlpDetection(
-                        DlpCategory.PII,
-                        DlpPatternType.CREDIT_CARD,
-                        matcher.start(),
-                        matcher.end(),
-                        matcher.group(),
-                        replacement
-                ));
-            }
-        }
-    }
-
-    private void scanPhone(String text, List<DlpDetection> detections) {
-        Matcher matcher = PHONE_PATTERN.matcher(text);
-        String replacement = config.resolveReplacement(DlpPatternType.PHONE_NUMBER);
-        while (matcher.find()) {
-            String match = matcher.group();
-            // Disqualify IP-like patterns or date-like patterns
-            if (match.contains(".") && isIpOrVersion(match)) {
+            int start = matcher.start(spec.group());
+            int end = matcher.end(spec.group());
+            if (start < 0 || end <= start) {
                 continue;
             }
-            detections.add(new DlpDetection(
-                    DlpCategory.PII,
-                    DlpPatternType.PHONE_NUMBER,
-                    matcher.start(),
-                    matcher.end(),
-                    match,
+            if (type == DlpPatternType.CREDIT_CARD && !LuhnValidator.isValidCreditCard(text, start, end)) {
+                continue;
+            }
+            if (type == DlpPatternType.PHONE_NUMBER && isIpOrVersion(matcher.group(spec.group()))) {
+                continue;
+            }
+            out.add(new DlpDetection(
+                    type.category(),
+                    type,
+                    start,
+                    end,
+                    text.subSequence(start, end).toString(),
                     replacement
             ));
         }
     }
 
-    private boolean isIpOrVersion(String match) {
+    private static boolean isIpOrVersion(String match) {
         // Simple check if it looks like 192.168.1.1 or 1.2.3.4
         String[] parts = match.split("\\.");
         if (parts.length >= 3) {

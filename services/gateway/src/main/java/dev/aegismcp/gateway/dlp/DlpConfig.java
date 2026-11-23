@@ -13,11 +13,17 @@ public final class DlpConfig {
 
     public static final double DEFAULT_ENTROPY_THRESHOLD = 4.5;
     public static final int DEFAULT_MIN_ENTROPY_TOKEN_LENGTH = 20;
+    /**
+     * Wall-clock ceiling for one scrub before the caller masks the payload instead of
+     * forwarding it. A scanner that overruns this is treated as failed, never as clean.
+     */
+    public static final long DEFAULT_SCAN_TIMEOUT_MILLIS = 250L;
 
     private final boolean enableEntropyScanner;
     private final double entropyThreshold;
     private final int minEntropyTokenLength;
     private final boolean fineGrainedPii;
+    private final long scanTimeoutMillis;
     private final Map<DlpCategory, String> categoryReplacements;
     private final Map<DlpPatternType, String> patternReplacements;
 
@@ -26,6 +32,7 @@ public final class DlpConfig {
         this.entropyThreshold = builder.entropyThreshold;
         this.minEntropyTokenLength = builder.minEntropyTokenLength;
         this.fineGrainedPii = builder.fineGrainedPii;
+        this.scanTimeoutMillis = builder.scanTimeoutMillis;
         this.categoryReplacements = Collections.unmodifiableMap(new EnumMap<>(builder.categoryReplacements));
         this.patternReplacements = Collections.unmodifiableMap(new EnumMap<>(builder.patternReplacements));
     }
@@ -54,6 +61,10 @@ public final class DlpConfig {
         return fineGrainedPii;
     }
 
+    public long getScanTimeoutMillis() {
+        return scanTimeoutMillis;
+    }
+
     public String resolveReplacement(DlpPatternType patternType) {
         if (patternReplacements.containsKey(patternType)) {
             return patternReplacements.get(patternType);
@@ -70,6 +81,7 @@ public final class DlpConfig {
         private double entropyThreshold = DEFAULT_ENTROPY_THRESHOLD;
         private int minEntropyTokenLength = DEFAULT_MIN_ENTROPY_TOKEN_LENGTH;
         private boolean fineGrainedPii = false;
+        private long scanTimeoutMillis = DEFAULT_SCAN_TIMEOUT_MILLIS;
         private final Map<DlpCategory, String> categoryReplacements = new EnumMap<>(DlpCategory.class);
         private final Map<DlpPatternType, String> patternReplacements = new EnumMap<>(DlpPatternType.class);
 
@@ -102,6 +114,14 @@ public final class DlpConfig {
 
         public Builder fineGrainedPii(boolean fineGrained) {
             this.fineGrainedPii = fineGrained;
+            return this;
+        }
+
+        public Builder scanTimeoutMillis(long timeoutMillis) {
+            if (timeoutMillis <= 0L) {
+                throw new IllegalArgumentException("Scan timeout must be greater than zero");
+            }
+            this.scanTimeoutMillis = timeoutMillis;
             return this;
         }
 

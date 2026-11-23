@@ -1,6 +1,5 @@
 package dev.aegismcp.gateway.dlp;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -21,7 +20,6 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -29,20 +27,29 @@ import java.util.Objects;
 /**
  * Outbound DLP scrubber service that sanitizes secrets, private keys, database credentials,
  * and personal data from JSON-RPC responses and raw payloads.
- * Conforms to contract C-001 with sub-3ms latency overhead per NFR-002.
+ *
+ * <p>Raw payloads are parsed only for their JSON string boundaries, never into an object tree: a
+ * tree round trip on a 1 MB response costs tens of milliseconds for no security benefit, while the
+ * boundary walk keeps numeric values and document structure byte-identical outside the redacted
+ * spans. Conforms to contract C-001 with sub-3ms latency overhead per NFR-002.
  * Anchors: FEAT-005, NFR-002, C-001.
  */
 public class DlpScrubber {
 
     private static final Logger logger = LoggerFactory.getLogger(DlpScrubber.class);
 
+    /** Replacement emitted when the scanner itself fails; the payload is never forwarded raw. */
+    public static final String SCAN_FAILURE_MASK = "[REDACTED_DLP_SCAN_FAILURE]";
+
+    /** Nesting depth beyond which a JSON tree is masked instead of walked. */
+    private static final int MAX_JSON_DEPTH = 512;
+
     private static final class InstanceHolder {
         private static final DlpScrubber DEFAULT_INSTANCE = new DlpScrubber(DlpConfig.defaultConfig());
     }
 
     private final DlpConfig config;
-    private final DlpPatternMatcher patternMatcher;
-    private final ShannonEntropyScanner entropyScanner;
+    private final DlpScanner scanner;
     private final DlpRedactionEngine redactionEngine;
     private final ObjectMapper objectMapper;
 
@@ -57,8 +64,7 @@ public class DlpScrubber {
     public DlpScrubber(DlpConfig config, ObjectMapper objectMapper) {
         this.config = Objects.requireNonNull(config, "config must not be null");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper must not be null");
-        this.patternMatcher = new DlpPatternMatcher(this.config);
-        this.entropyScanner = new ShannonEntropyScanner(this.config);
+        this.scanner = new DlpScanner(this.config);
         this.redactionEngine = new DlpRedactionEngine();
     }
 
@@ -77,14 +83,7 @@ public class DlpScrubber {
         if (text == null || text.isEmpty()) {
             return List.of();
         }
-        List<DlpDetection> regexDetections = patternMatcher.scan(text);
-        List<DlpDetection> entropyDetections = entropyScanner.scan(text);
-
-        List<DlpDetection> combined = new ArrayList<>(regexDetections.size() + entropyDetections.size());
-        combined.addAll(regexDetections);
-        combined.addAll(entropyDetections);
-
-        return redactionEngine.resolveNonOverlapping(combined);
+        return redactionEngine.resolveNonOverlapping(scanner.scanText(text));
     }
 
     /**
@@ -94,7 +93,7 @@ public class DlpScrubber {
         if (input == null || input.isEmpty()) {
             return input;
         }
-        List<DlpDetection> detections = scan(input);
+        List<DlpDetection> detections = redactionEngine.resolveNonOverlapping(scanner.scanText(input));
         if (detections.isEmpty()) {
             return input;
         }
@@ -104,10 +103,22 @@ public class DlpScrubber {
     /**
      * Recursively redacts secrets from a Jackson JsonNode tree while preserving structure,
      * numbers, booleans, arrays, and null nodes.
+     *
+     * <p>Pathological nesting is masked rather than walked: an iterative overflow here would abort
+     * the response after part of it had already been released upstream.
+     * Anchors: FEAT-005.
      */
     public JsonNode scrub(JsonNode node) {
+        return scrub(node, 0);
+    }
+
+    private JsonNode scrub(JsonNode node, int depth) {
         if (node == null || node.isNull()) {
             return node;
+        }
+        if (depth > MAX_JSON_DEPTH) {
+            logger.warn("JSON nesting exceeds {} levels during DLP scrubbing; masking subtree", MAX_JSON_DEPTH);
+            return TextNode.valueOf(SCAN_FAILURE_MASK);
         }
 
         if (node.isTextual()) {
@@ -119,12 +130,8 @@ public class DlpScrubber {
         if (node.isObject()) {
             ObjectNode objectNode = (ObjectNode) node;
             ObjectNode scrubbedObject = JsonNodeFactory.instance.objectNode();
-            Iterator<Map.Entry<String, JsonNode>> fields = objectNode.fields();
-            while (fields.hasNext()) {
-                Map.Entry<String, JsonNode> entry = fields.next();
-                String fieldName = entry.getKey();
-                JsonNode childNode = entry.getValue();
-                scrubbedObject.set(fieldName, scrub(childNode));
+            for (Map.Entry<String, JsonNode> entry : objectNode.properties()) {
+                scrubbedObject.set(entry.getKey(), scrub(entry.getValue(), depth + 1));
             }
             return scrubbedObject;
         }
@@ -133,7 +140,7 @@ public class DlpScrubber {
             ArrayNode arrayNode = (ArrayNode) node;
             ArrayNode scrubbedArray = JsonNodeFactory.instance.arrayNode(arrayNode.size());
             for (int i = 0; i < arrayNode.size(); i++) {
-                scrubbedArray.add(scrub(arrayNode.get(i)));
+                scrubbedArray.add(scrub(arrayNode.get(i), depth + 1));
             }
             return scrubbedArray;
         }
@@ -164,49 +171,46 @@ public class DlpScrubber {
     }
 
     /**
-     * Parses and redacts a JSON string. If JSON parsing fails, falls back to plain-text scrubbing.
+     * Redacts a JSON document held as a string, rewriting detected spans inside string values only.
+     * A payload that cannot be walked falls back to plain-text scrubbing.
      */
     public String scrubJson(String jsonString) {
         if (jsonString == null || jsonString.isEmpty()) {
             return jsonString;
         }
         try {
-            JsonNode root = objectMapper.readTree(jsonString);
-            JsonNode scrubbed = scrub(root);
-            return objectMapper.writeValueAsString(scrubbed);
-        } catch (JsonProcessingException e) {
-            logger.debug("Failed parsing JSON payload for tree scrubbing, falling back to text scrubbing", e);
+            List<DlpDetection> detections =
+                    redactionEngine.resolveNonOverlapping(scanner.scanJsonText(jsonString));
+            return detections.isEmpty()
+                    ? jsonString
+                    : redactionEngine.applyRedactions(jsonString, detections);
+        } catch (RuntimeException e) {
+            logger.debug("Failed scrubbing JSON payload, falling back to text scrubbing", e);
             return scrubText(jsonString);
         }
     }
 
     /**
-     * Sanitizes a raw byte payload.
+     * Sanitizes a raw byte payload. A JSON payload is scanned inside string values only, so numbers
+     * keep their JSON type; any other payload is scanned as text.
      */
     public byte[] scrub(byte[] payload) {
         if (payload == null || payload.length == 0) {
             return payload;
         }
 
-        // Check if starts with JSON object or array
-        int firstNonWs = 0;
-        while (firstNonWs < payload.length && Character.isWhitespace((char) payload[firstNonWs])) {
-            firstNonWs++;
+        List<DlpDetection> detections;
+        if (DlpScanner.looksLikeJson(payload)) {
+            detections = scanner.scanJsonBytes(payload);
+        } else {
+            detections = scanner.scanBytes(payload);
         }
 
-        if (firstNonWs < payload.length && (payload[firstNonWs] == '{' || payload[firstNonWs] == '[')) {
-            try {
-                JsonNode root = objectMapper.readTree(payload);
-                JsonNode scrubbed = scrub(root);
-                return objectMapper.writeValueAsBytes(scrubbed);
-            } catch (Exception e) {
-                logger.debug("Could not parse byte payload as JSON tree, falling back to text bytes", e);
-            }
+        List<DlpDetection> resolved = redactionEngine.resolveNonOverlapping(detections);
+        if (resolved.isEmpty()) {
+            return payload;
         }
-
-        String rawText = new String(payload, StandardCharsets.UTF_8);
-        String scrubbedText = scrubText(rawText);
-        return scrubbedText.getBytes(StandardCharsets.UTF_8);
+        return redactBytes(payload, resolved);
     }
 
     /**
@@ -238,5 +242,30 @@ public class DlpScrubber {
         FullHttpResponse scrubbedResponse = response.replace(scrubbedContent);
         scrubbedResponse.headers().set(HttpHeaderNames.CONTENT_LENGTH, scrubbedContent.readableBytes());
         return scrubbedResponse;
+    }
+
+    /**
+     * Copies {@code payload} into a new array, replacing each detected span with its marker.
+     */
+    private static byte[] redactBytes(byte[] payload, List<DlpDetection> detections) {
+        int size = payload.length;
+        for (DlpDetection detection : detections) {
+            size += detection.replacement().length() - (detection.end() - detection.start());
+        }
+
+        byte[] out = new byte[size];
+        int read = 0;
+        int write = 0;
+        for (DlpDetection detection : detections) {
+            int copy = detection.start() - read;
+            System.arraycopy(payload, read, out, write, copy);
+            write += copy;
+            byte[] marker = detection.replacement().getBytes(StandardCharsets.ISO_8859_1);
+            System.arraycopy(marker, 0, out, write, marker.length);
+            write += marker.length;
+            read = detection.end();
+        }
+        System.arraycopy(payload, read, out, write, payload.length - read);
+        return out;
     }
 }

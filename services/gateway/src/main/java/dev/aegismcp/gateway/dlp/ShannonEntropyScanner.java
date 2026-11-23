@@ -8,6 +8,9 @@ import java.util.regex.Pattern;
 
 /**
  * Shannon entropy scanner to catch unformatted high-entropy secrets (e.g., random base64/alphanumeric tokens).
+ *
+ * <p>The candidate regex is only evaluated against the token run the caller already isolated, so the
+ * cost per payload is proportional to the number of long tokens, not to the payload size.
  * Anchors: FEAT-005, NFR-002.
  */
 public final class ShannonEntropyScanner {
@@ -73,25 +76,42 @@ public final class ShannonEntropyScanner {
     }
 
     /**
-     * Scans the input text for high-entropy secret tokens.
+     * Scans a whole string for high-entropy secret tokens.
      */
     public List<DlpDetection> scan(String text) {
         List<DlpDetection> detections = new ArrayList<>();
-        if (!config.isEnableEntropyScanner() || text == null || text.length() < config.getMinEntropyTokenLength()) {
-            return detections;
+        if (text != null) {
+            scan(text, 0, text.length(), detections);
+        }
+        return detections;
+    }
+
+    /**
+     * Scans the region {@code [from, to)} of {@code text}, which the caller has already narrowed to
+     * a single token run, and appends detections with absolute offsets.
+     */
+    public void scan(CharSequence text, int from, int to, List<DlpDetection> detections) {
+        if (!config.isEnableEntropyScanner() || text == null || from >= to) {
+            return;
+        }
+        int minLength = config.getMinEntropyTokenLength();
+        if (to - from < minLength) {
+            return;
         }
 
         Matcher matcher = CANDIDATE_TOKEN_PATTERN.matcher(text);
-        int minLength = config.getMinEntropyTokenLength();
+        matcher.region(from, to);
+        matcher.useTransparentBounds(true);
+        matcher.useAnchoringBounds(false);
+
         double threshold = config.getEntropyThreshold();
         String replacement = config.resolveReplacement(DlpPatternType.HIGH_ENTROPY_TOKEN);
 
         while (matcher.find()) {
             int start = matcher.start();
             int end = matcher.end();
-            int tokenLength = end - start;
 
-            if (tokenLength < minLength) {
+            if (end - start < minLength) {
                 continue;
             }
 
@@ -102,7 +122,7 @@ public final class ShannonEntropyScanner {
                 continue;
             }
 
-            double entropy = calculateEntropy(token);
+            double entropy = calculateEntropy(text, start, end);
             if (entropy >= threshold) {
                 detections.add(new DlpDetection(
                         DlpCategory.HIGH_ENTROPY_SECRET,
@@ -114,14 +134,12 @@ public final class ShannonEntropyScanner {
                 ));
             }
         }
-
-        return detections;
     }
 
     /**
      * Excludes false positive candidates like UUIDs, timestamps, URLs, and standard code identifiers.
      */
-    private boolean isExcluded(String token, String fullText, int start, int end) {
+    private boolean isExcluded(String token, CharSequence fullText, int start, int end) {
         // Exclude UUIDs
         if (UUID_PATTERN.matcher(token).matches()) {
             return true;
@@ -134,8 +152,9 @@ public final class ShannonEntropyScanner {
 
         // Exclude URLs and web schemes (e.g. preceded by "http://", "https://", etc.)
         if (start >= 7) {
-            String prefix = fullText.substring(Math.max(0, start - 8), start);
-            if (prefix.endsWith("http://") || prefix.endsWith("https://") || prefix.endsWith("ftp://")) {
+            CharSequence prefix = fullText.subSequence(Math.max(0, start - 8), start);
+            String prefixText = prefix.toString();
+            if (prefixText.endsWith("http://") || prefixText.endsWith("https://") || prefixText.endsWith("ftp://")) {
                 return true;
             }
         }
@@ -148,16 +167,9 @@ public final class ShannonEntropyScanner {
             return true;
         }
 
-        // Exclude pure hex hashes if length is 32 or 40 or 64 and entropy is low (<= 4.0)
-        // Note: Max entropy of hex is 4.0; if threshold > 4.0, hex is naturally excluded.
-
         // Exclude identifiers that are clearly PascalCase or camelCase English words
         // e.g. "ConcurrentHashMapWithVirtualThreads"
-        if (isPascalOrCamelCaseCodeIdentifier(token)) {
-            return true;
-        }
-
-        return false;
+        return isPascalOrCamelCaseCodeIdentifier(token);
     }
 
     /**
@@ -190,10 +202,6 @@ public final class ShannonEntropyScanner {
         }
 
         // All lowercase or all uppercase letters without numbers/symbols are normal words
-        if (!hasDigits && !hasSymbols && (upperCount == 0 || lowerCount == 0)) {
-            return true;
-        }
-
-        return false;
+        return !hasDigits && !hasSymbols && (upperCount == 0 || lowerCount == 0);
     }
 }
