@@ -5,8 +5,6 @@
  * components can consume a utility instead of a raw hex, pixel or timing.
  * Colours are rendered as `rgb(var(--token) / <alpha-value>)` to keep opacity
  * modifiers (`bg-error-500/10`) working from the same channel triplet.
- *
- * @type {import('tailwindcss').Config}
  */
 /**
  * Builds a colour scale object whose keys map to `--color-<scale>-<shade>`.
@@ -16,6 +14,7 @@
 const scale = (scale, shades) =>
   Object.fromEntries(shades.map((shade) => [shade, `rgb(var(--color-${scale}-${shade}) / <alpha-value>)`]));
 
+/** @type {import('tailwindcss').Config} */
 export default {
   content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
   darkMode: 'class',
