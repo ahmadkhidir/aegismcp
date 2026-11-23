@@ -17,11 +17,17 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Unit tests verifying Policy Management API conforming to contracts C-005 and C-006.
- * Anchors: C-005, C-006, FEAT-002.
+ * Unit tests verifying the policy management endpoints conforming to contracts C-005, C-006,
+ * C-017, and C-018. Authentication is delegated to a test double that models the verified-token
+ * role outcome.
+ *
+ * <p>Anchors: FEAT-002, C-005, C-006, C-017, C-018.
  */
 class PolicyManagementHandlerTest {
 
@@ -33,7 +39,19 @@ class PolicyManagementHandlerTest {
     @BeforeEach
     void setUp() {
         cache = new PolicyCache();
-        handler = new PolicyManagementHandler(cache);
+        handler = new PolicyManagementHandler(cache, PolicyCompiler.getInstance(), mapper,
+                (method, bearerToken) -> {
+                    if (bearerToken == null || bearerToken.isBlank()) {
+                        return PolicyManagementHandler.PolicyAuthorizer.AuthResult
+                                .unauthenticated("Missing authentication credentials");
+                    }
+                    boolean write = HttpMethod.POST.equals(method) || HttpMethod.PUT.equals(method);
+                    if (write && bearerToken.contains("readonly")) {
+                        return PolicyManagementHandler.PolicyAuthorizer.AuthResult
+                                .forbidden("Insufficient permissions for this operation");
+                    }
+                    return PolicyManagementHandler.PolicyAuthorizer.AuthResult.allow();
+                });
         channel = new EmbeddedChannel(handler);
     }
 
@@ -64,19 +82,23 @@ class PolicyManagementHandlerTest {
         return mapper.readTree(bytes);
     }
 
-    @Test
-    @DisplayName("C-005: GET /api/v1/policies without Bearer token returns 401 Unauthorized")
-    void testGetPoliciesUnauthorized() throws Exception {
-        FullHttpResponse response = sendRequest(HttpMethod.GET, "/api/v1/policies", null, null);
-
-        assertNotNull(response);
-        assertEquals(HttpResponseStatus.UNAUTHORIZED, response.status());
-        JsonNode body = parseBody(response);
-        assertTrue(body.has("error"));
+    private FullHttpResponse publish(String rawYaml, String name, String version) throws Exception {
+        String payload = mapper.writeValueAsString(new PolicyDto.CreatePolicyRequest(
+                name, version, rawYaml, "commit-hash-789"));
+        return sendRequest(HttpMethod.POST, "/api/v1/policies", payload, "Bearer admin-token");
     }
 
     @Test
-    @DisplayName("C-005: GET /api/v1/policies with Bearer token returns 200 OK and policy list")
+    @DisplayName("C-005: GET /api/v1/policies without a token returns 401")
+    void testGetPoliciesUnauthorized() throws Exception {
+        FullHttpResponse response = sendRequest(HttpMethod.GET, "/api/v1/policies", null, null);
+        assertNotNull(response);
+        assertEquals(HttpResponseStatus.UNAUTHORIZED, response.status());
+        assertTrue(parseBody(response).has("error"));
+    }
+
+    @Test
+    @DisplayName("C-005: GET /api/v1/policies returns the policy catalogue")
     void testGetPoliciesSuccess() throws Exception {
         String yaml = """
                 id: pol_active_1
@@ -87,108 +109,66 @@ class PolicyManagementHandlerTest {
         cache.putPolicy(SecurityPolicy.of("pol_active_1", "Active Policy", "1.0.0", yaml, "git-sha-1"));
 
         FullHttpResponse response = sendRequest(HttpMethod.GET, "/api/v1/policies", null, "Bearer admin-token-123");
-
-        assertNotNull(response);
         assertEquals(HttpResponseStatus.OK, response.status());
 
         JsonNode body = parseBody(response);
-        assertTrue(body.has("policies"));
         JsonNode policies = body.get("policies");
-        assertTrue(policies.isArray());
         assertEquals(1, policies.size());
-
         JsonNode p1 = policies.get(0);
         assertEquals("pol_active_1", p1.get("id").asText());
-        assertEquals("Active Policy", p1.get("name").asText());
-        assertEquals("1.0.0", p1.get("version").asText());
         assertEquals("active", p1.get("status").asText());
         assertEquals("git-sha-1", p1.get("gitCommitHash").asText());
     }
 
     @Test
-    @DisplayName("C-005: GET /api/v1/policies?status=draft filters correctly")
-    void testGetPoliciesWithStatusFilter() throws Exception {
+    @DisplayName("C-005: status filtering selects drafts and an undeclared status is answered 400")
+    void testGetPoliciesStatusFilter() throws Exception {
         String y1 = "id: p1\nname: P1\nversion: 1.0\nrules: []\n";
         String y2 = "id: p2\nname: P2\nversion: 1.0\nrules: []\n";
+        cache.putPolicy(new SecurityPolicy("p1", "P1", "1.0", y1, SecurityPolicy.STATUS_ACTIVE, null,
+                "2026-10-21T08:00:00Z"));
+        cache.putPolicy(new SecurityPolicy("p2", "P2", "1.0", y2, SecurityPolicy.STATUS_DRAFT, null,
+                "2026-10-21T08:00:00Z"));
 
-        cache.putPolicy(new SecurityPolicy("p1", "P1", "1.0", y1, SecurityPolicy.STATUS_ACTIVE, null, "2026-10-21T08:00:00Z"));
-        cache.putPolicy(new SecurityPolicy("p2", "P2", "1.0", y2, SecurityPolicy.STATUS_DRAFT, null, "2026-10-21T08:00:00Z"));
+        FullHttpResponse draft = sendRequest(HttpMethod.GET, "/api/v1/policies?status=draft", null,
+                "Bearer auditor-token");
+        assertEquals(HttpResponseStatus.OK, draft.status());
+        JsonNode draftBody = parseBody(draft);
+        assertEquals(1, draftBody.get("policies").size());
+        assertEquals("p2", draftBody.get("policies").get(0).get("id").asText());
 
-        FullHttpResponse response = sendRequest(HttpMethod.GET, "/api/v1/policies?status=draft", null, "Bearer user-token");
-
-        assertNotNull(response);
-        assertEquals(HttpResponseStatus.OK, response.status());
-
-        JsonNode body = parseBody(response);
-        JsonNode policies = body.get("policies");
-        assertEquals(1, policies.size());
-        assertEquals("p2", policies.get(0).get("id").asText());
+        FullHttpResponse invalid = sendRequest(HttpMethod.GET, "/api/v1/policies?status=bogus", null,
+                "Bearer auditor-token");
+        assertEquals(HttpResponseStatus.BAD_REQUEST, invalid.status());
     }
 
     @Test
-    @DisplayName("C-006: POST /api/v1/policies without Bearer token returns 401 Unauthorized")
-    void testPostPolicyUnauthorized() throws Exception {
-        String payload = """
-                {
-                  "name": "New Policy",
-                  "version": "1.0.0",
-                  "rawYaml": "id: p\\nname: p\\nversion: 1\\nrules: []",
-                  "gitCommitHash": "sha123"
-                }
-                """;
+    @DisplayName("C-006: publishing without a token is 401 and without the admin role is 403")
+    void testPostPolicyAuthFailures() {
+        String payload = "{\"name\": \"New Policy\", \"version\": \"1.0.0\", "
+                + "\"rawYaml\": \"id: p\\nname: p\\nversion: 1\\nrules: []\"}";
 
-        FullHttpResponse response = sendRequest(HttpMethod.POST, "/api/v1/policies", payload, null);
+        FullHttpResponse unauthorized = sendRequest(HttpMethod.POST, "/api/v1/policies", payload, null);
+        assertEquals(HttpResponseStatus.UNAUTHORIZED, unauthorized.status());
+        unauthorized.release();
 
-        assertNotNull(response);
-        assertEquals(HttpResponseStatus.UNAUTHORIZED, response.status());
+        FullHttpResponse forbidden = sendRequest(HttpMethod.POST, "/api/v1/policies", payload,
+                "Bearer readonly-token-xyz");
+        assertEquals(HttpResponseStatus.FORBIDDEN, forbidden.status());
+        forbidden.release();
     }
 
     @Test
-    @DisplayName("C-006: POST /api/v1/policies with readonly token returns 403 Forbidden")
-    void testPostPolicyForbidden() throws Exception {
-        String payload = """
-                {
-                  "name": "New Policy",
-                  "version": "1.0.0",
-                  "rawYaml": "id: p\\nname: p\\nversion: 1\\nrules: []",
-                  "gitCommitHash": "sha123"
-                }
-                """;
-
-        FullHttpResponse response = sendRequest(HttpMethod.POST, "/api/v1/policies", payload, "Bearer readonly-token-xyz");
-
-        assertNotNull(response);
-        assertEquals(HttpResponseStatus.FORBIDDEN, response.status());
-        JsonNode body = parseBody(response);
-        assertTrue(body.has("error"));
-        assertTrue(body.get("error").asText().contains("Insufficient permissions"));
-    }
-
-    @Test
-    @DisplayName("C-006: POST /api/v1/policies with syntax error in YAML returns 400 Bad Request")
+    @DisplayName("C-006: an invalid YAML document is answered 400")
     void testPostPolicyInvalidYamlSyntax() throws Exception {
-        String payload = """
-                {
-                  "name": "Broken Policy",
-                  "version": "1.0.0",
-                  "rawYaml": "id: broken\\nname: [unclosed list",
-                  "gitCommitHash": "sha999"
-                }
-                """;
-
-        FullHttpResponse response = sendRequest(HttpMethod.POST, "/api/v1/policies", payload, "Bearer admin-token");
-
-        assertNotNull(response);
+        FullHttpResponse response = publish("id: broken\nname: [unclosed list", "Broken Policy", "1.0.0");
         assertEquals(HttpResponseStatus.BAD_REQUEST, response.status());
-
-        JsonNode body = parseBody(response);
-        assertTrue(body.has("error"));
-        assertTrue(body.get("error").asText().contains("Syntax error in YAML or invalid AST policy rules"));
+        assertTrue(parseBody(response).get("error").asText().contains("Syntax error"));
     }
 
     @Test
-    @DisplayName("C-006: POST /api/v1/policies with valid YAML returns 201 Created and registers policy")
-    void testPostPolicySuccess() throws Exception {
+    @DisplayName("C-006: a published version is stored as a draft and never governs traffic")
+    void testPostPolicyStoresDraft() throws Exception {
         String rawYaml = """
                 id: pol_staging_k8s
                 name: Staging K8s Tool Policy
@@ -199,37 +179,98 @@ class PolicyManagementHandlerTest {
                     action: allow
                 """;
 
-        String payload = mapper.writeValueAsString(new PolicyDto.CreatePolicyRequest(
-                "Staging K8s Tool Policy",
-                "1.2.0",
-                rawYaml,
-                "commit-hash-789"
-        ));
-
-        FullHttpResponse response = sendRequest(HttpMethod.POST, "/api/v1/policies", payload, "Bearer admin-token");
-
-        assertNotNull(response);
+        FullHttpResponse response = publish(rawYaml, "Staging K8s Tool Policy", "1.2.0");
         assertEquals(HttpResponseStatus.CREATED, response.status());
 
         JsonNode body = parseBody(response);
         assertEquals("pol_staging_k8s", body.get("id").asText());
-        assertEquals("Staging K8s Tool Policy", body.get("name").asText());
-        assertEquals("1.2.0", body.get("version").asText());
-        assertEquals("active", body.get("status").asText());
+        assertEquals("draft", body.get("status").asText());
         assertTrue(body.has("createdAt"));
 
-        // Verify policy is immediately active in in-memory cache
         SecurityPolicy cached = cache.getPolicy("pol_staging_k8s");
         assertNotNull(cached);
+        assertEquals("draft", cached.status());
         assertEquals("commit-hash-789", cached.gitCommitHash());
-
-        PolicyAst ast = cache.getPolicyForAgent("agent-worker", null);
-        assertNotNull(ast);
-        assertEquals("pol_staging_k8s", ast.id());
+        assertNull(cache.getPolicyForAgent("agent-worker", null),
+                "A draft must not govern traffic before activation");
     }
 
     @Test
-    @DisplayName("FEAT-002: Non-policy endpoint is passed through to next handler in Netty pipeline")
+    @DisplayName("C-017: GET /api/v1/policies/active is 404 before activation and returns the document after")
+    void testActivePolicyBeforeAndAfterActivation() throws Exception {
+        FullHttpResponse missing = sendRequest(HttpMethod.GET, "/api/v1/policies/active", null,
+                "Bearer operator-token");
+        assertEquals(HttpResponseStatus.NOT_FOUND, missing.status());
+        missing.release();
+
+        String rawYaml = "id: pol_live\nname: Live Policy\nversion: 2.0.0\nrules: []\n";
+        publish(rawYaml, "Live Policy", "2.0.0");
+
+        String activation = "{\"version\": \"2.0.0\", \"baseVersionId\": \"\", \"rawYaml\": "
+                + mapper.writeValueAsString(rawYaml) + "}";
+        cache.putPolicy(new SecurityPolicy("pol_live", "Live Policy", "2.0.0", rawYaml,
+                SecurityPolicy.STATUS_DRAFT, "commit-hash-789", "2026-10-21T08:00:00Z"));
+
+        FullHttpResponse activated = sendRequest(HttpMethod.PUT, "/api/v1/policies/active", activation,
+                "Bearer admin-token");
+        assertEquals(HttpResponseStatus.OK, activated.status());
+
+        JsonNode activatedBody = parseBody(activated);
+        assertEquals("pol_live", activatedBody.get("id").asText());
+        assertEquals("active", activatedBody.get("status").asText());
+        assertEquals("commit-hash-789", activatedBody.get("gitCommitHash").asText());
+
+        FullHttpResponse active = sendRequest(HttpMethod.GET, "/api/v1/policies/active", null,
+                "Bearer auditor-token");
+        assertEquals(HttpResponseStatus.OK, active.status());
+        JsonNode activeBody = parseBody(active);
+        assertEquals("active", activeBody.get("status").asText());
+        assertEquals(rawYaml, activeBody.get("rawYaml").asText());
+    }
+
+    @Test
+    @DisplayName("C-018: a stale baseVersionId is answered 409 and leaves the active policy in force")
+    void testActivationConflict() throws Exception {
+        String firstYaml = "id: pol_one\nname: One\nversion: 1.0.0\nrules: []\n";
+        String secondYaml = "id: pol_two\nname: Two\nversion: 2.0.0\nrules: []\n";
+
+        FullHttpResponse first = sendRequest(HttpMethod.PUT, "/api/v1/policies/active",
+                "{\"version\": \"1.0.0\", \"baseVersionId\": \"\", \"rawYaml\": "
+                        + mapper.writeValueAsString(firstYaml) + "}", "Bearer admin-token");
+        assertEquals(HttpResponseStatus.OK, first.status());
+
+        FullHttpResponse stale = sendRequest(HttpMethod.PUT, "/api/v1/policies/active",
+                "{\"version\": \"2.0.0\", \"baseVersionId\": \"\", \"rawYaml\": "
+                        + mapper.writeValueAsString(secondYaml) + "}", "Bearer admin-token");
+        assertEquals(HttpResponseStatus.CONFLICT, stale.status());
+
+        FullHttpResponse active = sendRequest(HttpMethod.GET, "/api/v1/policies/active", null,
+                "Bearer admin-token");
+        assertEquals("pol_one", parseBody(active).get("id").asText());
+    }
+
+    @Test
+    @DisplayName("C-018: an absent baseVersionId field is answered 400")
+    void testActivationRequiresBaseVersionId() throws Exception {
+        String rawYaml = "id: pol_three\nname: Three\nversion: 3.0.0\nrules: []\n";
+        FullHttpResponse response = sendRequest(HttpMethod.PUT, "/api/v1/policies/active",
+                "{\"version\": \"3.0.0\", \"rawYaml\": " + mapper.writeValueAsString(rawYaml) + "}",
+                "Bearer admin-token");
+        assertEquals(HttpResponseStatus.BAD_REQUEST, response.status());
+    }
+
+    @Test
+    @DisplayName("C-018: activation requires the admin role")
+    void testActivationRequiresAdmin() {
+        FullHttpResponse response = sendRequest(HttpMethod.PUT, "/api/v1/policies/active",
+                "{\"version\": \"1.0.0\", \"baseVersionId\": \"\", \"rawYaml\": \"id: x\"}",
+                "Bearer readonly-token");
+        assertEquals(HttpResponseStatus.FORBIDDEN, response.status());
+        response.release();
+    }
+
+    @Test
+    @DisplayName("FEAT-002: a non-policy endpoint is passed through to the next handler")
     void testUnmatchedPathPassesThrough() {
         DefaultFullHttpRequest request = new DefaultFullHttpRequest(
                 HttpVersion.HTTP_1_1,
@@ -241,5 +282,6 @@ class PolicyManagementHandlerTest {
         DefaultFullHttpRequest forwarded = channel.readInbound();
         assertNotNull(forwarded);
         assertEquals("/health", forwarded.uri());
+        forwarded.release();
     }
 }

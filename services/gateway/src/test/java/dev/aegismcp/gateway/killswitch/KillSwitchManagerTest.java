@@ -60,7 +60,7 @@ class KillSwitchManagerTest {
 
         // Activate global lockdown
         QuarantineResult result = killSwitchManager.quarantine(KillTargetType.GLOBAL, "global", "Suspected cluster-wide breach");
-        assertEquals(QuarantineStatus.ACTIVE, result.status());
+        assertEquals(QuarantineStatus.LOCKDOWN, result.status());
         assertTrue(killSwitchManager.isGlobalLockdown());
 
         // Blocked after lockdown

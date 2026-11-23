@@ -110,8 +110,8 @@ class ComplianceReportEngineTest {
                 "EU_AI_ACT",
                 "JSON",
                 "agent-analyst",
-                null,
-                null
+                "2020-01-01T00:00:00Z",
+                "2030-01-01T00:00:00Z"
         );
 
         ComplianceExportResponse response = engine.exportReport(request);
@@ -179,8 +179,8 @@ class ComplianceReportEngineTest {
                 "SOC2_TYPE2",
                 "CSV",
                 null,
-                null,
-                null
+                "2020-01-01T00:00:00Z",
+                "2030-01-01T00:00:00Z"
         );
 
         ComplianceExportResponse response = engine.exportReport(request);
@@ -220,7 +220,8 @@ class ComplianceReportEngineTest {
         );
         ledger.tamperWithBlock(1L, tampered);
 
-        ComplianceExportRequest request = new ComplianceExportRequest("EU_AI_ACT", "JSON", null, null, null);
+        ComplianceExportRequest request = new ComplianceExportRequest("EU_AI_ACT", "JSON", null,
+                "2020-01-01T00:00:00Z", "2030-01-01T00:00:00Z");
 
         LedgerIntegrityException ex = assertThrows(LedgerIntegrityException.class, () -> engine.exportReport(request));
         assertEquals(1L, ex.getBrokenAtBlock());
@@ -240,7 +241,8 @@ class ComplianceReportEngineTest {
         ledger.flush();
 
         // Query only agent-A
-        ComplianceExportRequest reqAgentA = new ComplianceExportRequest("EU_AI_ACT", "JSON", "agent-A", null, null);
+        ComplianceExportRequest reqAgentA = new ComplianceExportRequest("EU_AI_ACT", "JSON", "agent-A",
+                "2020-01-01T00:00:00Z", "2030-01-01T00:00:00Z");
         ComplianceExportResponse respAgentA = engine.exportReport(reqAgentA);
         assertEquals(2, respAgentA.recordCount());
 

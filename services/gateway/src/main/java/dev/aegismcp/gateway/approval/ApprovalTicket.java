@@ -10,8 +10,8 @@ import java.util.Objects;
 
 /**
  * Model representing a suspended tool invocation awaiting Human-in-the-Loop review.
- * Conforms to docs/AegisMCP/schema.md#ApprovalTicket and contract C-003.
- * Anchors: FEAT-006, C-003, C-004.
+ * Conforms to docs/AegisMCP/schema.md#ApprovalTicket and contracts C-003, C-004, C-014, and C-019.
+ * Anchors: FEAT-006, C-003, C-004, C-014, C-019.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record ApprovalTicket(
@@ -25,7 +25,9 @@ public record ApprovalTicket(
         @JsonProperty("expiresAt") String expiresAt,
         @JsonProperty("reviewer") String reviewer,
         @JsonProperty("decisionReason") String decisionReason,
-        @JsonProperty("triggerPolicyId") String triggerPolicyId
+        @JsonProperty("triggerPolicyId") String triggerPolicyId,
+        @JsonProperty("agentIntent") String agentIntent,
+        @JsonProperty("processedAt") String processedAt
 ) {
 
     public ApprovalTicket {
@@ -38,6 +40,27 @@ public record ApprovalTicket(
         if (arguments == null) {
             arguments = JsonNodeFactory.instance.objectNode();
         }
+    }
+
+    /**
+     * Compatibility constructor for callers that predate the agent-supplied intent and the
+     * resolution timestamp. Both are absent on a ticket created by those callers.
+     */
+    public ApprovalTicket(
+            String id,
+            String agentId,
+            String toolName,
+            JsonNode arguments,
+            double riskScore,
+            String status,
+            String requestedAt,
+            String expiresAt,
+            String reviewer,
+            String decisionReason,
+            String triggerPolicyId
+    ) {
+        this(id, agentId, toolName, arguments, riskScore, status, requestedAt, expiresAt,
+                reviewer, decisionReason, triggerPolicyId, null, null);
     }
 
     /**
@@ -88,7 +111,18 @@ public record ApprovalTicket(
         }
     }
 
+    /** Resolves the ticket at the current instant. */
     public ApprovalTicket withDecision(ApprovalStatus newStatus, String reviewerName, String reason) {
+        return withDecision(newStatus, reviewerName, reason, Instant.now().toString());
+    }
+
+    /** Resolves the ticket, recording the instant the resolution was applied. */
+    public ApprovalTicket withDecision(
+            ApprovalStatus newStatus,
+            String reviewerName,
+            String reason,
+            String resolvedAt
+    ) {
         return new ApprovalTicket(
                 id,
                 agentId,
@@ -100,7 +134,9 @@ public record ApprovalTicket(
                 expiresAt,
                 reviewerName,
                 reason,
-                triggerPolicyId
+                triggerPolicyId,
+                agentIntent,
+                resolvedAt
         );
     }
 }

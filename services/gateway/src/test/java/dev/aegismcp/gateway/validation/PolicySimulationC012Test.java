@@ -90,7 +90,10 @@ class PolicySimulationC012Test {
                 policyCache,
                 PolicyCompiler.getInstance(),
                 mapper,
-                PolicyManagementHandler.defaultAuthorizer(),
+                (method, bearerToken) -> (bearerToken == null || bearerToken.isBlank())
+                        ? PolicyManagementHandler.PolicyAuthorizer.AuthResult
+                                .unauthenticated("Missing authentication credentials")
+                        : PolicyManagementHandler.PolicyAuthorizer.AuthResult.allow(),
                 parameterValidator
         );
 

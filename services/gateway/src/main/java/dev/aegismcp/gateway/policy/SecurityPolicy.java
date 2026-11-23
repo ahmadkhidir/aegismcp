@@ -43,4 +43,9 @@ public record SecurityPolicy(
     public static SecurityPolicy of(String id, String name, String version, String rawYaml, String gitCommitHash) {
         return new SecurityPolicy(id, name, version, rawYaml, STATUS_ACTIVE, gitCommitHash, Instant.now().toString());
     }
+
+    /** A copy of this policy version in a different lifecycle state (C-018). */
+    public SecurityPolicy withStatus(String newStatus) {
+        return new SecurityPolicy(id, name, version, rawYaml, newStatus, gitCommitHash, createdAt);
+    }
 }

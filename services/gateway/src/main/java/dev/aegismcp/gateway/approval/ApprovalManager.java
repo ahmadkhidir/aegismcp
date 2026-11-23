@@ -2,6 +2,7 @@ package dev.aegismcp.gateway.approval;
 
 import dev.aegismcp.gateway.codec.JsonRpcError;
 import dev.aegismcp.gateway.codec.JsonRpcRequest;
+import dev.aegismcp.gateway.dlp.DlpScrubber;
 import dev.aegismcp.gateway.policy.DeclarativePolicyInterceptor;
 import dev.aegismcp.gateway.policy.PolicyEvaluationResult;
 import dev.aegismcp.gateway.proxy.InterceptionVerdict;
@@ -12,6 +13,7 @@ import org.slf4j.LoggerFactory;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -26,10 +28,11 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Human-in-the-Loop approval manager holding active approval tickets and suspending execution.
- * Intercepts tool calls flagged with REQUIRE_APPROVAL, suspends the async pipeline,
- * enforces TTL timeouts, and resumes or rejects execution upon human operator decisions.
- * Conforms to contracts C-003 and C-004.
- * Anchors: FEAT-006, C-003, C-004, NFR-001.
+ * Intercepts tool calls flagged with REQUIRE_APPROVAL, suspends the async pipeline, enforces TTL
+ * timeouts, and resumes or rejects execution upon human operator decisions. Reviewer identity is
+ * always the verified operator supplied by the endpoint, never a request-body value.
+ *
+ * <p>Anchors: FEAT-006, C-003, C-004, C-014, C-019, NFR-001.
  */
 public class ApprovalManager implements DeclarativePolicyInterceptor.ApprovalHandler, AutoCloseable {
 
@@ -95,6 +98,7 @@ public class ApprovalManager implements DeclarativePolicyInterceptor.ApprovalHan
                 request.toolArguments(),
                 DEFAULT_RISK_SCORE,
                 triggerPolicyId,
+                null,
                 defaultTtl
         );
     }
@@ -108,6 +112,22 @@ public class ApprovalManager implements DeclarativePolicyInterceptor.ApprovalHan
             com.fasterxml.jackson.databind.JsonNode arguments,
             double riskScore,
             String triggerPolicyId,
+            Duration ttl
+    ) {
+        return createAndSuspendTicket(agentId, toolName, arguments, riskScore, triggerPolicyId, null, ttl);
+    }
+
+    /**
+     * Creates an approval ticket carrying the agent's own justification, records it, and returns a
+     * suspended future.
+     */
+    public CompletableFuture<InterceptionVerdict> createAndSuspendTicket(
+            String agentId,
+            String toolName,
+            com.fasterxml.jackson.databind.JsonNode arguments,
+            double riskScore,
+            String triggerPolicyId,
+            String agentIntent,
             Duration ttl
     ) {
         String ticketId = "appr_" + UUID.randomUUID().toString().replace("-", "").substring(0, 10);
@@ -125,7 +145,9 @@ public class ApprovalManager implements DeclarativePolicyInterceptor.ApprovalHan
                 expiresAt.toString(),
                 null,
                 null,
-                triggerPolicyId
+                triggerPolicyId,
+                agentIntent,
+                null
         );
 
         CompletableFuture<InterceptionVerdict> future = new CompletableFuture<>();
@@ -152,23 +174,38 @@ public class ApprovalManager implements DeclarativePolicyInterceptor.ApprovalHan
     }
 
     /**
-     * Operator submits an authorization decision (APPROVE or REJECT) conforming to contract C-004.
+     * Approves a pending ticket on behalf of the verified reviewer named by the caller's token
+     * (C-004). The suspended JSON-RPC call is released before this method returns.
      */
-    public ApprovalDto.DecisionResponse submitDecision(
+    public ApprovalTicket approve(String ticketId, String reviewer) {
+        return resolve(ticketId, ApprovalDecision.APPROVE, reviewer, null);
+    }
+
+    /**
+     * Rejects a pending ticket on behalf of the verified reviewer (C-014). The supplied reason is
+     * delivered to the requesting agent and recorded with the ticket.
+     */
+    public ApprovalTicket reject(String ticketId, String reviewer, String reason) {
+        if (reason == null || reason.isBlank()) {
+            throw new ApprovalException.InvalidDecisionException(
+                    "Invalid rejection payload: 'reason' is required and must not be blank");
+        }
+        return resolve(ticketId, ApprovalDecision.REJECT, reviewer, reason);
+    }
+
+    private ApprovalTicket resolve(
             String ticketId,
-            String decisionStr,
+            ApprovalDecision decision,
             String reviewer,
             String reason
     ) {
         if (ticketId == null || ticketId.isBlank()) {
             throw new ApprovalException.TicketNotFoundException("Empty ticket ID");
         }
-
-        ApprovalDecision decision;
-        try {
-            decision = ApprovalDecision.fromString(decisionStr);
-        } catch (IllegalArgumentException e) {
-            throw new ApprovalException.InvalidDecisionException(e.getMessage());
+        if (reviewer == null || reviewer.isBlank()) {
+            // The reviewer comes from the verified token; an empty subject means the caller was
+            // never authenticated and the decision must not be attributed to anyone.
+            throw new ApprovalException.InvalidDecisionException("Reviewer identity is required");
         }
 
         ApprovalTicket existing = ticketStore.get(ticketId);
@@ -177,12 +214,13 @@ public class ApprovalManager implements DeclarativePolicyInterceptor.ApprovalHan
         }
 
         if (ApprovalStatus.TIMED_OUT.getValue().equalsIgnoreCase(existing.status()) || existing.isExpired()) {
-            throw new ApprovalException.TicketNotFoundException(ticketId + " has expired or timed out");
+            throw new ApprovalException.TicketExpiredException(ticketId);
         }
 
-        if (ApprovalStatus.APPROVED.getValue().equalsIgnoreCase(existing.status()) ||
-                ApprovalStatus.REJECTED.getValue().equalsIgnoreCase(existing.status())) {
-            throw new ApprovalException.TicketAlreadyResolvedException(ticketId, existing.status());
+        if (ApprovalStatus.APPROVED.getValue().equalsIgnoreCase(existing.status())
+                || ApprovalStatus.REJECTED.getValue().equalsIgnoreCase(existing.status())) {
+            throw new ApprovalException.TicketAlreadyResolvedException(
+                    ticketId, existing.status(), existing.reviewer());
         }
 
         ActiveTicket active = activeTickets.remove(ticketId);
@@ -190,7 +228,8 @@ public class ApprovalManager implements DeclarativePolicyInterceptor.ApprovalHan
             // Concurrent resolution
             ApprovalTicket recheck = ticketStore.get(ticketId);
             if (recheck != null && !recheck.isPending()) {
-                throw new ApprovalException.TicketAlreadyResolvedException(ticketId, recheck.status());
+                throw new ApprovalException.TicketAlreadyResolvedException(
+                        ticketId, recheck.status(), recheck.reviewer());
             }
             throw new ApprovalException.TicketNotFoundException(ticketId);
         }
@@ -202,25 +241,23 @@ public class ApprovalManager implements DeclarativePolicyInterceptor.ApprovalHan
                 ? ApprovalStatus.APPROVED
                 : ApprovalStatus.REJECTED;
 
-        ApprovalTicket resolvedTicket = active.ticket().withDecision(newStatus, reviewer, reason);
+        String processedAt = Instant.now().toString();
+        String recordedReason = (decision == ApprovalDecision.APPROVE) ? null : reason;
+        ApprovalTicket resolvedTicket = active.ticket().withDecision(newStatus, reviewer, recordedReason, processedAt);
         ticketStore.put(ticketId, resolvedTicket);
 
-        String processedAt = Instant.now().toString();
-
         if (decision == ApprovalDecision.APPROVE) {
-            logger.info("Approval ticket {} APPROVED by reviewer '{}'", ticketId, reviewer);
+            logger.info("Approval ticket {} approved by reviewer {}", ticketId, reviewer);
             active.future().complete(InterceptionVerdict.allow());
         } else {
-            logger.info("Approval ticket {} REJECTED by reviewer '{}': {}", ticketId, reviewer, reason);
-            String denialReason = (reason != null && !reason.isBlank())
-                    ? reason
-                    : "Explicit rejection by operator";
+            logger.info("Approval ticket {} rejected by reviewer {}", ticketId, reviewer);
             active.future().complete(
-                    InterceptionVerdict.block(JsonRpcError.policyViolation("Tool execution rejected by reviewer: " + denialReason))
+                    InterceptionVerdict.block(JsonRpcError.policyViolation(
+                            "Tool execution rejected by reviewer: " + reason))
             );
         }
 
-        return new ApprovalDto.DecisionResponse(ticketId, decision.name(), processedAt);
+        return resolvedTicket;
     }
 
     /**
@@ -234,12 +271,13 @@ public class ApprovalManager implements DeclarativePolicyInterceptor.ApprovalHan
                 ApprovalTicket timedOut = existing.withDecision(
                         ApprovalStatus.TIMED_OUT,
                         "system",
-                        "Approval deadline expired"
+                        "Approval deadline expired",
+                        existing.expiresAt()
                 );
                 ticketStore.put(ticketId, timedOut);
             }
 
-            logger.warn("Approval ticket {} TIMED OUT after {}s", ticketId, defaultTtl.toSeconds());
+            logger.warn("Approval ticket {} timed out after {}s", ticketId, defaultTtl.toSeconds());
             active.future().complete(
                     InterceptionVerdict.block(JsonRpcError.approvalTimedOut(
                             "Approval request timed out after " + defaultTtl.toSeconds() + " seconds"
@@ -260,7 +298,8 @@ public class ApprovalManager implements DeclarativePolicyInterceptor.ApprovalHan
                 ApprovalTicket cancelled = existing.withDecision(
                         ApprovalStatus.REJECTED,
                         "system",
-                        "Client request cancelled or connection dropped"
+                        "Agent session cancelled while the ticket was pending",
+                        Instant.now().toString()
                 );
                 ticketStore.put(ticketId, cancelled);
             }
@@ -269,7 +308,65 @@ public class ApprovalManager implements DeclarativePolicyInterceptor.ApprovalHan
     }
 
     /**
-     * Retrieves tickets conforming to C-003, optionally filtered by status.
+     * Pending tickets ordered by expiry ascending so the least remaining time-to-live appears
+     * first (C-003), capped at the requested limit.
+     */
+    public List<ApprovalTicket> getPendingTickets(int limit) {
+        List<ApprovalTicket> pending = new ArrayList<>();
+        for (ApprovalTicket ticket : ticketStore.values()) {
+            if (ticket.isPending() && !ticket.isExpired()) {
+                pending.add(ticket);
+            }
+        }
+        pending.sort(Comparator.comparing(ApprovalTicket::expiresAt));
+        if (limit > 0 && pending.size() > limit) {
+            return List.copyOf(pending.subList(0, limit));
+        }
+        return List.copyOf(pending);
+    }
+
+    /**
+     * Resolved tickets filtered by the history status, ordered by resolution time descending
+     * (C-019). {@code expired} maps to tickets that failed closed on their TTL.
+     */
+    public HistoryPage getHistory(String status, int limit, int offset) {
+        if (status == null || status.isBlank()) {
+            throw new ApprovalException.InvalidDecisionException("Query parameter 'status' is required");
+        }
+
+        String normalized = status.trim().toLowerCase();
+        List<ApprovalTicket> matching = new ArrayList<>();
+        for (ApprovalTicket ticket : ticketStore.values()) {
+            if (matchesHistoryStatus(ticket, normalized)) {
+                matching.add(ticket);
+            }
+        }
+        matching.sort(Comparator.comparing(
+                (ApprovalTicket ticket) -> ticket.processedAt() != null ? ticket.processedAt() : ticket.expiresAt()
+        ).reversed());
+
+        int total = matching.size();
+        int fromIndex = Math.min(Math.max(offset, 0), total);
+        int toIndex = Math.min(fromIndex + Math.max(limit, 0), total);
+        return new HistoryPage(List.copyOf(matching.subList(fromIndex, toIndex)), total);
+    }
+
+    private boolean matchesHistoryStatus(ApprovalTicket ticket, String status) {
+        return switch (status) {
+            case "approved" -> ApprovalStatus.APPROVED.getValue().equalsIgnoreCase(ticket.status());
+            case "rejected" -> ApprovalStatus.REJECTED.getValue().equalsIgnoreCase(ticket.status());
+            case "expired" -> ApprovalStatus.TIMED_OUT.getValue().equalsIgnoreCase(ticket.status());
+            default -> false;
+        };
+    }
+
+    /** One page of the approval history plus the total count of matching tickets. */
+    public record HistoryPage(List<ApprovalTicket> tickets, int total) {
+    }
+
+    /**
+     * Retrieves all tickets, optionally filtered by status. Retained for the compliance report
+     * engine, which counts reported approvals from every resolved ticket.
      */
     public List<ApprovalTicket> getTickets(String statusFilter) {
         if (statusFilter == null || statusFilter.isBlank()) {
@@ -301,6 +398,14 @@ public class ApprovalManager implements DeclarativePolicyInterceptor.ApprovalHan
 
     public int getTotalTicketCount() {
         return ticketStore.size();
+    }
+
+    /** Renders the arguments with DLP masking applied so a ticket never exposes a secret. */
+    public static String maskedArguments(ApprovalTicket ticket) {
+        if (ticket == null || ticket.arguments() == null) {
+            return "{}";
+        }
+        return DlpScrubber.getInstance().scrub(ticket.arguments()).toString();
     }
 
     public void clear() {

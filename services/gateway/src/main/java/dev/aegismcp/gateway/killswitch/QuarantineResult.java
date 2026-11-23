@@ -28,6 +28,6 @@ public record QuarantineResult(
     }
 
     public static QuarantineResult active(int affectedSessions) {
-        return new QuarantineResult(QuarantineStatus.ACTIVE, affectedSessions, Instant.now());
+        return new QuarantineResult(QuarantineStatus.LOCKDOWN, affectedSessions, Instant.now());
     }
 }

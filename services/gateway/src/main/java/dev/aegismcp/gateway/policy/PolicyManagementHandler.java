@@ -1,6 +1,7 @@
 package dev.aegismcp.gateway.policy;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.aegismcp.gateway.codec.JsonRpcCodec;
 import io.netty.buffer.ByteBuf;
@@ -25,20 +26,31 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 /**
- * Netty HTTP handler for Declarative Policy Management API conforming to contracts C-005 and C-006.
- * Serves GET /api/v1/policies and POST /api/v1/policies.
- * Anchors: C-005, C-006, FEAT-002.
+ * Netty HTTP handler for the declarative policy management contracts C-005, C-006, C-017, and
+ * C-018. Serves the policy catalogue, the publish path, and the active-document read and
+ * activation paths.
+ *
+ * <p>Every request is authenticated through the injected authorizer built from the verified OIDC
+ * token; a missing or invalid token is {@code 401}, a verified principal without the contract
+ * role is {@code 403}. No decision is taken from a caller-supplied header.
+ *
+ * <p>Anchors: FEAT-002, FEAT-008, C-005, C-006, C-017, C-018, NFR-029.
  */
 @ChannelHandler.Sharable
 public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
 
     private static final Logger logger = LoggerFactory.getLogger(PolicyManagementHandler.class);
     public static final String POLICIES_PATH = "/api/v1/policies";
+    public static final String ACTIVE_POLICY_PATH = "/api/v1/policies/active";
     public static final String POLICIES_SIMULATE_PATH = "/api/v1/policies/simulate";
     public static final String BEARER_PREFIX = "Bearer ";
+
+    private static final Set<String> POLICY_STATUSES = Set.of(
+            SecurityPolicy.STATUS_ACTIVE, SecurityPolicy.STATUS_DRAFT, SecurityPolicy.STATUS_ARCHIVED);
 
     private final PolicyCache policyCache;
     private final PolicyCompiler policyCompiler;
@@ -48,7 +60,9 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
     private final PolicyEvaluator policyEvaluator;
 
     /**
-     * Interface for authenticating and authorizing callers of policy management endpoints.
+     * Authenticates and authorizes a caller of a policy management endpoint. The HTTP method
+     * selects the contract role set: readable paths accept {@code admin}, {@code operator}, or
+     * {@code auditor}, while publishing and activation require {@code admin}.
      */
     @FunctionalInterface
     public interface PolicyAuthorizer {
@@ -67,17 +81,10 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
         }
     }
 
-    public PolicyManagementHandler(PolicyCache policyCache) {
-        this(policyCache, new dev.aegismcp.gateway.validation.DynamicParameterValidator());
-    }
-
-    public PolicyManagementHandler(PolicyCache policyCache, dev.aegismcp.gateway.validation.DynamicParameterValidator parameterValidator) {
-        this(policyCache, PolicyCompiler.getInstance(), JsonRpcCodec.getInstance().getMapper(), defaultAuthorizer(), parameterValidator);
-    }
-
     public PolicyManagementHandler(PolicyCache policyCache, PolicyCompiler policyCompiler,
                                    ObjectMapper jsonMapper, PolicyAuthorizer authorizer) {
-        this(policyCache, policyCompiler, jsonMapper, authorizer, new dev.aegismcp.gateway.validation.DynamicParameterValidator());
+        this(policyCache, policyCompiler, jsonMapper, authorizer,
+                new dev.aegismcp.gateway.validation.DynamicParameterValidator());
     }
 
     public PolicyManagementHandler(PolicyCache policyCache, PolicyCompiler policyCompiler,
@@ -92,17 +99,9 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
         this.policyEvaluator = new PolicyEvaluator(policyCache, parameterValidator);
     }
 
-    public static PolicyAuthorizer defaultAuthorizer() {
-        return (method, bearerToken) -> {
-            if (bearerToken == null || bearerToken.isBlank()) {
-                return PolicyAuthorizer.AuthResult.unauthenticated("Missing authentication credentials");
-            }
-            // If caller provides a read-only token attempting to POST, forbid it
-            if (HttpMethod.POST.equals(method) && bearerToken.contains("readonly")) {
-                return PolicyAuthorizer.AuthResult.forbidden("Insufficient permissions to publish policy: admin role required");
-            }
-            return PolicyAuthorizer.AuthResult.allow();
-        };
+    /** Convenience constructor for the shipped path: the platform JSON mapper and validator. */
+    public PolicyManagementHandler(PolicyCache policyCache, PolicyAuthorizer authorizer) {
+        this(policyCache, PolicyCompiler.getInstance(), JsonRpcCodec.getInstance().getMapper(), authorizer);
     }
 
     @Override
@@ -111,7 +110,8 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
         QueryStringDecoder queryDecoder = new QueryStringDecoder(uri);
         String path = queryDecoder.path();
 
-        if (!POLICIES_PATH.equals(path) && !POLICIES_SIMULATE_PATH.equals(path)) {
+        if (!POLICIES_PATH.equals(path) && !ACTIVE_POLICY_PATH.equals(path)
+                && !POLICIES_SIMULATE_PATH.equals(path)) {
             // Forward non-policy requests down the pipeline
             ctx.fireChannelRead(request);
             return;
@@ -120,14 +120,14 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
         boolean keepAlive = HttpUtil.isKeepAlive(request);
 
         try {
-            // Extract Authorization Bearer header
-            String authHeader = request.headers().get(HttpHeaderNames.AUTHORIZATION);
-            String bearerToken = null;
-            if (authHeader != null && authHeader.regionMatches(true, 0, BEARER_PREFIX, 0, BEARER_PREFIX.length())) {
-                bearerToken = authHeader.substring(BEARER_PREFIX.length()).trim();
+            String bearerToken = bearerToken(request);
+            PolicyAuthorizer.AuthResult authResult;
+            try {
+                authResult = authorizer.check(request.method(), bearerToken);
+            } catch (RuntimeException e) {
+                logger.warn("Policy authorization failed closed: {}", e.getMessage());
+                authResult = PolicyAuthorizer.AuthResult.unauthenticated("Invalid or missing credentials");
             }
-
-            PolicyAuthorizer.AuthResult authResult = authorizer.check(request.method(), bearerToken);
             if (!authResult.authorized()) {
                 if (authResult.forbidden()) {
                     sendJson(ctx, HttpResponseStatus.FORBIDDEN,
@@ -139,12 +139,23 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
                 return;
             }
 
-            if (POLICIES_SIMULATE_PATH.equals(path)) {
+            if (ACTIVE_POLICY_PATH.equals(path)) {
+                if (HttpMethod.GET.equals(request.method())) {
+                    handleGetActivePolicy(ctx, keepAlive);
+                } else if (HttpMethod.PUT.equals(request.method())) {
+                    handleActivatePolicy(ctx, request, keepAlive);
+                } else {
+                    sendJson(ctx, HttpResponseStatus.METHOD_NOT_ALLOWED,
+                            new PolicyDto.ErrorResponse("Method Not Allowed: only GET and PUT supported for the active policy"),
+                            keepAlive);
+                }
+            } else if (POLICIES_SIMULATE_PATH.equals(path)) {
                 if (HttpMethod.POST.equals(request.method())) {
                     handleSimulatePolicy(ctx, request, keepAlive);
                 } else {
                     sendJson(ctx, HttpResponseStatus.METHOD_NOT_ALLOWED,
-                            new PolicyDto.ErrorResponse("Method Not Allowed: only POST supported for policy simulation"), keepAlive);
+                            new PolicyDto.ErrorResponse("Method Not Allowed: only POST supported for policy simulation"),
+                            keepAlive);
                 }
             } else if (HttpMethod.GET.equals(request.method())) {
                 handleGetPolicies(ctx, queryDecoder, keepAlive);
@@ -152,109 +163,279 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
                 handlePostPolicy(ctx, request, keepAlive);
             } else {
                 sendJson(ctx, HttpResponseStatus.METHOD_NOT_ALLOWED,
-                        new PolicyDto.ErrorResponse("Method Not Allowed: only GET and POST supported"), keepAlive);
+                        new PolicyDto.ErrorResponse("Method Not Allowed: only GET and POST supported"),
+                        keepAlive);
             }
 
         } catch (Exception e) {
-            logger.error("Unhandled error processing policy management request", e);
+            // Exception text can carry policy or provider detail; it stays in the log.
+            logger.error("Unhandled error processing a policy management request", e);
             sendJson(ctx, HttpResponseStatus.INTERNAL_SERVER_ERROR,
-                    new PolicyDto.ErrorResponse("Internal server error: " + e.getMessage()), keepAlive);
+                    new PolicyDto.ErrorResponse("Internal server error"), keepAlive);
         } finally {
             request.release();
         }
     }
 
+    private static String bearerToken(FullHttpRequest request) {
+        String authHeader = request.headers().get(HttpHeaderNames.AUTHORIZATION);
+        if (authHeader != null
+                && authHeader.regionMatches(true, 0, BEARER_PREFIX, 0, BEARER_PREFIX.length())) {
+            return authHeader.substring(BEARER_PREFIX.length()).trim();
+        }
+        return null;
+    }
+
     private void handleGetPolicies(ChannelHandlerContext ctx, QueryStringDecoder queryDecoder, boolean keepAlive) {
         List<String> statusParams = queryDecoder.parameters().get("status");
         String statusFilter = (statusParams != null && !statusParams.isEmpty()) ? statusParams.get(0) : null;
+        if (statusFilter != null && !statusFilter.isBlank()
+                && !POLICY_STATUSES.contains(statusFilter.trim().toLowerCase())) {
+            sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
+                    new PolicyDto.ErrorResponse(
+                            "Invalid query parameter 'status': expected one of active, draft, archived"),
+                    keepAlive);
+            return;
+        }
 
         List<SecurityPolicy> policies = policyCache.getAllPolicies(statusFilter);
-        PolicyDto.PolicyListResponse response = new PolicyDto.PolicyListResponse(policies);
-
-        sendJson(ctx, HttpResponseStatus.OK, response, keepAlive);
+        sendJson(ctx, HttpResponseStatus.OK, new PolicyDto.PolicyListResponse(policies), keepAlive);
     }
 
+    private void handleGetActivePolicy(ChannelHandlerContext ctx, boolean keepAlive) {
+        SecurityPolicy active = policyCache.getActivePolicy();
+        if (active == null) {
+            sendJson(ctx, HttpResponseStatus.NOT_FOUND,
+                    new PolicyDto.ErrorResponse("No policy version is active"), keepAlive);
+            return;
+        }
+        sendJson(ctx, HttpResponseStatus.OK, active, keepAlive);
+    }
+
+    /**
+     * Publishes a policy version as a draft (C-006). A document identical to an already published
+     * draft returns that record rather than creating a duplicate; a draft never governs traffic.
+     */
     private void handlePostPolicy(ChannelHandlerContext ctx, FullHttpRequest request, boolean keepAlive) {
-        ByteBuf content = request.content();
-        if (!content.isReadable()) {
+        byte[] bytes = readBody(request);
+        if (bytes.length == 0) {
             sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
                     new PolicyDto.ErrorResponse("Empty request body"), keepAlive);
             return;
         }
-
-        byte[] bytes = new byte[content.readableBytes()];
-        content.readBytes(bytes);
 
         PolicyDto.CreatePolicyRequest createRequest;
         try {
             createRequest = jsonMapper.readValue(bytes, PolicyDto.CreatePolicyRequest.class);
         } catch (Exception e) {
             sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
-                    new PolicyDto.ErrorResponse("Invalid JSON payload: " + e.getMessage()), keepAlive);
+                    new PolicyDto.ErrorResponse("Invalid JSON payload"), keepAlive);
+            return;
+        }
+        if (createRequest == null || isBlank(createRequest.rawYaml())) {
+            sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
+                    new PolicyDto.ErrorResponse("Invalid policy payload: 'rawYaml' is required"),
+                    keepAlive);
             return;
         }
 
-        // Validate and compile YAML per C-006 (HTTP 400 on YAML syntax error or invalid AST rules)
         PolicyAst compiledAst;
         try {
             compiledAst = policyCompiler.compile(createRequest.rawYaml());
         } catch (PolicyCompilationException e) {
             sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
-                    new PolicyDto.ErrorResponse("Syntax error in YAML or invalid AST policy rules", e.getMessage()), keepAlive);
+                    new PolicyDto.ErrorResponse("Syntax error in YAML or invalid AST policy rules"),
+                    keepAlive);
             return;
         }
 
-        // Generate stable ID if AST doesn't declare one or generate unique policy instance id
-        String policyId = (compiledAst.id() != null && !compiledAst.id().isBlank())
-                ? compiledAst.id()
-                : "pol_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        SecurityPolicy existing = policyCache.findByRawYaml(createRequest.rawYaml());
+        if (existing != null && SecurityPolicy.STATUS_DRAFT.equals(existing.status())) {
+            sendJson(ctx, HttpResponseStatus.CREATED, toCreateResponse(existing), keepAlive);
+            return;
+        }
 
+        String policyId = versionRecordId(compiledAst, createRequest.version());
         SecurityPolicy policy = new SecurityPolicy(
                 policyId,
                 createRequest.name(),
                 createRequest.version(),
                 createRequest.rawYaml(),
-                SecurityPolicy.STATUS_ACTIVE,
+                SecurityPolicy.STATUS_DRAFT,
                 createRequest.gitCommitHash(),
                 Instant.now().toString()
         );
 
-        // Put policy in cache (atomically verified)
-        policyCache.putPolicy(policy);
+        try {
+            policyCache.putPolicy(policy);
+        } catch (PolicyCompilationException e) {
+            sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
+                    new PolicyDto.ErrorResponse("Syntax error in YAML or invalid AST policy rules"),
+                    keepAlive);
+            return;
+        }
 
-        PolicyDto.CreatePolicyResponse response = new PolicyDto.CreatePolicyResponse(
-                policy.id(),
-                policy.name(),
-                policy.version(),
-                policy.status(),
-                policy.createdAt()
-        );
-
-        sendJson(ctx, HttpResponseStatus.CREATED, response, keepAlive);
+        sendJson(ctx, HttpResponseStatus.CREATED, toCreateResponse(policy), keepAlive);
     }
 
-    private void handleSimulatePolicy(ChannelHandlerContext ctx, FullHttpRequest request, boolean keepAlive) {
-        ByteBuf content = request.content();
-        if (!content.isReadable()) {
+    private static PolicyDto.CreatePolicyResponse toCreateResponse(SecurityPolicy policy) {
+        return new PolicyDto.CreatePolicyResponse(
+                policy.id(), policy.name(), policy.version(), policy.status(), policy.createdAt());
+    }
+
+    /**
+     * Selects the catalogue record identifier for a policy version. The declared policy identifier
+     * is reused while it names no other version; a second version of the same policy gets a
+     * version-qualified record so every published version stays readable through C-005.
+     */
+    private String versionRecordId(PolicyAst ast, String declaredVersion) {
+        String baseId = ast.id() != null && !ast.id().isBlank()
+                ? ast.id()
+                : "pol_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        String version = declaredVersion != null && !declaredVersion.isBlank()
+                ? declaredVersion
+                : ast.version();
+
+        SecurityPolicy existing = policyCache.getPolicy(baseId);
+        if (existing == null || existing.version() == null || existing.version().equals(version)) {
+            return baseId;
+        }
+        String qualified = baseId + "@" + version;
+        SecurityPolicy qualifiedRecord = policyCache.getPolicy(qualified);
+        if (qualifiedRecord == null || version.equals(qualifiedRecord.version())) {
+            return qualified;
+        }
+        return "pol_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+    }
+
+    /**
+     * Activates a policy version (C-018). The named base version must still be the active one, the
+     * document must compile, and the compiled policy replaces the in-memory cache before the
+     * response is returned; a rejected document leaves the previously active version in force.
+     */
+    private void handleActivatePolicy(ChannelHandlerContext ctx, FullHttpRequest request, boolean keepAlive) {
+        byte[] bytes = readBody(request);
+        if (bytes.length == 0) {
             sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
                     new PolicyDto.ErrorResponse("Empty request body"), keepAlive);
             return;
         }
 
-        byte[] bytes = new byte[content.readableBytes()];
-        content.readBytes(bytes);
+        JsonNode document;
+        try {
+            document = jsonMapper.readTree(bytes);
+        } catch (Exception e) {
+            sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
+                    new PolicyDto.ErrorResponse("Invalid JSON payload"), keepAlive);
+            return;
+        }
+        if (document == null || !document.isObject() || !document.has("baseVersionId")) {
+            sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
+                    new PolicyDto.ErrorResponse("Invalid policy payload: 'baseVersionId' is required"),
+                    keepAlive);
+            return;
+        }
+
+        PolicyDto.ActivatePolicyRequest activateRequest;
+        try {
+            activateRequest = jsonMapper.treeToValue(document, PolicyDto.ActivatePolicyRequest.class);
+        } catch (Exception e) {
+            sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
+                    new PolicyDto.ErrorResponse("Invalid JSON payload"), keepAlive);
+            return;
+        }
+        if (activateRequest == null || isBlank(activateRequest.rawYaml())) {
+            sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
+                    new PolicyDto.ErrorResponse("Invalid policy payload: 'rawYaml' is required"),
+                    keepAlive);
+            return;
+        }
+
+        PolicyAst compiledAst;
+        try {
+            compiledAst = policyCompiler.compile(activateRequest.rawYaml());
+        } catch (PolicyCompilationException e) {
+            sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
+                    new PolicyDto.ErrorResponse("Syntax error in YAML or invalid AST policy rules"),
+                    keepAlive);
+            return;
+        }
+
+        String baseVersionId = activateRequest.baseVersionId();
+        SecurityPolicy currentActive = policyCache.getActivePolicy();
+        String currentActiveId = currentActive != null ? currentActive.id() : "";
+        String declaredBase = baseVersionId != null ? baseVersionId : "";
+        if (!declaredBase.equals(currentActiveId)) {
+            sendJson(ctx, HttpResponseStatus.CONFLICT,
+                    new PolicyDto.ErrorResponse(
+                            "The policy version named by 'baseVersionId' is no longer active"),
+                    keepAlive);
+            return;
+        }
+
+        SecurityPolicy draft = policyCache.findByRawYaml(activateRequest.rawYaml());
+        String policyId;
+        String name;
+        String version;
+        String gitCommitHash;
+        String createdAt;
+        if (draft != null && SecurityPolicy.STATUS_DRAFT.equals(draft.status())) {
+            policyId = draft.id();
+            name = draft.name();
+            version = draft.version();
+            gitCommitHash = draft.gitCommitHash();
+            createdAt = draft.createdAt();
+        } else {
+            policyId = versionRecordId(compiledAst, activateRequest.version());
+            name = compiledAst.name() != null && !compiledAst.name().isBlank()
+                    ? compiledAst.name()
+                    : policyId;
+            version = activateRequest.version() != null && !activateRequest.version().isBlank()
+                    ? activateRequest.version()
+                    : compiledAst.version();
+            gitCommitHash = null;
+            createdAt = Instant.now().toString();
+        }
+
+        SecurityPolicy activated;
+        try {
+            activated = policyCache.activate(new SecurityPolicy(
+                    policyId,
+                    name,
+                    version,
+                    activateRequest.rawYaml(),
+                    SecurityPolicy.STATUS_ACTIVE,
+                    gitCommitHash,
+                    createdAt));
+        } catch (PolicyCompilationException e) {
+            sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
+                    new PolicyDto.ErrorResponse("Syntax error in YAML or invalid AST policy rules"),
+                    keepAlive);
+            return;
+        }
+
+        sendJson(ctx, HttpResponseStatus.OK, activated, keepAlive);
+    }
+
+    private void handleSimulatePolicy(ChannelHandlerContext ctx, FullHttpRequest request, boolean keepAlive) {
+        byte[] bytes = readBody(request);
+        if (bytes.length == 0) {
+            sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
+                    new PolicyDto.ErrorResponse("Empty request body"), keepAlive);
+            return;
+        }
 
         PolicyDto.SimulatePolicyRequest simRequest;
         try {
             simRequest = jsonMapper.readValue(bytes, PolicyDto.SimulatePolicyRequest.class);
         } catch (Exception e) {
             sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
-                    new PolicyDto.ErrorResponse("Invalid JSON payload: " + e.getMessage()), keepAlive);
+                    new PolicyDto.ErrorResponse("Invalid JSON payload"), keepAlive);
             return;
         }
 
-        if (simRequest.agentId() == null || simRequest.agentId().isBlank() ||
-                simRequest.toolName() == null || simRequest.toolName().isBlank()) {
+        if (simRequest.agentId() == null || simRequest.agentId().isBlank()
+                || simRequest.toolName() == null || simRequest.toolName().isBlank()) {
             sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
                     new PolicyDto.ErrorResponse("agentId and toolName are required"), keepAlive);
             return;
@@ -279,7 +460,7 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
             }
         }
 
-        // 2. Evaluate against active security policy
+        // 2. Evaluate against the active security policy
         dev.aegismcp.gateway.proxy.AgentIdentity identity = new dev.aegismcp.gateway.proxy.AgentIdentity(
                 simRequest.agentId(), null, null, true
         );
@@ -302,6 +483,20 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
                 violations
         );
         sendJson(ctx, HttpResponseStatus.OK, simResponse, keepAlive);
+    }
+
+    private static byte[] readBody(FullHttpRequest request) {
+        ByteBuf content = request.content();
+        if (!content.isReadable()) {
+            return new byte[0];
+        }
+        byte[] bytes = new byte[content.readableBytes()];
+        content.readBytes(bytes);
+        return bytes;
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     private void sendJson(ChannelHandlerContext ctx, HttpResponseStatus status, Object payload, boolean keepAlive) {

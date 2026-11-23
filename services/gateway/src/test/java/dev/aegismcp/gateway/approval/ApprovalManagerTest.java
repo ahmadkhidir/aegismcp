@@ -102,16 +102,12 @@ class ApprovalManagerTest {
         assertEquals(1, tickets.size());
         String ticketId = tickets.get(0).id();
 
-        ApprovalDto.DecisionResponse response = approvalManager.submitDecision(
-                ticketId,
-                "APPROVE",
-                "ciso_reviewer",
-                "Transaction verified against invoice #4092"
-        );
+        ApprovalTicket response = approvalManager.approve(ticketId, "ciso_reviewer");
 
         assertNotNull(response);
-        assertEquals(ticketId, response.ticketId());
-        assertEquals("APPROVE", response.status());
+        assertEquals(ticketId, response.id());
+        assertEquals("approved", response.status());
+        assertNotNull(response.processedAt());
 
         InterceptionVerdict verdict = future.get(1, TimeUnit.SECONDS);
         assertInstanceOf(InterceptionVerdict.Allow.class, verdict, "Approved request must yield Allow verdict");
@@ -121,7 +117,6 @@ class ApprovalManagerTest {
         ApprovalTicket updated = updatedOpt.get();
         assertEquals("approved", updated.status());
         assertEquals("ciso_reviewer", updated.reviewer());
-        assertEquals("Transaction verified against invoice #4092", updated.decisionReason());
     }
 
     @Test
@@ -141,14 +136,13 @@ class ApprovalManagerTest {
 
         String ticketId = approvalManager.getTickets("pending").get(0).id();
 
-        ApprovalDto.DecisionResponse response = approvalManager.submitDecision(
+        ApprovalTicket response = approvalManager.reject(
                 ticketId,
-                "REJECT",
                 "lead_dba",
                 "Prohibited operation on production cluster"
         );
 
-        assertEquals("REJECT", response.status());
+        assertEquals("rejected", response.status());
 
         InterceptionVerdict verdict = future.get(1, TimeUnit.SECONDS);
         assertInstanceOf(InterceptionVerdict.Block.class, verdict);
@@ -210,11 +204,11 @@ class ApprovalManagerTest {
         String ticketId = approvalManager.getTickets("pending").get(0).id();
 
         // First resolution: approve
-        approvalManager.submitDecision(ticketId, "APPROVE", "ops_admin", "Approved restart");
+        approvalManager.approve(ticketId, "ops_admin");
 
         // Second resolution attempt must fail with TicketAlreadyResolvedException
         assertThrows(ApprovalException.TicketAlreadyResolvedException.class, () -> {
-            approvalManager.submitDecision(ticketId, "REJECT", "secops", "Late reject");
+            approvalManager.reject(ticketId, "secops", "Late reject");
         });
     }
 
@@ -222,7 +216,7 @@ class ApprovalManagerTest {
     @DisplayName("C-004: Submitting decision on non-existent or expired ticket throws TicketNotFoundException (HTTP 404)")
     void testCannotResolveNonExistentOrExpiredTicket() {
         assertThrows(ApprovalException.TicketNotFoundException.class, () -> {
-            approvalManager.submitDecision("appr_non_existent", "APPROVE", "admin", "reason");
+            approvalManager.approve("appr_non_existent", "admin");
         });
     }
 
@@ -239,8 +233,8 @@ class ApprovalManagerTest {
         String id1 = pendingTickets.get(0).id();
         String id2 = pendingTickets.get(1).id();
 
-        approvalManager.submitDecision(id1, "APPROVE", "rev1", "ok");
-        approvalManager.submitDecision(id2, "REJECT", "rev2", "deny");
+        approvalManager.approve(id1, "rev1");
+        approvalManager.reject(id2, "rev2", "deny");
 
         assertEquals(1, approvalManager.getTickets("pending").size());
         assertEquals(1, approvalManager.getTickets("approved").size());
@@ -306,7 +300,7 @@ class ApprovalManagerTest {
         assertEquals("delete_all_data", pending.get(0).toolName());
 
         // Approve ticket
-        approvalManager.submitDecision(pending.get(0).id(), "APPROVE", "lead_admin", "Emergency authorization granted");
+        approvalManager.approve(pending.get(0).id(), "lead_admin");
 
         InterceptionVerdict verdict = future.get(1, TimeUnit.SECONDS);
         assertInstanceOf(InterceptionVerdict.Allow.class, verdict);

@@ -30,12 +30,14 @@ public class KillSwitchManager {
     private volatile QuarantineEntry globalLockdownEntry = null;
 
     private final ConcurrentHashMap<String, QuarantineEntry> quarantinedAgents = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, QuarantineEntry> quarantinedSessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, QuarantineEntry> quarantinedTools = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, QuarantineEntry> quarantinedServers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> toolToServerMap = new ConcurrentHashMap<>();
 
     // Active session tracking: agentId -> set of channels, serverId -> set of channels
     private final ConcurrentHashMap<String, Set<Channel>> agentChannels = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Set<Channel>> sessionChannels = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Set<Channel>> serverChannels = new ConcurrentHashMap<>();
     private final Set<Channel> allChannels = ConcurrentHashMap.newKeySet();
 
@@ -60,6 +62,17 @@ public class KillSwitchManager {
         channel.closeFuture().addListener(f -> unregisterSession(channel));
     }
 
+    /**
+     * Registers a transport channel against the session identifier the emergency kill-switch
+     * addresses, alongside the agent and upstream server it belongs to (C-008).
+     */
+    public void registerSession(String sessionId, String agentId, String serverId, Channel channel) {
+        registerSession(agentId, serverId, channel);
+        if (sessionId != null && !sessionId.isBlank() && channel != null) {
+            sessionChannels.computeIfAbsent(sessionId, k -> ConcurrentHashMap.newKeySet()).add(channel);
+        }
+    }
+
     public void registerSession(String agentId, Channel channel) {
         registerSession(agentId, null, channel);
     }
@@ -70,6 +83,7 @@ public class KillSwitchManager {
         }
         allChannels.remove(channel);
         agentChannels.values().forEach(set -> set.remove(channel));
+        sessionChannels.values().forEach(set -> set.remove(channel));
         serverChannels.values().forEach(set -> set.remove(channel));
     }
 
@@ -98,6 +112,10 @@ public class KillSwitchManager {
             case GLOBAL -> {
                 int affected = activateGlobalLockdown(safeReason);
                 yield QuarantineResult.active(affected);
+            }
+            case SESSION -> {
+                int affected = quarantineSession(targetId, safeReason);
+                yield QuarantineResult.quarantined(affected);
             }
             case AGENT -> {
                 int affected = quarantineAgent(targetId, safeReason);
@@ -173,6 +191,43 @@ public class KillSwitchManager {
         return agentId != null && quarantinedAgents.containsKey(agentId);
     }
 
+    /** True when the agent identity currently holds at least one open transport stream. */
+    public boolean hasAgentSession(String agentId) {
+        Set<Channel> channels = agentId != null ? agentChannels.get(agentId) : null;
+        return channels != null && !channels.isEmpty();
+    }
+
+    /**
+     * Quarantines a single transport session and severs its channel (C-008 {@code session} target).
+     *
+     * @return number of closed sessions
+     */
+    public int quarantineSession(String sessionId, String reason) {
+        Objects.requireNonNull(sessionId, "sessionId must not be null");
+        quarantinedSessions.put(sessionId, new QuarantineEntry(KillTargetType.SESSION, sessionId, reason, Instant.now()));
+        logger.warn("Session '{}' quarantined: {}", sessionId, reason);
+
+        Set<Channel> channels = sessionChannels.remove(sessionId);
+        return channels != null ? closeChannels(channels) : 0;
+    }
+
+    public void unquarantineSession(String sessionId) {
+        if (sessionId != null) {
+            quarantinedSessions.remove(sessionId);
+            logger.info("Session '{}' quarantine removed.", sessionId);
+        }
+    }
+
+    public boolean isSessionQuarantined(String sessionId) {
+        return sessionId != null && quarantinedSessions.containsKey(sessionId);
+    }
+
+    /** True when the session identifier currently holds at least one open transport stream. */
+    public boolean hasSession(String sessionId) {
+        Set<Channel> channels = sessionId != null ? sessionChannels.get(sessionId) : null;
+        return channels != null && !channels.isEmpty();
+    }
+
     /**
      * Quarantines a tool name, blocking all subsequent invocations across all agents.
      */
@@ -217,12 +272,19 @@ public class KillSwitchManager {
         return serverId != null && quarantinedServers.containsKey(serverId);
     }
 
+    /** True when the upstream server identifier currently holds at least one open stream. */
+    public boolean hasServerSession(String serverId) {
+        Set<Channel> channels = serverId != null ? serverChannels.get(serverId) : null;
+        return channels != null && !channels.isEmpty();
+    }
+
     /**
      * Checks if any quarantine or global lockdown is currently active.
      */
     public boolean hasActiveQuarantines() {
         return isGlobalLockdown()
                 || !quarantinedAgents.isEmpty()
+                || !quarantinedSessions.isEmpty()
                 || !quarantinedTools.isEmpty()
                 || !quarantinedServers.isEmpty();
     }
@@ -236,6 +298,7 @@ public class KillSwitchManager {
         }
         switch (targetType) {
             case GLOBAL -> deactivateGlobalLockdown();
+            case SESSION -> unquarantineSession(targetId);
             case AGENT -> unquarantineAgent(targetId);
             case TOOL -> unquarantineTool(targetId);
             case SERVER -> unquarantineServer(targetId);
@@ -248,6 +311,7 @@ public class KillSwitchManager {
     public void resetAll() {
         deactivateGlobalLockdown();
         quarantinedAgents.clear();
+        quarantinedSessions.clear();
         quarantinedTools.clear();
         quarantinedServers.clear();
         logger.info("All quarantines and lockdowns reset.");
@@ -255,6 +319,10 @@ public class KillSwitchManager {
 
     public Map<String, QuarantineEntry> getQuarantinedAgents() {
         return Collections.unmodifiableMap(quarantinedAgents);
+    }
+
+    public Map<String, QuarantineEntry> getQuarantinedSessions() {
+        return Collections.unmodifiableMap(quarantinedSessions);
     }
 
     public Map<String, QuarantineEntry> getQuarantinedTools() {

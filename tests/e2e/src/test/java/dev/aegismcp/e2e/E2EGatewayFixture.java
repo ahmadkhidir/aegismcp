@@ -127,8 +127,16 @@ public class E2EGatewayFixture implements AutoCloseable {
         this.emergencyHandler = new EmergencyManagementHandler(
                 killSwitchManager,
                 gatewayMetrics,
+                auditLedger,
                 JsonRpcCodec.getInstance().getMapper(),
-                EmergencyManagementHandler.defaultAuthorizer()
+                (path, method, bearerToken, cookieHeader) -> (bearerToken == null || bearerToken.isBlank())
+                        ? EmergencyManagementHandler.EmergencyAuthorizer.AuthResult
+                                .unauthenticated("Missing authentication credentials")
+                        : EmergencyManagementHandler.EmergencyAuthorizer.AuthResult.verified(
+                                "e2e-operator",
+                                java.util.Map.of(
+                                        "auth_time", java.time.Instant.now().minusSeconds(30).getEpochSecond(),
+                                        "amr", java.util.List.of("pwd", "mfa")))
         );
         this.identityResolver = identityResolver;
         this.sslContext = sslContext;
@@ -263,18 +271,27 @@ public class E2EGatewayFixture implements AutoCloseable {
                 auditLedger,
                 auditEngine,
                 new ObjectMapper(),
-                AuditVerificationHandler.defaultAuthorizer()
+                bearerToken -> (bearerToken == null || bearerToken.isBlank())
+                        ? AuditVerificationHandler.AuditAuthorizer.AuthResult
+                                .unauthenticated("Missing authentication credentials")
+                        : AuditVerificationHandler.AuditAuthorizer.AuthResult.allow()
         );
         PolicyManagementHandler policyHandler = new PolicyManagementHandler(
                 policyCache,
                 PolicyCompiler.getInstance(),
                 JsonRpcCodec.getInstance().getMapper(),
-                PolicyManagementHandler.defaultAuthorizer()
+                (method, bearerToken) -> (bearerToken == null || bearerToken.isBlank())
+                        ? PolicyManagementHandler.PolicyAuthorizer.AuthResult
+                                .unauthenticated("Missing authentication credentials")
+                        : PolicyManagementHandler.PolicyAuthorizer.AuthResult.allow()
         );
         ApprovalManagementHandler approvalHandler = new ApprovalManagementHandler(
                 approvalManager,
                 JsonRpcCodec.getInstance().getMapper(),
-                ApprovalManagementHandler.defaultAuthorizer()
+                (path, method, bearerToken) -> (bearerToken == null || bearerToken.isBlank())
+                        ? ApprovalManagementHandler.ApprovalAuthorizer.AuthResult
+                                .unauthenticated("Missing authentication credentials")
+                        : ApprovalManagementHandler.ApprovalAuthorizer.AuthResult.verified("e2e-reviewer")
         );
 
         // Inject Zero-Trust pipeline dynamically on newly accepted connections

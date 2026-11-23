@@ -13,21 +13,28 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
  * Authorizers for the management endpoints built from the verified OIDC token the endpoint's
  * contract names. A token is accepted only when its signature, issuer, audience, and expiry verify
  * and it carries one of the roles the contract lists; a missing token is unauthenticated and a
- * verified token without the role is forbidden.
+ * verified token without the role is forbidden. No role is ever inferred from token text.
  *
- * <p>This replaces the token-substring checks the endpoint classes carry as their local default.
- * The mapping is contract-bound: C-003/C-004/C-014 (approval decisions) and C-008/C-021 (emergency
- * and release) require {@code admin} or {@code operator}; C-005 requires {@code admin},
- * {@code operator}, or {@code auditor} and C-006 requires {@code admin}; C-007/C-011/C-013/C-015
- * require {@code admin} or {@code auditor}; C-009/C-010 read the fleet with any role.
+ * <p>The role mapping is contract-bound per path:
+ * <ul>
+ *   <li>C-003 pending queue and C-004/C-014 decisions: {@code admin} or {@code operator};</li>
+ *   <li>C-019 approval history: {@code admin}, {@code operator}, or {@code auditor};</li>
+ *   <li>C-005/C-017 policy reads: {@code admin}, {@code operator}, or {@code auditor};</li>
+ *   <li>C-006/C-018 policy publish and activation: {@code admin};</li>
+ *   <li>C-008 emergency kill: {@code admin} or {@code operator};</li>
+ *   <li>C-009/C-010/C-020 fleet reads: any RBAC role;</li>
+ *   <li>C-011 compliance export and C-013/C-015 audit reads: {@code admin} or {@code auditor}.</li>
+ * </ul>
  *
- * <p>Anchors: FEAT-008, FEAT-009, NFR-029, NFR-027, C-003..C-021.
+ * <p>Anchors: FEAT-008, FEAT-009, NFR-029, C-003, C-004, C-005, C-006, C-008, C-009, C-010,
+ * C-011, C-013, C-014, C-015, C-017, C-018, C-019, C-020.
  */
 public final class VerifiedManagementAuthorizers {
 
@@ -78,11 +85,19 @@ public final class VerifiedManagementAuthorizers {
         };
     }
 
+    /**
+     * Approval endpoints. The pending queue and the decision paths are operator surfaces, while
+     * the resolution history is also readable by an auditor (C-003, C-004, C-014, C-019).
+     */
     public ApprovalManagementHandler.ApprovalAuthorizer approvals() {
-        return (method, bearerToken) -> {
-            Verdict verdict = verify(bearerToken, ADMIN_OPERATOR);
+        return (path, method, bearerToken) -> {
+            Set<String> allowed = ApprovalManagementHandler.APPROVALS_BASE_PATH.equals(path)
+                    || (ApprovalManagementHandler.APPROVALS_BASE_PATH + "/").equals(path)
+                    ? ADMIN_OPERATOR_AUDITOR
+                    : ADMIN_OPERATOR;
+            Verdict verdict = verify(bearerToken, allowed);
             return new ApprovalManagementHandler.ApprovalAuthorizer.AuthResult(
-                    verdict.authorized(), verdict.forbidden(), verdict.reason());
+                    verdict.authorized(), verdict.forbidden(), verdict.reason(), verdict.subject());
         };
     }
 
@@ -93,33 +108,39 @@ public final class VerifiedManagementAuthorizers {
                     : ANY_ROLE;
             Verdict verdict = verify(bearerToken, allowed);
             return new EmergencyManagementHandler.EmergencyAuthorizer.AuthResult(
-                    verdict.authorized(), verdict.forbidden(), verdict.reason());
+                    verdict.authorized(), verdict.forbidden(), verdict.reason(),
+                    verdict.subject(), verdict.claims());
         };
     }
 
     private Verdict verify(String bearerToken, Set<String> allowedRoles) {
         if (bearerToken == null || bearerToken.isBlank()) {
-            return new Verdict(false, false, "Missing authentication credentials");
+            return Verdict.unauthenticated("Missing authentication credentials");
         }
         if (validator == null) {
-            return new Verdict(false, false, "Authentication is unavailable");
+            return Verdict.unauthenticated("Authentication is unavailable");
         }
 
         OidcValidationResult result = validator.validate(bearerToken);
         if (!result.valid()) {
             // The validator's reason can describe key material; it stays in the log, never the body.
             logger.debug("Management token rejected: {}", result.errorMessage());
-            return new Verdict(false, false, "Invalid or missing credentials");
+            return Verdict.unauthenticated("Invalid or missing credentials");
         }
 
         for (String role : result.roles()) {
             if (allowedRoles.contains(role.toLowerCase(Locale.ROOT))) {
-                return new Verdict(true, false, null);
+                return new Verdict(true, false, null, result.subject(), result.claims());
             }
         }
-        return new Verdict(false, true, "Insufficient permissions for this operation");
+        return new Verdict(false, true, "Insufficient permissions for this operation",
+                result.subject(), Map.of());
     }
 
-    private record Verdict(boolean authorized, boolean forbidden, String reason) {
+    private record Verdict(boolean authorized, boolean forbidden, String reason, String subject,
+                           Map<String, Object> claims) {
+        static Verdict unauthenticated(String reason) {
+            return new Verdict(false, false, reason, null, Map.of());
+        }
     }
 }
