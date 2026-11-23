@@ -28,6 +28,15 @@ import dev.aegismcp.gateway.identity.IdentityVerificationHandler;
 import dev.aegismcp.gateway.identity.JwksKeyResolver;
 import dev.aegismcp.gateway.identity.OidcTokenValidator;
 import dev.aegismcp.gateway.identity.SpiffeSvidValidator;
+import dev.aegismcp.gateway.inspector.InspectorApprovalHandler;
+import dev.aegismcp.gateway.inspector.InspectorEventStream;
+import dev.aegismcp.gateway.inspector.InspectorPolicyEvaluator;
+import dev.aegismcp.gateway.inspector.InspectorSubscriptionAuthorizer;
+import dev.aegismcp.gateway.inspector.InspectorTelemetryObserver;
+import dev.aegismcp.gateway.inspector.InspectorTrafficInterceptor;
+import dev.aegismcp.gateway.inspector.TrafficEventFactory;
+import dev.aegismcp.gateway.inspector.TrafficObservations;
+import dev.aegismcp.gateway.inspector.TrafficStreamHandler;
 import dev.aegismcp.gateway.killswitch.EmergencyManagementHandler;
 import dev.aegismcp.gateway.killswitch.GatewayMetrics;
 import dev.aegismcp.gateway.killswitch.InvocationVelocityCircuitBreaker;
@@ -97,11 +106,15 @@ import java.util.concurrent.TimeUnit;
  * edge, the untrusted-body boundary, then the interceptor chain — kill switch, invocation velocity,
  * parameter validation, policy (which may suspend on an approval), and sequence anomaly — followed
  * by the configured upstream, outbound DLP on the response, and an audit record for every terminal
- * outcome. Management and probe endpoints are attached in the same channel initializer, and a
- * request that matches no owned path is answered {@code 404} rather than a fallback success body.
+ * outcome. The same assembly splits the telemetry surface off that path: the chain is observed from
+ * the outside so every intercepted tool call reaches the live inspector on
+ * {@code GET /api/v1/stream/traffic}, and a dedicated observer turns approval-queue and threat-level
+ * changes into stream events. Management and probe endpoints are attached in the same channel
+ * initializer, and a request that matches no owned path is answered {@code 404} rather than a
+ * fallback success body.
  *
- * <p>Anchors: FEAT-001, FEAT-002, FEAT-004, FEAT-005, FEAT-006, FEAT-007, FEAT-009, FEAT-012,
- * NFR-001, NFR-021, NFR-027, C-001.
+ * <p>Anchors: FEAT-001, FEAT-002, FEAT-004, FEAT-005, FEAT-006, FEAT-007, FEAT-008, FEAT-009,
+ * FEAT-012, NFR-001, NFR-005, NFR-021, NFR-027, C-001, C-002.
  */
 public class AegisGatewayServer {
 
@@ -138,6 +151,11 @@ public class AegisGatewayServer {
 
     private final GatewayReadiness readiness;
     private final HealthHandler healthHandler;
+
+    private final InspectorEventStream inspectorEventStream;
+    private final InspectorTelemetryObserver inspectorTelemetryObserver;
+    private final TrafficStreamHandler trafficStreamHandler;
+    private final TrafficObservations trafficObservations;
 
     private final IdentityVerificationHandler identityVerificationHandler;
     private final DlpOutboundHandler dlpOutboundHandler;
@@ -252,12 +270,12 @@ public class AegisGatewayServer {
         this.sslContext = configuration.tls().enabled() ? buildSslContext(configuration.tls()) : null;
 
         ObjectMapper jsonMapper = JsonRpcCodec.getInstance().getMapper();
+        OidcTokenValidator oidcValidator = buildOidcValidator(configuration.identity());
         // Management endpoints always authorize through the verified OIDC token and the role set
         // its contract names. When the identity provider is unconfigured the validator is absent
         // and every management request fails closed with 401 rather than falling back to a
         // permissive or token-substring check (FEAT-008, NFR-029).
-        VerifiedManagementAuthorizers managementAuthorizers =
-                new VerifiedManagementAuthorizers(buildOidcValidator(configuration.identity()));
+        VerifiedManagementAuthorizers managementAuthorizers = new VerifiedManagementAuthorizers(oidcValidator);
 
         this.auditVerificationHandler = new AuditVerificationHandler(
                 this.auditLedger, AuditVerificationEngine.getInstance(), jsonMapper,
@@ -275,6 +293,21 @@ public class AegisGatewayServer {
                 managementAuthorizers.emergency());
 
         this.healthHandler = new HealthHandler(this.readiness);
+
+        // The live inspector is a management surface, so it is attached whether or not the agent
+        // request path is assembled; an unconfigured identity provider leaves every subscription
+        // refused with 401 (FEAT-008, C-002).
+        this.inspectorEventStream = new InspectorEventStream(jsonMapper);
+        this.trafficObservations = new TrafficObservations();
+        this.trafficStreamHandler = new TrafficStreamHandler(
+                this.inspectorEventStream,
+                jsonMapper,
+                new InspectorSubscriptionAuthorizer(oidcValidator).asStreamAuthorizer(),
+                this.readiness,
+                this.virtualThreadExecutor);
+        this.inspectorTelemetryObserver = new InspectorTelemetryObserver(
+                this.approvalManager, this.gatewayMetrics, this.killSwitchManager,
+                this.inspectorEventStream);
 
         if (assembleRequestPath) {
             this.identityVerificationHandler = new IdentityVerificationHandler(
@@ -317,6 +350,7 @@ public class AegisGatewayServer {
         }
 
         readiness.markStarting();
+        inspectorEventStream.start();
 
         bossGroup = new NioEventLoopGroup(1, Thread.ofPlatform().name("netty-boss-", 0).factory());
         workerGroup = new NioEventLoopGroup(0, Thread.ofPlatform().name("netty-worker-", 0).factory());
@@ -352,6 +386,7 @@ public class AegisGatewayServer {
                         ch.pipeline().addLast("policy-management-handler", policyManagementHandler);
                         ch.pipeline().addLast("approval-management-handler", approvalManagementHandler);
                         ch.pipeline().addLast("emergency-management-handler", emergencyManagementHandler);
+                        ch.pipeline().addLast("traffic-stream-handler", trafficStreamHandler);
 
                         if (mcpProxyHandler != null) {
                             McpProxyPipelineConfigurator.configure(ch.pipeline(), mcpProxyHandler);
@@ -366,6 +401,7 @@ public class AegisGatewayServer {
         boundPort = localAddress.getPort();
         running = true;
         readiness.markReady();
+        inspectorTelemetryObserver.start();
 
         logger.info("AegisGatewayServer started successfully on {}:{} (tls={})", host, boundPort, sslContext != null);
     }
@@ -378,6 +414,11 @@ public class AegisGatewayServer {
 
         readiness.markShuttingDown();
         logger.info("Stopping AegisGatewayServer on {}:{}...", host, boundPort);
+
+        // Draining ends the live stream first: a refused or closed subscription is what tells the
+        // console to enter its reconnect state instead of waiting on an idle connection (C-002).
+        inspectorTelemetryObserver.close();
+        inspectorEventStream.close();
 
         try {
             if (serverChannel != null && serverChannel.isOpen()) {
@@ -424,7 +465,9 @@ public class AegisGatewayServer {
 
     private ToolCallInterceptor buildInterceptorChain(GatewayConfiguration configuration) {
         DynamicParameterValidator parameterValidator = new DynamicParameterValidator();
-        PolicyEvaluator policyEvaluator = new PolicyEvaluator(policyCache, parameterValidator);
+        PolicyEvaluator policyEvaluator =
+                new InspectorPolicyEvaluator(policyCache, parameterValidator, trafficObservations);
+        TrafficEventFactory trafficEvents = new TrafficEventFactory(DlpScrubber.getInstance());
 
         ToolCallInterceptor killSwitch = (context, request) -> killSwitchManager.asInterceptor().intercept(context, request);
         InvocationVelocityCircuitBreaker velocity = new InvocationVelocityCircuitBreaker(
@@ -434,8 +477,10 @@ public class AegisGatewayServer {
                 gatewayMetrics);
         DynamicValidationInterceptor validation =
                 new DynamicValidationInterceptor(parameterValidator, auditLedger);
-        DeclarativePolicyInterceptor policy =
-                new DeclarativePolicyInterceptor(policyEvaluator, approvalManager);
+        DeclarativePolicyInterceptor policy = new DeclarativePolicyInterceptor(
+                policyEvaluator,
+                new InspectorApprovalHandler(approvalManager, trafficObservations, inspectorEventStream,
+                        trafficEvents));
         ToolChainingAnomalyInterceptor anomaly = new ToolChainingAnomalyInterceptor(
                 new SessionSequenceTracker(),
                 AnomalyRule.defaultRules(),
@@ -444,7 +489,11 @@ public class AegisGatewayServer {
         // Identity is verified by the edge handler. Within the tool-call chain the cheapest
         // fail-closed checks run first, then the untrusted-body checks, then policy, then the
         // sequence anomaly that can quarantine the session (FEAT-001, FEAT-002, FEAT-004).
-        return ToolCallInterceptor.chain(killSwitch, velocity, validation, policy, anomaly);
+        ToolCallInterceptor chain = ToolCallInterceptor.chain(killSwitch, velocity, validation, policy, anomaly);
+
+        // The live inspector observes the whole chain from outside it, so a call refused by any
+        // stage is still reported and the verdict reaching the proxy is unchanged (FEAT-008, C-002).
+        return new InspectorTrafficInterceptor(chain, trafficObservations, inspectorEventStream, trafficEvents);
     }
 
     private UpstreamClient buildUpstreamClient(GatewayConfiguration configuration) {
