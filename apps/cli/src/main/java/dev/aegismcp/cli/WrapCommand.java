@@ -10,6 +10,7 @@ import dev.aegismcp.gateway.policy.SecurityPolicy;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
+import picocli.CommandLine.ParentCommand;
 
 import java.io.File;
 import java.io.IOException;
@@ -36,11 +37,11 @@ public class WrapCommand implements Callable<Integer> {
     @Option(names = {"-u", "--upstream"}, defaultValue = "stdio", description = "Upstream transport type: stdio or sse (default: stdio)")
     private String upstream = "stdio";
 
-    @Option(names = {"--no-color"}, defaultValue = "false", description = "Disable ANSI color coding in terminal inspection logs")
-    private boolean noColor = false;
-
     @Parameters(arity = "1..*", description = "Command and arguments to execute the upstream MCP server")
     private List<String> serverCommand;
+
+    @ParentCommand
+    private AegisCliMain root;
 
     private final PolicyCompiler compiler;
     private final DlpScrubber dlpScrubber;
@@ -99,7 +100,8 @@ public class WrapCommand implements Callable<Integer> {
         policyCache.bindAgentToPolicy("local-dev-agent", policy.id());
 
         PolicyEvaluator policyEvaluator = new PolicyEvaluator(policyCache);
-        TerminalInspector inspector = new TerminalInspector(System.err, !noColor);
+        ColorMode mode = root != null ? root.colorMode() : ColorMode.AUTO;
+        TerminalInspector inspector = new TerminalInspector(System.err, mode);
 
         inspector.printBanner(ast.id(), ast.version(), String.join(" ", serverCommand));
 
@@ -119,9 +121,5 @@ public class WrapCommand implements Callable<Integer> {
 
     public void setServerCommand(List<String> serverCommand) {
         this.serverCommand = serverCommand;
-    }
-
-    public void setNoColor(boolean noColor) {
-        this.noColor = noColor;
     }
 }
