@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.aegismcp.gateway.codec.JsonRpcCodec;
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandler;
@@ -32,10 +33,16 @@ import java.util.regex.Pattern;
  * Netty HTTP handler for the Human-in-the-Loop approval contracts C-003, C-004, C-014, and C-019.
  * Serves the pending queue, the approve and reject decisions, and the resolution history.
  *
- * <p>Every request is authenticated through the injected authorizer, which must be built from the
- * verified OIDC token: an absent or invalid token is answered {@code 401}, a verified operator
- * without the contract role {@code 403}. The reviewer recorded on a decision is the verified
- * token subject, never a request-body field.
+ * <p>It also serves the Slack interactive callback endpoint FEAT-006 defines at
+ * {@value #SLACK_INTERACTIONS_PATH}. That path is authenticated by the workspace signing secret
+ * rather than the console bearer token, and it resolves the ticket through the same
+ * {@link ApprovalManager} path as the console (see {@link SlackApprovalCallback}). When no Slack
+ * workspace is configured the path answers {@code 404}.
+ *
+ * <p>Every approval-management request is authenticated through the injected authorizer, which must
+ * be built from the verified OIDC token: an absent or invalid token is answered {@code 401}, a
+ * verified operator without the contract role {@code 403}. The reviewer recorded on a decision is
+ * the verified token subject, never a request-body field.
  *
  * <p>Anchors: FEAT-006, FEAT-008, C-003, C-004, C-014, C-019, NFR-029.
  */
@@ -46,6 +53,10 @@ public class ApprovalManagementHandler extends SimpleChannelInboundHandler<FullH
 
     public static final String APPROVALS_BASE_PATH = "/api/v1/approvals";
     public static final String PENDING_PATH = APPROVALS_BASE_PATH + "/pending";
+    /** Slack interactive approval callbacks (FEAT-006). */
+    public static final String SLACK_INTERACTIONS_PATH = "/api/v1/integrations/slack/interactions";
+    static final String SLACK_TIMESTAMP_HEADER = "X-Slack-Request-Timestamp";
+    static final String SLACK_SIGNATURE_HEADER = "X-Slack-Signature";
     private static final Pattern DECISION_PATH_PATTERN =
             Pattern.compile("^/api/v1/approvals/([^/]+)/(approve|reject)/?$");
     public static final String BEARER_PREFIX = "Bearer ";
@@ -57,6 +68,8 @@ public class ApprovalManagementHandler extends SimpleChannelInboundHandler<FullH
     private final ApprovalManager approvalManager;
     private final ObjectMapper jsonMapper;
     private final ApprovalAuthorizer authorizer;
+    /** Null when no Slack workspace is configured, which makes the callback path answer 404. */
+    private final SlackApprovalCallback slackCallback;
 
     /**
      * Authenticates and authorizes a caller of an approval endpoint. The authorizer receives the
@@ -92,10 +105,17 @@ public class ApprovalManagementHandler extends SimpleChannelInboundHandler<FullH
 
     public ApprovalManagementHandler(ApprovalManager approvalManager, ObjectMapper jsonMapper,
                                      ApprovalAuthorizer authorizer) {
+        this(approvalManager, jsonMapper, authorizer, defaultSlackCallback(approvalManager));
+    }
+
+    public ApprovalManagementHandler(ApprovalManager approvalManager, ObjectMapper jsonMapper,
+                                     ApprovalAuthorizer authorizer,
+                                     SlackApprovalCallback slackCallback) {
         super(false); // Manual retain/release control for pass-through compatibility
         this.approvalManager = Objects.requireNonNull(approvalManager, "approvalManager must not be null");
         this.jsonMapper = Objects.requireNonNull(jsonMapper, "jsonMapper must not be null");
         this.authorizer = Objects.requireNonNull(authorizer, "authorizer must not be null");
+        this.slackCallback = slackCallback;
     }
 
     /** Convenience constructor for the shipped path: the platform JSON mapper. */
@@ -103,13 +123,28 @@ public class ApprovalManagementHandler extends SimpleChannelInboundHandler<FullH
         this(approvalManager, JsonRpcCodec.getInstance().getMapper(), authorizer);
     }
 
+    /**
+     * Builds the Slack callback processor only when a workspace is configured. The manager resolves
+     * the destination settings at startup, so the endpoint and the outbound notification cannot
+     * disagree about whether Slack is available.
+     */
+    private static SlackApprovalCallback defaultSlackCallback(ApprovalManager approvalManager) {
+        ApprovalNotificationConfig config = approvalManager.notificationConfig();
+        return config.slackConfigured()
+                ? new SlackApprovalCallback(config.slack(), approvalManager)
+                : null;
+    }
+
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, FullHttpRequest request) {
         String uri = request.uri();
         QueryStringDecoder queryDecoder = new QueryStringDecoder(uri);
         String path = queryDecoder.path();
+        boolean slackInteraction = SLACK_INTERACTIONS_PATH.equals(path);
 
-        if (!path.equals(APPROVALS_BASE_PATH) && !path.startsWith(APPROVALS_BASE_PATH + "/")) {
+        if (!slackInteraction
+                && !path.equals(APPROVALS_BASE_PATH)
+                && !path.startsWith(APPROVALS_BASE_PATH + "/")) {
             // Forward non-approval requests down the pipeline
             ctx.fireChannelRead(request);
             return;
@@ -118,6 +153,11 @@ public class ApprovalManagementHandler extends SimpleChannelInboundHandler<FullH
         boolean keepAlive = HttpUtil.isKeepAlive(request);
 
         try {
+            if (slackInteraction) {
+                handleSlackInteraction(ctx, request, keepAlive);
+                return;
+            }
+
             String bearerToken = bearerToken(request);
             ApprovalAuthorizer.AuthResult authResult;
             try {
@@ -183,6 +223,37 @@ public class ApprovalManagementHandler extends SimpleChannelInboundHandler<FullH
         } finally {
             request.release();
         }
+    }
+
+    /**
+     * Serves a Slack interactive callback. The workspace signing secret authenticates the request;
+     * an unconfigured deployment answers 404 and an unauthenticated callback answers 401 without
+     * touching a ticket (FEAT-006).
+     */
+    private void handleSlackInteraction(
+            ChannelHandlerContext ctx,
+            FullHttpRequest request,
+            boolean keepAlive
+    ) {
+        if (slackCallback == null) {
+            sendJson(ctx, HttpResponseStatus.NOT_FOUND,
+                    new ApprovalDto.ErrorResponse("Not Found"), keepAlive);
+            return;
+        }
+        if (!HttpMethod.POST.equals(request.method())) {
+            sendJson(ctx, HttpResponseStatus.METHOD_NOT_ALLOWED,
+                    new ApprovalDto.ErrorResponse(
+                            "Method Not Allowed: only POST supported for Slack interactions"),
+                    keepAlive);
+            return;
+        }
+
+        byte[] rawBody = ByteBufUtil.getBytes(request.content());
+        SlackApprovalCallback.Result result = slackCallback.handle(
+                request.headers().get(SLACK_TIMESTAMP_HEADER),
+                request.headers().get(SLACK_SIGNATURE_HEADER),
+                rawBody);
+        sendJson(ctx, HttpResponseStatus.valueOf(result.status()), result.body(), keepAlive);
     }
 
     private static String bearerToken(FullHttpRequest request) {

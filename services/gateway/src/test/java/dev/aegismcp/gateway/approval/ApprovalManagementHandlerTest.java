@@ -2,6 +2,7 @@ package dev.aegismcp.gateway.approval;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.aegismcp.gateway.codec.JsonRpcCodec;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -17,8 +18,16 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.net.URI;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.HexFormat;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -39,17 +48,21 @@ class ApprovalManagementHandlerTest {
     private static final String OPERATOR_TOKEN = "Bearer operator-token";
     private static final String FORBIDDEN_TOKEN = "Bearer viewer-token";
     private static final String REVIEWER_SUBJECT = "operator@example.com";
+    private static final String SLACK_SIGNING_SECRET = TestCredentials.signingSecret();
+    private static final Instant NOW = Instant.parse("2026-11-23T10:00:00Z");
 
     private final ObjectMapper mapper = JsonRpcCodec.getInstance().getMapper();
     private ApprovalManager approvalManager;
     private ApprovalManagementHandler handler;
     private EmbeddedChannel channel;
+    private ApprovalManagementHandler.ApprovalAuthorizer authorizer;
 
     @BeforeEach
     void setUp() {
-        approvalManager = new ApprovalManager(Duration.ofMinutes(5));
+        approvalManager = new ApprovalManager(
+                Duration.ofMinutes(5), ApprovalNotificationConfig.none());
 
-        ApprovalManagementHandler.ApprovalAuthorizer authorizer = (path, method, bearerToken) -> {
+        authorizer = (path, method, bearerToken) -> {
             if (bearerToken == null || bearerToken.isBlank()) {
                 return ApprovalManagementHandler.ApprovalAuthorizer.AuthResult
                         .unauthenticated("Missing authentication credentials");
@@ -286,5 +299,112 @@ class ApprovalManagementHandlerTest {
     void nonApprovalPathIsForwarded() {
         FullHttpResponse response = send(HttpMethod.GET, "/api/v1/policies", null, OPERATOR_TOKEN);
         assertNull(response);
+    }
+
+    @Test
+    @DisplayName("FEAT-006: the Slack callback path answers 404 when no workspace is configured")
+    void slackPathAnswers404WithoutWorkspace() {
+        FullHttpResponse response = sendSlack(channel, new byte[0], "1700000000", "v0=deadbeef");
+        assertEquals(HttpResponseStatus.NOT_FOUND, response.status());
+        response.release();
+    }
+
+    @Test
+    @DisplayName("FEAT-006: an unsigned Slack callback is answered 401 and leaves the ticket pending")
+    void slackPathRejectsUnsignedCallback() throws Exception {
+        String ticketId = createTicket("deploy_prod");
+        byte[] body = slackForm("U-ELENA", SlackApprovalNotifier.ACTION_APPROVE, ticketId);
+        EmbeddedChannel slackChannel = slackConfiguredChannel();
+
+        try {
+            FullHttpResponse response = sendSlack(slackChannel, body,
+                    String.valueOf(NOW.getEpochSecond()), "v0=deadbeef");
+            assertEquals(HttpResponseStatus.UNAUTHORIZED, response.status());
+            response.release();
+            assertEquals("pending", approvalManager.getTicket(ticketId).orElseThrow().status());
+        } finally {
+            slackChannel.close();
+        }
+    }
+
+    @Test
+    @DisplayName("FEAT-006: a signed Slack Approve click approves the ticket through the endpoint")
+    void slackPathApprovesTicket() throws Exception {
+        String ticketId = createTicket("deploy_prod");
+        byte[] body = slackForm("U-ELENA", SlackApprovalNotifier.ACTION_APPROVE, ticketId);
+        String timestamp = String.valueOf(NOW.getEpochSecond());
+        EmbeddedChannel slackChannel = slackConfiguredChannel();
+
+        try {
+            FullHttpResponse response = sendSlack(slackChannel, body, timestamp,
+                    slackSignature(timestamp, body));
+            assertEquals(HttpResponseStatus.OK, response.status());
+
+            JsonNode json = body(response);
+            assertTrue(json.get("replace_original").asBoolean());
+            assertTrue(json.get("text").asText().contains("elena@example.com"));
+            response.release();
+
+            ApprovalTicket ticket = approvalManager.getTicket(ticketId).orElseThrow();
+            assertEquals("approved", ticket.status());
+            assertEquals("elena@example.com", ticket.reviewedBy());
+        } finally {
+            slackChannel.close();
+        }
+    }
+
+    private EmbeddedChannel slackConfiguredChannel() {
+        SlackOperatorRegistry registry = SlackOperatorRegistry.parse(
+                "[{\"slackUserId\":\"U-ELENA\",\"operator\":\"elena@example.com\",\"roles\":[\"admin\"]}]",
+                "AEGIS_SLACK_OPERATORS");
+        ApprovalNotificationConfig.Slack slack = new ApprovalNotificationConfig.Slack(
+                URI.create("https://hooks.slack.com/services/T/B/X"), SLACK_SIGNING_SECRET, registry);
+        SlackApprovalCallback callback = new SlackApprovalCallback(
+                slack, approvalManager, mapper, Clock.fixed(NOW, ZoneOffset.UTC));
+        return new EmbeddedChannel(
+                new ApprovalManagementHandler(approvalManager, mapper, authorizer, callback));
+    }
+
+    private byte[] slackForm(String slackUserId, String actionId, String ticketId) throws Exception {
+        ObjectNode interaction = mapper.createObjectNode();
+        interaction.put("type", "block_actions");
+        interaction.putObject("user").put("id", slackUserId);
+        interaction.putArray("actions").addObject()
+                .put("action_id", actionId)
+                .put("value", ticketId);
+        String json = mapper.writeValueAsString(interaction);
+        return ("payload=" + URLEncoder.encode(json, StandardCharsets.UTF_8))
+                .getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static String slackSignature(String timestamp, byte[] body) throws Exception {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(
+                SLACK_SIGNING_SECRET.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+        mac.update(("v0:" + timestamp + ":").getBytes(StandardCharsets.UTF_8));
+        mac.update(body);
+        return "v0=" + HexFormat.of().formatHex(mac.doFinal());
+    }
+
+    private FullHttpResponse sendSlack(
+            EmbeddedChannel target,
+            byte[] body,
+            String timestamp,
+            String signature
+    ) {
+        ByteBuf content = Unpooled.wrappedBuffer(body);
+        DefaultFullHttpRequest request = new DefaultFullHttpRequest(
+                HttpVersion.HTTP_1_1, HttpMethod.POST,
+                ApprovalManagementHandler.SLACK_INTERACTIONS_PATH, content);
+        request.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/x-www-form-urlencoded");
+        request.headers().set(HttpHeaderNames.CONTENT_LENGTH, content.readableBytes());
+        if (timestamp != null) {
+            request.headers().set(ApprovalManagementHandler.SLACK_TIMESTAMP_HEADER, timestamp);
+        }
+        if (signature != null) {
+            request.headers().set(ApprovalManagementHandler.SLACK_SIGNATURE_HEADER, signature);
+        }
+        target.writeInbound(request);
+        return target.readOutbound();
     }
 }
