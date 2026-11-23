@@ -23,7 +23,9 @@ local.properties
 **/build/
 **/dist/
 **/node_modules/
-*.tsbuildinfo
+# Docker matches a bare `*.tsbuildinfo` only at the context root; `**/` covers the nested
+# TypeScript build info that app builds emit (NFR-020).
+**/*.tsbuildinfo
 
 # Editor and OS files
 .idea/
