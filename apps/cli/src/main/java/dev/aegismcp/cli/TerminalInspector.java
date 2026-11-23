@@ -1,18 +1,33 @@
 package dev.aegismcp.cli;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
+import dev.aegismcp.gateway.dlp.DlpScrubber;
 
 import java.io.PrintStream;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
+import java.util.Map;
 import java.util.Objects;
 
 /**
  * Interactive color-coded terminal inspection logger for MCP tool calls.
  * Renders real-time inspection logs to stderr to keep stdout pure for JSON-RPC traffic.
- * Anchors: FEAT-003, NFR-001.
+ *
+ * <p>FEAT-003 bounds what an inspection line may reveal: every argument value is truncated to
+ * {@value #MAX_ARGUMENT_VALUE_LENGTH} characters and any credential- or PII-shaped span is replaced
+ * through the same DLP scrubber the gateway applies. Values are scrubbed before they are truncated,
+ * so a secret that starts inside the first 512 characters can never survive in fragmentary form.
+ *
+ * <p>Anchors: FEAT-003, FEAT-005, NFR-001.
  */
 public class TerminalInspector {
+
+    /** FEAT-003: the longest argument value an inspection line may show. */
+    static final int MAX_ARGUMENT_VALUE_LENGTH = 512;
 
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
 
@@ -28,6 +43,7 @@ public class TerminalInspector {
 
     private final PrintStream out;
     private final boolean colorEnabled;
+    private final DlpScrubber dlpScrubber;
 
     public TerminalInspector() {
         this(System.err, ColorMode.AUTO);
@@ -38,12 +54,25 @@ public class TerminalInspector {
      * Anchors: FEAT-003.
      */
     public TerminalInspector(PrintStream out, ColorMode mode) {
-        this(out, isColorEnabled(mode, isInteractiveTerminal(out)));
+        this(out, mode, DlpScrubber.getInstance());
+    }
+
+    /**
+     * Builds an inspector that resolves color from the requested mode and the destination stream and
+     * uses the caller's DLP scrubber for argument redaction.
+     */
+    public TerminalInspector(PrintStream out, ColorMode mode, DlpScrubber dlpScrubber) {
+        this(out, isColorEnabled(mode, isInteractiveTerminal(out)), dlpScrubber);
     }
 
     public TerminalInspector(PrintStream out, boolean colorEnabled) {
+        this(out, colorEnabled, DlpScrubber.getInstance());
+    }
+
+    public TerminalInspector(PrintStream out, boolean colorEnabled, DlpScrubber dlpScrubber) {
         this.out = Objects.requireNonNull(out, "out must not be null");
         this.colorEnabled = colorEnabled;
+        this.dlpScrubber = Objects.requireNonNull(dlpScrubber, "dlpScrubber must not be null");
     }
 
     /**
@@ -81,35 +110,38 @@ public class TerminalInspector {
     }
 
     /**
-     * Prints a startup banner indicating the active policy and wrapped MCP server command.
+     * Prints a startup banner indicating the active policy and wrapped MCP server command. The
+     * command line is scrubbed because a developer can pass a credential as an argument.
      */
     public void printBanner(String policyId, String policyVersion, String command) {
         String timestamp = LocalTime.now().format(TIME_FORMATTER);
+        String scrubbedCommand = dlpScrubber.scrubText(command);
         if (colorEnabled) {
             out.println(ANSI_CYAN + ANSI_BOLD + "=== AegisMCP Local Developer Proxy (aegis-cli) ===" + ANSI_RESET);
             out.println(ANSI_DIM + "[" + timestamp + "] Active Policy: " + ANSI_RESET + ANSI_BOLD + policyId + " (v" + policyVersion + ")" + ANSI_RESET);
-            out.println(ANSI_DIM + "[" + timestamp + "] Wrapped Target: " + ANSI_RESET + ANSI_YELLOW + command + ANSI_RESET);
+            out.println(ANSI_DIM + "[" + timestamp + "] Wrapped Target: " + ANSI_RESET + ANSI_YELLOW + scrubbedCommand + ANSI_RESET);
             out.println(ANSI_CYAN + "----------------------------------------------------" + ANSI_RESET);
         } else {
             out.println("=== AegisMCP Local Developer Proxy (aegis-cli) ===");
             out.println("[" + timestamp + "] Active Policy: " + policyId + " (v" + policyVersion + ")");
-            out.println("[" + timestamp + "] Wrapped Target: " + command);
+            out.println("[" + timestamp + "] Wrapped Target: " + scrubbedCommand);
             out.println("----------------------------------------------------");
         }
         out.flush();
     }
 
     /**
-     * Logs an intercepted tool call with evaluation latency and verdict.
-     * Anchors: FEAT-003.
+     * Logs an intercepted tool call with evaluation latency and verdict. Argument values are
+     * redacted and truncated per FEAT-003 before they reach the terminal.
+     * Anchors: FEAT-003, FEAT-005.
      */
     public void logToolCall(String toolName, JsonNode arguments, double latencyMs, boolean allowed, String reason) {
         String timestamp = LocalTime.now().format(TIME_FORMATTER);
-        String argsStr = arguments != null ? arguments.toString() : "{}";
-        if (argsStr.length() > 80) {
-            argsStr = argsStr.substring(0, 77) + "...";
-        }
+        String argsStr = renderArguments(arguments);
         String latencyStr = String.format("%.2fms", latencyMs);
+        String safeReason = reason != null && !reason.isBlank()
+                ? truncate(dlpScrubber.scrubText(reason))
+                : null;
 
         if (colorEnabled) {
             String verdictTag = allowed
@@ -123,8 +155,8 @@ public class TerminalInspector {
             sb.append(ANSI_YELLOW).append("LATENCY: ").append(latencyStr).append(ANSI_RESET).append(" ");
             sb.append("VERDICT: ").append(verdictTag);
 
-            if (!allowed && reason != null && !reason.isBlank()) {
-                sb.append(" ").append(ANSI_RED).append("(").append(reason).append(")").append(ANSI_RESET);
+            if (!allowed && safeReason != null) {
+                sb.append(" ").append(ANSI_RED).append("(").append(safeReason).append(")").append(ANSI_RESET);
             }
 
             out.println(sb);
@@ -137,8 +169,8 @@ public class TerminalInspector {
             sb.append("LATENCY: ").append(latencyStr).append(" ");
             sb.append("VERDICT: ").append(verdictTag);
 
-            if (!allowed && reason != null && !reason.isBlank()) {
-                sb.append(" (").append(reason).append(")");
+            if (!allowed && safeReason != null) {
+                sb.append(" (").append(safeReason).append(")");
             }
 
             out.println(sb);
@@ -147,14 +179,57 @@ public class TerminalInspector {
     }
 
     /**
+     * Renders tool arguments with every value scrubbed and bounded. Structure and keys are kept so
+     * a developer can see which parameter was refused; nested values are treated the same way.
+     */
+    private String renderArguments(JsonNode arguments) {
+        if (arguments == null || arguments.isNull()) {
+            return "{}";
+        }
+        return sanitize(arguments).toString();
+    }
+
+    private JsonNode sanitize(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return node;
+        }
+        if (node.isTextual()) {
+            return TextNode.valueOf(truncate(dlpScrubber.scrubText(node.asText())));
+        }
+        if (node.isObject()) {
+            ObjectNode sanitized = JsonNodeFactory.instance.objectNode();
+            for (Map.Entry<String, JsonNode> entry : node.properties()) {
+                sanitized.set(entry.getKey(), sanitize(entry.getValue()));
+            }
+            return sanitized;
+        }
+        if (node.isArray()) {
+            ArrayNode sanitized = JsonNodeFactory.instance.arrayNode(node.size());
+            for (JsonNode element : node) {
+                sanitized.add(sanitize(element));
+            }
+            return sanitized;
+        }
+        return node;
+    }
+
+    private static String truncate(String value) {
+        if (value == null || value.length() <= MAX_ARGUMENT_VALUE_LENGTH) {
+            return value;
+        }
+        return value.substring(0, MAX_ARGUMENT_VALUE_LENGTH);
+    }
+
+    /**
      * Logs general operational or warning messages.
      */
     public void logMessage(String message) {
         String timestamp = LocalTime.now().format(TIME_FORMATTER);
+        String safe = dlpScrubber.scrubText(message);
         if (colorEnabled) {
-            out.println(ANSI_DIM + "[" + timestamp + "] " + ANSI_RESET + message);
+            out.println(ANSI_DIM + "[" + timestamp + "] " + ANSI_RESET + safe);
         } else {
-            out.println("[" + timestamp + "] " + message);
+            out.println("[" + timestamp + "] " + safe);
         }
         out.flush();
     }
@@ -164,10 +239,11 @@ public class TerminalInspector {
      */
     public void logError(String error) {
         String timestamp = LocalTime.now().format(TIME_FORMATTER);
+        String safe = dlpScrubber.scrubText(error);
         if (colorEnabled) {
-            out.println(ANSI_RED + ANSI_BOLD + "[" + timestamp + "] ERROR: " + ANSI_RESET + ANSI_RED + error + ANSI_RESET);
+            out.println(ANSI_RED + ANSI_BOLD + "[" + timestamp + "] ERROR: " + ANSI_RESET + ANSI_RED + safe + ANSI_RESET);
         } else {
-            out.println("[" + timestamp + "] ERROR: " + error);
+            out.println("[" + timestamp + "] ERROR: " + safe);
         }
         out.flush();
     }

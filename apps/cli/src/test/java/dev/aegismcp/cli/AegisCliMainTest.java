@@ -156,7 +156,62 @@ class AegisCliMainTest {
         int exitCode = AegisCliMain.execute(
                 new PrintWriter(out), new PrintWriter(err), "--color=sometimes", "--help");
 
-        assertEquals(2, exitCode);
+        assertEquals(ExitCode.USAGE, exitCode);
         assertTrue(err.toString().contains("--color"));
+    }
+
+    @Test
+    @DisplayName("FEAT-003: --help documents every exit code the CLI returns")
+    void testHelpDocumentsExitCodes() {
+        StringWriter out = new StringWriter();
+        StringWriter err = new StringWriter();
+
+        int exitCode = AegisCliMain.execute(new PrintWriter(out), new PrintWriter(err), "--help");
+
+        assertEquals(ExitCode.SUCCESS, exitCode);
+        String help = out.toString();
+        assertTrue(help.contains("Exit codes:"));
+        assertTrue(help.contains("130  interrupted"));
+        assertTrue(help.contains("143  terminated"));
+    }
+
+    @Test
+    @DisplayName("FEAT-003 AC: an unknown option exits 2, writes usage to stderr, and leaves stdout empty")
+    void testUnknownOptionIsAUsageError() {
+        StringWriter out = new StringWriter();
+        StringWriter err = new StringWriter();
+
+        int exitCode = AegisCliMain.execute(new PrintWriter(out), new PrintWriter(err), "--bogus");
+
+        assertEquals(ExitCode.USAGE, exitCode);
+        assertEquals("", out.toString(), "a usage error must not write to standard output");
+        assertTrue(err.toString().contains("Unknown option"));
+        assertTrue(err.toString().contains("Usage: aegis-cli"));
+    }
+
+    @Test
+    @DisplayName("FEAT-003 AC: a missing required option exits 2 and writes nothing to stdout")
+    void testMissingRequiredOptionIsAUsageError() {
+        StringWriter out = new StringWriter();
+        StringWriter err = new StringWriter();
+
+        int exitCode = AegisCliMain.execute(new PrintWriter(out), new PrintWriter(err), "wrap");
+
+        assertEquals(ExitCode.USAGE, exitCode);
+        assertEquals("", out.toString());
+        assertTrue(err.toString().contains("Missing required option"));
+    }
+
+    @Test
+    @DisplayName("FEAT-003: wrap help does not advertise the removed --upstream transport switch")
+    void testWrapHelpHasNoUpstreamSwitch() {
+        StringWriter out = new StringWriter();
+        StringWriter err = new StringWriter();
+
+        int exitCode = AegisCliMain.execute(new PrintWriter(out), new PrintWriter(err), "wrap", "--help");
+
+        assertEquals(ExitCode.SUCCESS, exitCode);
+        assertFalse(out.toString().contains("--upstream"));
+        assertFalse(out.toString().contains("sse"));
     }
 }

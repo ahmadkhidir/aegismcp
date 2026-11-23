@@ -13,20 +13,25 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Unit and integration tests for the 'aegis-cli kill' command.
- * Anchors: FEAT-010, C-008.
+ * Anchors: FEAT-010, FEAT-003, C-008.
  */
 class KillCommandTest {
+
+    private static final String AWS_KEY = TestCredential.awsAccessKey();
 
     private HttpServer mockServer;
     private int mockPort;
@@ -36,6 +41,7 @@ class KillCommandTest {
     private final AtomicReference<String> lastReceivedMethod = new AtomicReference<>();
     private final AtomicReference<String> lastReceivedAuth = new AtomicReference<>();
     private final AtomicReference<String> lastReceivedBody = new AtomicReference<>();
+    private final AtomicInteger requestCount = new AtomicInteger();
     private final AtomicInteger responseStatusCode = new AtomicInteger(200);
     private final AtomicReference<String> responsePayload = new AtomicReference<>();
 
@@ -45,6 +51,7 @@ class KillCommandTest {
         mockPort = mockServer.getAddress().getPort();
 
         mockServer.createContext("/api/v1/emergency/kill", exchange -> {
+            requestCount.incrementAndGet();
             lastReceivedPath.set(exchange.getRequestURI().getPath());
             lastReceivedMethod.set(exchange.getRequestMethod());
             lastReceivedAuth.set(exchange.getRequestHeaders().getFirst("Authorization"));
@@ -53,7 +60,8 @@ class KillCommandTest {
             lastReceivedBody.set(new String(bodyBytes, StandardCharsets.UTF_8));
 
             int status = responseStatusCode.get();
-            byte[] responseBytes = (responsePayload.get() != null ? responsePayload.get() : "{}").getBytes(StandardCharsets.UTF_8);
+            byte[] responseBytes = (responsePayload.get() != null ? responsePayload.get() : "{}")
+                    .getBytes(StandardCharsets.UTF_8);
 
             exchange.getResponseHeaders().set("Content-Type", "application/json");
             exchange.sendResponseHeaders(status, responseBytes.length);
@@ -73,8 +81,8 @@ class KillCommandTest {
     }
 
     @Test
-    @DisplayName("FEAT-010 AC 1 / C-008: Quarantines rogue agent via C-008 emergency management endpoint")
-    void testAgentKillSuccess() throws Exception {
+    @DisplayName("FEAT-010 AC 1 / C-008: Quarantines a rogue agent through the emergency endpoint")
+    void testAgentKillSuccess() {
         responseStatusCode.set(200);
         responsePayload.set("""
                 {
@@ -84,194 +92,327 @@ class KillCommandTest {
                 }
                 """);
 
-        ByteArrayOutputStream outContent = new ByteArrayOutputStream();
-        PrintStream origOut = System.out;
+        Captured result = execute(
+                "--agent", "support-bot-04",
+                "--gateway", "http://localhost:" + mockPort,
+                "--reason", "Infinite loop detected",
+                "--token", "test-admin-token");
 
-        try {
-            System.setOut(new PrintStream(outContent));
+        assertEquals(ExitCode.SUCCESS, result.exitCode());
+        assertEquals("/api/v1/emergency/kill", lastReceivedPath.get());
+        assertEquals("POST", lastReceivedMethod.get());
+        assertEquals("Bearer test-admin-token", lastReceivedAuth.get());
 
-            CommandLine cmd = new CommandLine(new KillCommand());
-            int exitCode = cmd.execute(
-                    "--agent", "support-bot-04",
-                    "--gateway", "http://localhost:" + mockPort,
-                    "--reason", "Infinite loop detected",
-                    "--token", "test-admin-token"
-            );
+        JsonNode bodyJson = readBody();
+        assertEquals("agent", bodyJson.get("targetType").asText());
+        assertEquals("support-bot-04", bodyJson.get("targetId").asText());
+        assertEquals("Infinite loop detected", bodyJson.get("reason").asText());
+        assertFalse(bodyJson.has("secondApprover"), "an agent target must not carry a second approver");
 
-            assertEquals(0, exitCode, "Kill command must exit with 0 on HTTP 200");
-            assertEquals("/api/v1/emergency/kill", lastReceivedPath.get());
-            assertEquals("POST", lastReceivedMethod.get());
-            assertEquals("Bearer test-admin-token", lastReceivedAuth.get());
-
-            // Validate C-008 JSON payload structure
-            assertNotNull(lastReceivedBody.get());
-            JsonNode bodyJson = mapper.readTree(lastReceivedBody.get());
-            assertEquals("agent", bodyJson.get("targetType").asText());
-            assertEquals("support-bot-04", bodyJson.get("targetId").asText());
-            assertEquals("Infinite loop detected", bodyJson.get("reason").asText());
-
-            String output = outContent.toString();
-            assertTrue(output.contains("Emergency kill-switch invoked successfully (HTTP 200)"));
-            assertTrue(output.contains("Result Status:     QUARANTINED"));
-            assertTrue(output.contains("Affected Sessions: 4"));
-        } finally {
-            System.setOut(origOut);
-        }
+        assertTrue(result.out().contains("Emergency kill-switch invoked successfully (HTTP 200)"));
+        assertTrue(result.out().contains("Result Status:     QUARANTINED"));
+        assertTrue(result.out().contains("Affected Sessions: 4"));
+        assertTrue(result.out().contains("Timestamp:         2026-10-21T10:15:30Z"));
+        assertFalse(result.out().contains("test-admin-token"), "the bearer token must never be printed");
+        assertFalse(result.err().contains("test-admin-token"), "the bearer token must never be printed");
     }
 
     @Test
-    @DisplayName("FEAT-010: Global kill-switch requires --confirm-lockdown flag")
+    @DisplayName("FEAT-003 AC: A global target without --confirm-lockdown exits 2 and sends nothing")
     void testGlobalKillRequiresConfirmation() {
-        ByteArrayOutputStream errContent = new ByteArrayOutputStream();
-        PrintStream origErr = System.err;
+        Captured result = execute(
+                "--target-type", "global",
+                "--gateway", "http://localhost:" + mockPort);
 
-        try {
-            System.setErr(new PrintStream(errContent));
-
-            CommandLine cmd = new CommandLine(new KillCommand());
-            int exitCode = cmd.execute(
-                    "--target-type", "global",
-                    "--gateway", "http://localhost:" + mockPort
-            );
-
-            assertEquals(1, exitCode, "Global kill without confirmation must fail");
-            assertTrue(errContent.toString().contains("Global kill-switch lockdown requires explicit '--confirm-lockdown' flag"));
-        } finally {
-            System.setErr(origErr);
-        }
+        assertEquals(ExitCode.USAGE, result.exitCode());
+        assertEquals(0, requestCount.get(), "no request may be sent without the confirmation flag");
+        assertTrue(result.err().contains("requires the explicit --confirm-lockdown flag"));
     }
 
     @Test
-    @DisplayName("FEAT-010 / C-008: Global kill-switch with --confirm-lockdown succeeds")
-    void testGlobalKillWithConfirmation() throws Exception {
+    @DisplayName("FEAT-003 AC / C-008: A global target with --confirm-lockdown sends no targetId")
+    void testGlobalKillWithConfirmation() {
         responseStatusCode.set(200);
         responsePayload.set("""
                 {
-                  "status": "SEVERED",
+                  "status": "LOCKDOWN",
                   "affectedSessions": 42,
                   "timestamp": "2026-10-21T10:16:00Z"
                 }
                 """);
 
-        ByteArrayOutputStream outContent = new ByteArrayOutputStream();
-        PrintStream origOut = System.out;
+        Captured result = execute(
+                "--target-type", "global",
+                "--confirm-lockdown",
+                "--gateway", "http://localhost:" + mockPort,
+                "--reason", "Compromised cluster state");
 
-        try {
-            System.setOut(new PrintStream(outContent));
-
-            CommandLine cmd = new CommandLine(new KillCommand());
-            int exitCode = cmd.execute(
-                    "--target-type", "global",
-                    "--confirm-lockdown",
-                    "--gateway", "http://localhost:" + mockPort,
-                    "--reason", "Compromised cluster state"
-            );
-
-            assertEquals(0, exitCode);
-            JsonNode bodyJson = mapper.readTree(lastReceivedBody.get());
-            assertEquals("global", bodyJson.get("targetType").asText());
-            assertEquals("global", bodyJson.get("targetId").asText());
-            assertTrue(outContent.toString().contains("Result Status:     SEVERED"));
-        } finally {
-            System.setOut(origOut);
-        }
+        assertEquals(ExitCode.SUCCESS, result.exitCode());
+        JsonNode bodyJson = readBody();
+        assertEquals("global", bodyJson.get("targetType").asText());
+        assertFalse(bodyJson.has("targetId"), "C-008 forbids targetId on a global target");
+        assertTrue(result.out().contains("Result Status:     LOCKDOWN"));
     }
 
     @Test
-    @DisplayName("C-008: HTTP 400 Bad Request error returns exit code 1")
+    @DisplayName("C-008: --second-approver is forwarded on a global target")
+    void testGlobalKillSendsSecondApprover() {
+        responseStatusCode.set(200);
+        responsePayload.set("""
+                {
+                  "status": "LOCKDOWN",
+                  "affectedSessions": 42,
+                  "timestamp": "2026-10-21T10:16:00Z"
+                }
+                """);
+
+        Captured result = execute(
+                "--target-type", "global",
+                "--confirm-lockdown",
+                "--second-approver", "operator-two",
+                "--gateway", "http://localhost:" + mockPort);
+
+        assertEquals(ExitCode.SUCCESS, result.exitCode());
+        JsonNode bodyJson = readBody();
+        assertEquals("operator-two", bodyJson.get("secondApprover").asText());
+    }
+
+    @Test
+    @DisplayName("C-008: --second-approver on a scoped target is a usage error and sends nothing")
+    void testScopedSecondApproverIsRefused() {
+        Captured result = execute(
+                "--target-type", "server",
+                "--target-id", "upstream-1",
+                "--second-approver", "operator-two",
+                "--gateway", "http://localhost:" + mockPort);
+
+        assertEquals(ExitCode.USAGE, result.exitCode());
+        assertEquals(0, requestCount.get());
+        assertTrue(result.err().contains("permitted only on a global target"));
+    }
+
+    @Test
+    @DisplayName("C-008: A global target rejects --target-id and sends nothing")
+    void testGlobalTargetRejectsTargetId() {
+        Captured result = execute(
+                "--target-type", "global",
+                "--target-id", "anything",
+                "--confirm-lockdown",
+                "--gateway", "http://localhost:" + mockPort);
+
+        assertEquals(ExitCode.USAGE, result.exitCode());
+        assertEquals(0, requestCount.get());
+        assertTrue(result.err().contains("global target sends no target identifier"));
+    }
+
+    @Test
+    @DisplayName("C-008: The undefined 'tool' target is a usage error and sends nothing")
+    void testToolTargetIsRefused() {
+        Captured result = execute(
+                "--target-type", "tool",
+                "--target-id", "read_file",
+                "--gateway", "http://localhost:" + mockPort);
+
+        assertEquals(ExitCode.USAGE, result.exitCode());
+        assertEquals(0, requestCount.get());
+        assertTrue(result.err().contains("expected session, agent, server, or global"));
+    }
+
+    @Test
+    @DisplayName("FEAT-003: A scoped target with no identifier is a usage error")
+    void testMissingTargetIdIsUsageError() {
+        Captured result = execute(
+                "--target-type", "session",
+                "--gateway", "http://localhost:" + mockPort);
+
+        assertEquals(ExitCode.USAGE, result.exitCode());
+        assertEquals(0, requestCount.get());
+    }
+
+    @Test
+    @DisplayName("FEAT-003: HTTP 400 is a usage error (exit 2)")
     void testBadRequestResponse() {
         responseStatusCode.set(400);
         responsePayload.set("{\"error\":\"Invalid target type\"}");
 
-        ByteArrayOutputStream errContent = new ByteArrayOutputStream();
-        PrintStream origErr = System.err;
+        Captured result = execute(
+                "--agent", "rogue-agent",
+                "--gateway", "http://localhost:" + mockPort);
 
-        try {
-            System.setErr(new PrintStream(errContent));
-
-            CommandLine cmd = new CommandLine(new KillCommand());
-            int exitCode = cmd.execute(
-                    "--agent", "rogue-agent",
-                    "--gateway", "http://localhost:" + mockPort
-            );
-
-            assertEquals(1, exitCode);
-            assertTrue(errContent.toString().contains("Bad Request (HTTP 400)"));
-        } finally {
-            System.setErr(origErr);
-        }
+        assertEquals(ExitCode.USAGE, result.exitCode());
+        assertTrue(result.err().contains("Bad Request (HTTP 400)"));
     }
 
     @Test
-    @DisplayName("C-008: HTTP 401 Unauthorized returns exit code 1 and prompts for admin token")
+    @DisplayName("FEAT-003: HTTP 401 exits 1 and never echoes the token")
     void testUnauthorizedResponse() {
         responseStatusCode.set(401);
         responsePayload.set("{\"error\":\"Unauthorized\"}");
 
-        ByteArrayOutputStream errContent = new ByteArrayOutputStream();
-        PrintStream origErr = System.err;
+        Captured result = execute(
+                "--agent", "rogue-agent",
+                "--token", "secret-admin-token",
+                "--gateway", "http://localhost:" + mockPort);
 
-        try {
-            System.setErr(new PrintStream(errContent));
-
-            CommandLine cmd = new CommandLine(new KillCommand());
-            int exitCode = cmd.execute(
-                    "--agent", "rogue-agent",
-                    "--gateway", "http://localhost:" + mockPort
-            );
-
-            assertEquals(1, exitCode);
-            assertTrue(errContent.toString().contains("Unauthorized (HTTP 401)"));
-        } finally {
-            System.setErr(origErr);
-        }
+        assertEquals(ExitCode.FAILURE, result.exitCode());
+        assertTrue(result.err().contains("Unauthorized (HTTP 401)"));
+        assertFalse(result.out().contains("secret-admin-token"));
+        assertFalse(result.err().contains("secret-admin-token"));
     }
 
     @Test
-    @DisplayName("C-008: HTTP 403 Forbidden returns exit code 1")
+    @DisplayName("FEAT-003: HTTP 403 exits 1")
     void testForbiddenResponse() {
         responseStatusCode.set(403);
         responsePayload.set("{\"error\":\"Forbidden\"}");
 
+        Captured result = execute(
+                "--agent", "rogue-agent",
+                "--gateway", "http://localhost:" + mockPort);
+
+        assertEquals(ExitCode.FAILURE, result.exitCode());
+        assertTrue(result.err().contains("Forbidden (HTTP 403)"));
+    }
+
+    @Test
+    @DisplayName("C-008: HTTP 404 exits 1")
+    void testNotFoundResponse() {
+        responseStatusCode.set(404);
+        responsePayload.set("{\"error\":\"No agent matches the supplied targetId\"}");
+
+        Captured result = execute(
+                "--agent", "missing-agent",
+                "--gateway", "http://localhost:" + mockPort);
+
+        assertEquals(ExitCode.FAILURE, result.exitCode());
+        assertTrue(result.err().contains("Not Found (HTTP 404)"));
+    }
+
+    @Test
+    @DisplayName("C-008: HTTP 503 exits 1 and reports the partial propagation")
+    void testServiceUnavailableResponse() {
+        responseStatusCode.set(503);
+        responsePayload.set("{\"error\":\"Peer propagation timed out\"}");
+
+        Captured result = execute(
+                "--target-type", "global",
+                "--confirm-lockdown",
+                "--gateway", "http://localhost:" + mockPort);
+
+        assertEquals(ExitCode.FAILURE, result.exitCode());
+        assertTrue(result.err().contains("Service Unavailable (HTTP 503)"));
+        assertTrue(result.err().contains("remain in force"));
+    }
+
+    @Test
+    @DisplayName("FEAT-010: Connection failure to the gateway exits 1")
+    void testConnectionFailure() {
+        Captured result = execute(
+                "--agent", "rogue-agent",
+                "--gateway", "http://localhost:65530");
+
+        assertEquals(ExitCode.FAILURE, result.exitCode());
+        assertTrue(result.err().contains("Failed to connect to AegisMCP Gateway"));
+    }
+
+    @Test
+    @DisplayName("C-008: A 200 without a valid response body exits 1 instead of inventing values")
+    void testMalformedSuccessResponse() {
+        responseStatusCode.set(200);
+        responsePayload.set("{\"status\":\"EXECUTED\"}");
+
+        Captured result = execute(
+                "--agent", "rogue-agent",
+                "--gateway", "http://localhost:" + mockPort);
+
+        assertEquals(ExitCode.FAILURE, result.exitCode());
+        assertTrue(result.err().contains("without a valid C-008 response body"));
+    }
+
+    @Test
+    @DisplayName("C-008: A status that contradicts the target type exits 1")
+    void testContradictorySuccessStatus() {
+        responseStatusCode.set(200);
+        responsePayload.set("""
+                {"status":"SEVERED","affectedSessions":1,"timestamp":"2026-10-21T10:16:00Z"}
+                """);
+
+        Captured result = execute(
+                "--agent", "rogue-agent",
+                "--gateway", "http://localhost:" + mockPort);
+
+        assertEquals(ExitCode.FAILURE, result.exitCode());
+        assertTrue(result.err().contains("expected 'QUARANTINED'"));
+    }
+
+    @Test
+    @DisplayName("C-008 / FEAT-005: A gateway error body is redacted, never echoed verbatim")
+    void testGatewayErrorBodyIsRedacted() {
+        responseStatusCode.set(400);
+        responsePayload.set("{\"error\":\"refused credential " + AWS_KEY + "\"}");
+
+        Captured result = execute(
+                "--agent", "rogue-agent",
+                "--gateway", "http://localhost:" + mockPort);
+
+        assertEquals(ExitCode.USAGE, result.exitCode());
+        assertFalse(result.err().contains(AWS_KEY), "a credential-shaped value must be redacted");
+        assertTrue(result.err().contains("[REDACTED_API_KEY]"));
+    }
+
+    @Test
+    @DisplayName("C-008: An invalid gateway URL is a usage error")
+    void testInvalidGatewayUrl() {
+        Captured result = execute(
+                "--agent", "rogue-agent",
+                "--gateway", "not a url");
+
+        assertEquals(ExitCode.USAGE, result.exitCode());
+    }
+
+    @Test
+    @DisplayName("C-008: The kill help advertises exactly the contract target vocabulary")
+    void testKillHelpMatchesContract() {
+        StringWriter out = new StringWriter();
+        StringWriter err = new StringWriter();
+        int exitCode = AegisCliMain.execute(new PrintWriter(out), new PrintWriter(err), "kill", "--help");
+
+        assertEquals(ExitCode.SUCCESS, exitCode);
+        String help = out.toString();
+        assertTrue(help.contains("session, agent, server, or global"));
+        assertTrue(help.contains("--second-approver"));
+        assertFalse(help.matches("(?s).*\\btool\\b.*"), "the internal 'tool' target must not be advertised");
+    }
+
+    private JsonNode readBody() {
+        assertNotNull(lastReceivedBody.get());
+        try {
+            return mapper.readTree(lastReceivedBody.get());
+        } catch (Exception e) {
+            throw new AssertionError("Gateway request body was not JSON", e);
+        }
+    }
+
+    private Captured execute(String... args) {
+        ByteArrayOutputStream outContent = new ByteArrayOutputStream();
         ByteArrayOutputStream errContent = new ByteArrayOutputStream();
+        PrintStream origOut = System.out;
         PrintStream origErr = System.err;
 
         try {
-            System.setErr(new PrintStream(errContent));
+            System.setOut(new PrintStream(outContent, true, StandardCharsets.UTF_8));
+            System.setErr(new PrintStream(errContent, true, StandardCharsets.UTF_8));
 
-            CommandLine cmd = new CommandLine(new KillCommand());
-            int exitCode = cmd.execute(
-                    "--agent", "rogue-agent",
-                    "--gateway", "http://localhost:" + mockPort
-            );
-
-            assertEquals(1, exitCode);
-            assertTrue(errContent.toString().contains("Forbidden (HTTP 403)"));
+            int exitCode = new CommandLine(new KillCommand()).execute(args);
+            return new Captured(exitCode,
+                    outContent.toString(StandardCharsets.UTF_8),
+                    errContent.toString(StandardCharsets.UTF_8));
         } finally {
+            System.setOut(origOut);
             System.setErr(origErr);
         }
     }
 
-    @Test
-    @DisplayName("FEAT-010: Connection failure to gateway prints clear error and exits with 1")
-    void testConnectionFailure() {
-        ByteArrayOutputStream errContent = new ByteArrayOutputStream();
-        PrintStream origErr = System.err;
-
-        try {
-            System.setErr(new PrintStream(errContent));
-
-            // Use an unallocated port to trigger connection failure
-            CommandLine cmd = new CommandLine(new KillCommand());
-            int exitCode = cmd.execute(
-                    "--agent", "rogue-agent",
-                    "--gateway", "http://localhost:65530"
-            );
-
-            assertEquals(1, exitCode);
-            assertTrue(errContent.toString().contains("Failed to connect to AegisMCP Gateway"));
-        } finally {
-            System.setErr(origErr);
-        }
+    private record Captured(int exitCode, String out, String err) {
     }
 }
