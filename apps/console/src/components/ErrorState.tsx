@@ -29,7 +29,7 @@ export const ErrorState: React.FC<ErrorStateProps> = ({
         <button
           onClick={onRetry}
           data-testid="retry-button"
-          className="inline-flex items-center gap-1.5 px-space-md py-space-xs bg-error-500 hover:bg-error-400 text-grey-900 font-medium text-xs rounded-radius-md transition-colors flex-shrink-0"
+          className="inline-flex items-center gap-1.5 px-space-md py-space-xs bg-error-500 hover:bg-error-700 text-grey-900 font-medium text-xs rounded-radius-md transition-colors flex-shrink-0"
         >
           <RotateCw className="w-3.5 h-3.5" />
           <span>Retry Connection</span>

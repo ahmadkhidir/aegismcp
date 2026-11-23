@@ -49,12 +49,14 @@ export const StatusPill: React.FC<StatusPillProps> = ({ verdict, size = 'sm' }) 
     );
   }
 
+  // Quarantined uses the inverted error badge from the token layer so the label
+  // stays legible on the deep error surface in both themes (FEAT-008).
   return (
     <span
       data-testid="status-pill-quarantined"
-      className={`inline-flex items-center gap-1.5 font-mono font-semibold rounded-radius-full bg-error-900 text-grey-900 border border-error-500 ${padding} ${textSize}`}
+      className={`inline-flex items-center gap-1.5 font-mono font-semibold rounded-radius-full bg-error-900 text-error-100 border border-error-500 ${padding} ${textSize}`}
     >
-      <AlertOctagon size={iconSize} className="text-error-400" />
+      <AlertOctagon size={iconSize} className="text-error-300" />
       <span>QUARANTINED</span>
     </span>
   );

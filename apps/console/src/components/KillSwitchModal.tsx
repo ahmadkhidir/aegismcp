@@ -160,7 +160,7 @@ export const KillSwitchModal: React.FC<KillSwitchModalProps> = ({
               type="submit"
               data-testid="trip-killswitch-button"
               disabled={isSubmitting || confirmedTyped !== 'LOCKDOWN'}
-              className="inline-flex items-center gap-1.5 px-space-md py-space-sm rounded-radius-md text-xs font-bold bg-error-500 hover:bg-error-400 text-grey-900 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
+              className="inline-flex items-center gap-1.5 px-space-md py-space-sm rounded-radius-md text-xs font-bold bg-error-500 hover:bg-error-700 text-grey-900 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
             >
               {isSubmitting ? (
                 <>
