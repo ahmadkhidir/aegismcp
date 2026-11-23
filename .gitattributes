@@ -1,0 +1,11 @@
+# The Gradle wrapper is a POSIX shell script; the Linux build container executes it directly
+# through its shebang, which a CRLF checkout breaks with "/bin/sh: not found". The images build
+# from the repository root, so the checked-out bytes are the build input (ADR-002, NFR-028).
+# Anchors: NFR-028; infra/AGENTS.md.
+.gitattributes text eol=lf
+gradlew text eol=lf
+gradlew.bat text eol=lf
+
+# Image definitions are read straight from the working tree by Docker; keep them LF so the parser
+# and its line continuations see the same bytes on every host.
+Dockerfile text eol=lf
