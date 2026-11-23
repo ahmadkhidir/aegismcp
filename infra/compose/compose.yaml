@@ -1,0 +1,158 @@
+# Local identity and gateway topology for enterprise OIDC federation (FEAT-009, NFR-029,
+# operations.md "Enterprise Identity Provider (SSO / OIDC) Federation").
+#
+# Three containers, one network:
+#   keycloak    the real OpenID Connect provider, imported from keycloak/realm-aegis.json
+#   gateway     the packaged gateway image built from infra/docker/Dockerfile
+#   oidc-smoke  one-shot verification: real login, gateway token validation, role-based access
+#
+# Run from this directory:
+#   docker compose up -d            # provider and gateway
+#   docker compose --profile smoke run --rm oidc-smoke
+#
+# Every third-party image is pinned by version tag and digest (infra/AGENTS.md "Supply chain").
+# No secret is baked into an image or written in this file: credentials come from .env, which
+# bootstrap-oidc.mjs generates and .gitignore keeps out of the repository.
+
+name: aegis-oidc
+
+# The issuer is the identifier the provider stamps into every token and the value the console and
+# gateway compare against. It must stay equal to <AEGIS_OIDC_PUBLIC_URL>/realms/aegis; the smoke
+# check fails when the two diverge. The realm name is part of that contract, so it is fixed here
+# and in keycloak/realm-aegis.json rather than exposed as a setting.
+x-oidc-public-url: &oidc-public-url ${AEGIS_OIDC_PUBLIC_URL:-http://localhost:8081}
+x-oidc-realm: &oidc-realm aegis
+x-oidc-issuer: &oidc-issuer ${AEGIS_OIDC_ISSUER:-http://localhost:8081/realms/aegis}
+x-oidc-console-client-id: &oidc-console-client-id ${AEGIS_OIDC_CONSOLE_CLIENT_ID:-aegis-console}
+
+services:
+  keycloak:
+    # Version 26.8.2, pinned by digest so a retag cannot change the bytes a workstation runs.
+    image: quay.io/keycloak/keycloak:26.8.2@sha256:7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3
+    # start-dev keeps the local provider on its container-local development database and import
+    # path; the realm is the same artifact every environment imports. The image already runs as
+    # uid 1000, and its first start augments its own build directory, so the provider's root
+    # filesystem stays writable while every other container runs read-only.
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_HOSTNAME: *oidc-public-url
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: "8080"
+      # The bootstrap administrator manages the realm in this local stack. Its password is
+      # generated into .env by bootstrap-oidc.mjs and never committed; compose refuses to start
+      # while KEYCLOAK_ADMIN_PASSWORD is unset.
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?}
+      # Faster, quieter startup for a workstation; no behavior of the realm changes.
+      KC_LOG_LEVEL: ${KEYCLOAK_LOG_LEVEL:-warn}
+    ports:
+      # The host-facing issuer port. AEGIS_OIDC_PUBLIC_URL must name this port.
+      - "${AEGIS_OIDC_PUBLIC_PORT:-8081}:8080"
+    volumes:
+      - ./keycloak/realm-aegis.json:/opt/keycloak/data/import/realm-aegis.json:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # The realm discovery document answers only after the realm import finished, which is the
+      # readiness signal the rest of the topology waits for.
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8080 &&
+          printf 'GET /realms/aegis/.well-known/openid-configuration HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          head -n 1 <&3 | grep -q ' 200 '
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 30s
+
+  gateway:
+    # The same image the release ships; compose changes configuration only (infra/AGENTS.md
+    # "Environment parity").
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    image: aegismcp-gateway:local
+    environment:
+      AEGIS_GATEWAY_HOST: 0.0.0.0
+      AEGIS_GATEWAY_PORT: "8443"
+      # Local development terminates TLS outside this stack; the production deployment sets a
+      # keystore and never serves cleartext (NFR-021).
+      AEGIS_TLS_ENABLED: "false"
+      # The provider publishes the public issuer, so the issuer claim matches the console. The
+      # gateway reads signing keys over the compose network, not through the host.
+      AEGIS_OIDC_ISSUER: *oidc-issuer
+      AEGIS_OIDC_AUDIENCE: ${AEGIS_OIDC_AUDIENCE:-aegis-gateway}
+      AEGIS_OIDC_JWKS_URL: http://keycloak:8080/realms/aegis/protocol/openid-connect/certs
+    ports:
+      - "${AEGIS_GATEWAY_PORT:-8443}:8443"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O- http://127.0.0.1:8443/health | grep -q '"status":"UP"'
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  oidc-smoke:
+    # One-shot verification container. It runs the same image on every host, so the check does not
+    # depend on a workstation's shell, curl, or TOTP tooling. Started only by the smoke profile.
+    image: python:3.12-alpine@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89
+    profiles:
+      - smoke
+    user: "65534:65534"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./smoke-oidc.py:/smoke-oidc.py:ro
+      - ./keycloak/realm-aegis.json:/realm-aegis.json:ro
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      # Browser-facing issuer and client, asserted against every token and the provider.
+      OIDC_ISSUER: *oidc-issuer
+      OIDC_PUBLIC_URL: *oidc-public-url
+      OIDC_REALM: *oidc-realm
+      OIDC_CONSOLE_CLIENT_ID: *oidc-console-client-id
+      OIDC_REDIRECT_URI: ${AEGIS_OIDC_CONSOLE_REDIRECT_URI:-http://localhost:3000/}
+      OIDC_AUDIENCE: ${AEGIS_OIDC_AUDIENCE:-aegis-gateway}
+      OIDC_REALM_FILE: /realm-aegis.json
+      # The bootstrap administrator, used to reset each user's second factor so a repeated run
+      # starts from the realm's declared state, and the password of each console user. Both come
+      # from .env; neither is written in this file, and compose refuses to start while any is
+      # unset (see bootstrap-oidc.mjs init).
+      OIDC_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-admin}
+      OIDC_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?}
+      OIDC_ADMIN_USER_PASSWORD: ${AEGIS_OIDC_ADMIN_USER_PASSWORD:?}
+      OIDC_OPERATOR_USER_PASSWORD: ${AEGIS_OIDC_OPERATOR_USER_PASSWORD:?}
+      OIDC_AUDITOR_USER_PASSWORD: ${AEGIS_OIDC_AUDITOR_USER_PASSWORD:?}
+      OIDC_VIEWER_USER_PASSWORD: ${AEGIS_OIDC_VIEWER_USER_PASSWORD:?}
+      # Container-network addresses the check uses for the OAuth and gateway calls.
+      OIDC_INTERNAL_URL: http://keycloak:8080
+      GATEWAY_URL: http://gateway:8443
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+    command: ["python3", "/smoke-oidc.py"]
