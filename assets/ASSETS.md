@@ -8,9 +8,9 @@ The asset ledger. One row per slot (`A-###`). The user is the sole authority on 
 | A-001 | `apps/console/public/favicon.svg` | brandmark / app-icon | Done |
 | A-002 | `assets/brand/brandmark.svg` | brandmark / mark-master | Done |
 | A-003 | `assets/brand/logo-horizontal.svg` | brandmark / horizontal-lockup | Done |
-| A-004 | `assets/brand/wordmark.svg` | brandmark / wordmark-only | Pending |
-| A-005 | `assets/brand/brandmark-monochrome.svg` | brandmark / one-colour | Pending |
-| A-006 | `assets/brand/logo-horizontal-knockout.svg` | brandmark / knockout-on-dark | Pending |
+| A-004 | `assets/brand/wordmark.svg` | brandmark / wordmark-only | Done |
+| A-005 | `assets/brand/brandmark-monochrome.svg` | brandmark / one-colour | Done |
+| A-006 | `assets/brand/logo-horizontal-knockout.svg` | brandmark / knockout-on-dark | Done |
 
 ## Family blocks
 

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 105 36" fill="none">
+  <!-- Wordmark 'Aegis' with the 'MCP' badge, cropped tight to the lockup's type block -->
+  <text x="0" y="24" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="20" font-weight="700" letter-spacing="-0.04em" fill="#0F172A">Aegis</text>
+  <g transform="translate(60, 8)">
+    <rect width="44" height="20" rx="4" fill="#E2E8F0" stroke="#CBD5E1" stroke-width="1"/>
+    <text x="22" y="14" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="600" fill="#172554" text-anchor="middle">MCP</text>
+  </g>
+</svg>
