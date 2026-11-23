@@ -1,10 +1,27 @@
 # Gradle build and cache
 .gradle/
 build/
+local.properties
+
+# Node and console build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and runtime dumps
+*.log
+*.hprof
 
 # IDE files
 .idea/
 *.iml
+out/
 .vscode/
 .project
 .classpath

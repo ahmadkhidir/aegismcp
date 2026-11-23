@@ -1,0 +1,33 @@
+# Docker reads this file only from the build context root, which is the repository root.
+# Keep the context to the inputs the image stages declare (infra/AGENTS.md).
+
+# Version control and coordination metadata
+.git
+.gitmodules
+.github
+.decisions
+docs
+contracts
+assets
+
+# Local environment, secrets, and host state
+.env
+.env.*
+local.properties
+*.log
+*.hprof
+
+# Build outputs and dependency caches
+.gradle/
+**/.gradle/
+**/build/
+**/dist/
+**/node_modules/
+*.tsbuildinfo
+
+# Editor and OS files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
