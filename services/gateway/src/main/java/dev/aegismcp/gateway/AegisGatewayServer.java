@@ -8,6 +8,8 @@ import dev.aegismcp.gateway.audit.AuditVerificationEngine;
 import dev.aegismcp.gateway.audit.AuditVerificationHandler;
 import dev.aegismcp.gateway.compliance.ComplianceExportHandler;
 import dev.aegismcp.gateway.compliance.ComplianceReportEngine;
+import dev.aegismcp.gateway.health.GatewayReadiness;
+import dev.aegismcp.gateway.health.HealthHandler;
 import dev.aegismcp.gateway.killswitch.EmergencyManagementHandler;
 import dev.aegismcp.gateway.killswitch.GatewayMetrics;
 import dev.aegismcp.gateway.killswitch.KillSwitchManager;
@@ -71,6 +73,9 @@ public class AegisGatewayServer {
     private final PolicyManagementHandler policyManagementHandler;
     private final ApprovalManagementHandler approvalManagementHandler;
     private final EmergencyManagementHandler emergencyManagementHandler;
+
+    private final GatewayReadiness readiness;
+    private final HealthHandler healthHandler;
 
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
@@ -138,6 +143,9 @@ public class AegisGatewayServer {
         this.policyManagementHandler = new PolicyManagementHandler(this.policyCache);
         this.approvalManagementHandler = new ApprovalManagementHandler(this.approvalManager);
         this.emergencyManagementHandler = new EmergencyManagementHandler(this.killSwitchManager, this.gatewayMetrics);
+
+        this.readiness = new GatewayReadiness();
+        this.healthHandler = new HealthHandler(this.readiness);
     }
 
     /**
@@ -148,6 +156,8 @@ public class AegisGatewayServer {
             logger.warn("AegisGatewayServer is already running on {}:{}", host, boundPort);
             return;
         }
+
+        readiness.markStarting();
 
         bossGroup = new NioEventLoopGroup(1, Thread.ofPlatform().name("netty-boss-", 0).factory());
         workerGroup = new NioEventLoopGroup(0, Thread.ofPlatform().name("netty-worker-", 0).factory());
@@ -165,6 +175,7 @@ public class AegisGatewayServer {
                         ch.pipeline().addLast("http-aggregator", new HttpObjectAggregator(MAX_CONTENT_LENGTH));
 
                         // Route handlers registered in pipeline
+                        ch.pipeline().addLast("health-handler", healthHandler);
                         ch.pipeline().addLast("audit-verification-handler", auditVerificationHandler);
                         ch.pipeline().addLast("audit-records-handler", auditRecordsHandler);
                         ch.pipeline().addLast("compliance-export-handler", complianceExportHandler);
@@ -181,6 +192,7 @@ public class AegisGatewayServer {
         InetSocketAddress localAddress = (InetSocketAddress) serverChannel.localAddress();
         boundPort = localAddress.getPort();
         running = true;
+        readiness.markReady();
 
         logger.info("AegisGatewayServer started successfully on {}:{}", host, boundPort);
     }
@@ -193,6 +205,7 @@ public class AegisGatewayServer {
             return;
         }
 
+        readiness.markShuttingDown();
         logger.info("Stopping AegisGatewayServer on {}:{}...", host, boundPort);
 
         try {
@@ -310,6 +323,14 @@ public class AegisGatewayServer {
         return emergencyManagementHandler;
     }
 
+    public GatewayReadiness getReadiness() {
+        return readiness;
+    }
+
+    public HealthHandler getHealthHandler() {
+        return healthHandler;
+    }
+
     /**
      * Dispatcher handler that offloads request execution to Loom virtual threads.
      */
@@ -325,19 +346,6 @@ public class AegisGatewayServer {
             request.retain();
             executor.submit(() -> {
                 try {
-                    String uri = request.uri();
-                    if ("/health".equals(uri) || "/healthz".equals(uri)) {
-                        DefaultFullHttpResponse response = new DefaultFullHttpResponse(
-                                HttpVersion.HTTP_1_1,
-                                HttpResponseStatus.OK,
-                                ctx.alloc().buffer().writeBytes("{\"status\":\"UP\"}".getBytes())
-                        );
-                        response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");
-                        response.headers().set(HttpHeaderNames.CONTENT_LENGTH, response.content().readableBytes());
-                        ctx.writeAndFlush(response);
-                        return;
-                    }
-
                     // Default response for unmatched endpoints before Phase 1 C-001 handler attachment
                     DefaultFullHttpResponse response = new DefaultFullHttpResponse(
                             HttpVersion.HTTP_1_1,

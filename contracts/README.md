@@ -27,6 +27,8 @@ and a PR that updates both sides.
 | [C-019](C-019.md) | Approval history | services/gateway | Frozen | C019ApprovalHistoryContractTest#listsRejectedApprovalHistory |
 | [C-020](C-020.md) | Metrics timeseries | services/gateway | Frozen | C020MetricsTimeseriesContractTest#returnsTwentyFourHourMetricTimeseries |
 | [C-021](C-021.md) | Emergency release | services/gateway | Frozen | C021EmergencyReleaseContractTest#releasesQuarantinedTargetAndLiftsLockdown |
+| [C-022](C-022.md) | Health probe | services/gateway | Frozen | C022HealthContractTest#answersLivenessProbeWhileDependenciesAreDown |
+| [C-023](C-023.md) | Readiness probe | services/gateway | Frozen | C023ReadinessContractTest#reportsDependencyHealthAndRefusesTrafficWhenDown |
 
 C-007 was retired in the endpoint reconciliation pass. It duplicated the ledger-integrity resource now
 defined once by C-015. Retired identifiers are not reused.
