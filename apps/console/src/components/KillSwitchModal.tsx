@@ -13,8 +13,8 @@ export const KillSwitchModal: React.FC<KillSwitchModalProps> = ({
   onClose,
   onConfirm,
 }) => {
-  const [targetType, setTargetType] = useState<'global' | 'agent' | 'tool' | 'server'>('global');
-  const [targetId, setTargetId] = useState('cluster-production-eu1');
+  const [targetType, setTargetType] = useState<EmergencyKillRequest['targetType']>('global');
+  const [targetId, setTargetId] = useState('');
   const [reason, setReason] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -28,6 +28,10 @@ export const KillSwitchModal: React.FC<KillSwitchModalProps> = ({
       setError('Please type LOCKDOWN to confirm trip circuit breaker');
       return;
     }
+    if (targetType !== 'global' && !targetId.trim()) {
+      setError('Enter the session, agent, or server identifier for this scope.');
+      return;
+    }
     if (!reason.trim()) {
       setError('A justification reason is required for audit compliance');
       return;
@@ -38,8 +42,8 @@ export const KillSwitchModal: React.FC<KillSwitchModalProps> = ({
     try {
       await onConfirm({
         targetType,
-        targetId,
-        reason,
+        ...(targetType === 'global' ? {} : { targetId: targetId.trim() }),
+        reason: reason.trim(),
       });
       setIsSubmitting(false);
       onClose();
@@ -92,16 +96,15 @@ export const KillSwitchModal: React.FC<KillSwitchModalProps> = ({
             <select
               value={targetType}
               onChange={(e) => {
-                const val = e.target.value as 'global' | 'agent' | 'tool' | 'server';
-                setTargetType(val);
-                if (val === 'global') setTargetId('cluster-production-eu1');
+                setTargetType(e.target.value as EmergencyKillRequest['targetType']);
+                setTargetId('');
               }}
               className="w-full bg-grey-200 border border-grey-300 rounded-radius-md px-space-sm py-2 text-xs text-grey-900 focus:border-primary-500 outline-none"
             >
-              <option value="global">Global (Sever all agent sessions cluster-wide)</option>
-              <option value="agent">Agent (Quarantine specific SPIFFE ID)</option>
-              <option value="tool">Tool (Disable vulnerable MCP tool immediately)</option>
-              <option value="server">Server (Sever upstream MCP server endpoint)</option>
+              <option value="global">Global (Sever every agent session cluster-wide)</option>
+              <option value="agent">Agent (Quarantine a specific SPIFFE identity)</option>
+              <option value="session">Session (Close one transport session)</option>
+              <option value="server">Server (Sever an upstream MCP server endpoint)</option>
             </select>
           </div>
 
@@ -113,9 +116,18 @@ export const KillSwitchModal: React.FC<KillSwitchModalProps> = ({
               type="text"
               value={targetId}
               onChange={(e) => setTargetId(e.target.value)}
-              required
-              className="w-full bg-grey-200 border border-grey-300 rounded-radius-md px-space-sm py-2 text-xs font-mono text-grey-900 focus:border-primary-500 outline-none"
-              placeholder="e.g. cluster-production-eu1 or spiffe://..."
+              required={targetType !== 'global'}
+              disabled={targetType === 'global'}
+              className="w-full bg-grey-200 border border-grey-300 rounded-radius-md px-space-sm py-2 text-xs font-mono text-grey-900 focus:border-primary-500 outline-none disabled:opacity-50"
+              placeholder={
+                targetType === 'global'
+                  ? 'Cluster-wide scope'
+                  : targetType === 'agent'
+                  ? 'spiffe://...'
+                  : targetType === 'session'
+                  ? 'Session identifier'
+                  : 'Upstream server identifier'
+              }
             />
           </div>
 

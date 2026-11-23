@@ -1,203 +1,485 @@
 /**
- * Specification Anchors: FEAT-009, NFR-029, screens.md, user-personas.md
- * Standards-compliant OpenID Connect (OIDC) client with RFC 7636 PKCE Authorization Code flow
- * and enterprise persona mock provider for local development & automated testing.
+ * Specification Anchors: FEAT-009, NFR-029, screens.md, user-flow.md
+ * OpenID Connect client for the console: Authorization Code flow with PKCE,
+ * issuer discovery, ID-token signature verification against the provider JWKS,
+ * and claim-derived session state.
+ *
+ * A console build without an issuer and client ID is unconfigured. It never
+ * creates a token or auto-signs in.
  */
 
-import { OidcConfig, OidcTokens, UserProfile, UserRole } from '../types/auth';
+import {
+  AuthErrorCode,
+  OidcConfig,
+  OidcTokens,
+  UserProfile,
+  UserRole,
+} from '../types/auth';
 
 const STORAGE_SESSION_KEY = 'aegis_auth_session';
 const STORAGE_PKCE_VERIFIER_KEY = 'aegis_oidc_verifier';
 const STORAGE_STATE_KEY = 'aegis_oidc_state';
 const STORAGE_NONCE_KEY = 'aegis_oidc_nonce';
 
-/** Predefined enterprise personas according to docs/AegisMCP/user-personas.md */
-export const ENTERPRISE_PERSONAS: Record<string, {
-  name: string;
-  email: string;
-  roles: UserRole[];
-  title: string;
-  sub: string;
-}> = {
-  elena: {
-    sub: 'spiffe://aegis.internal/secops/users/elena.rostova',
-    name: 'Elena Rostova',
-    email: 'elena.rostova@aegis.internal',
-    roles: ['admin', 'operator', 'auditor'],
-    title: 'SecOps Admin',
-  },
-  priya: {
-    sub: 'spiffe://aegis.internal/compliance/users/priya.sharma',
-    name: 'Priya Sharma',
-    email: 'priya.sharma@aegis.internal',
-    roles: ['auditor'],
-    title: 'CISO / Auditor',
-  },
-  marcus: {
-    sub: 'spiffe://aegis.internal/platform/users/marcus.vance',
-    name: 'Marcus Vance',
-    email: 'marcus.vance@aegis.internal',
-    roles: ['operator'],
-    title: 'Platform Engineer',
-  },
-  david: {
-    sub: 'spiffe://aegis.internal/developer/users/david.chen',
-    name: 'David Chen',
-    email: 'david.chen@aegis.internal',
-    roles: ['viewer'],
-    title: 'AI Developer',
-  },
-};
+const IDLE_SESSION_MS = 15 * 60 * 1000;
+const CLOCK_SKEW_SECONDS = 60;
+const JWKS_MAX_AGE_MS = 5 * 60 * 1000;
+const JWKS_STALE_GRACE_MS = 60 * 60 * 1000;
 
-/** Base64URL string encoder conforming to RFC 7636 */
-function base64UrlEncode(arrayBuffer: ArrayBuffer | Uint8Array): string {
-  const bytes = arrayBuffer instanceof Uint8Array ? arrayBuffer : new Uint8Array(arrayBuffer);
+const VALID_ROLES: UserRole[] = ['admin', 'auditor', 'operator', 'viewer'];
+
+export class OidcError extends Error {
+  readonly code: AuthErrorCode;
+
+  constructor(code: AuthErrorCode, message: string) {
+    super(message);
+    this.name = 'OidcError';
+    this.code = code;
+  }
+}
+
+interface OidcMetadata {
+  issuer: string;
+  authorizationEndpoint: string;
+  tokenEndpoint: string;
+  jwksUri: string;
+}
+
+interface JwtHeader {
+  alg?: string;
+  kid?: string;
+  typ?: string;
+}
+
+interface Jwk extends JsonWebKey {
+  kid?: string;
+  alg?: string;
+  use?: string;
+}
+
+interface JwksCacheEntry {
+  uri: string;
+  keys: Jwk[];
+  fetchedAt: number;
+}
+
+let metadataCache: { authority: string; metadata: OidcMetadata } | null = null;
+let jwksCache: JwksCacheEntry | null = null;
+
+/** Reads identity configuration from the build environment. */
+export function readOidcConfig(env: ImportMetaEnv): OidcConfig {
+  const authority = (env.VITE_OIDC_AUTHORITY ?? '').trim().replace(/\/+$/, '');
+  const clientId = (env.VITE_OIDC_CLIENT_ID ?? '').trim();
+  const redirectUri =
+    (env.VITE_OIDC_REDIRECT_URI ?? '').trim() ||
+    (typeof window !== 'undefined' ? `${window.location.origin}/` : '');
+  const scope = (env.VITE_OIDC_SCOPE ?? '').trim() || 'openid profile email roles';
+
+  const configurationErrors: string[] = [];
+  if (!authority) configurationErrors.push('VITE_OIDC_AUTHORITY');
+  if (!clientId) configurationErrors.push('VITE_OIDC_CLIENT_ID');
+  if (!redirectUri) configurationErrors.push('VITE_OIDC_REDIRECT_URI');
+
+  return { authority, clientId, redirectUri, scope, configurationErrors };
+}
+
+function base64UrlEncode(bytes: Uint8Array): string {
   let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
+  for (let i = 0; i < bytes.byteLength; i += 1) {
     binary += String.fromCharCode(bytes[i]);
   }
-  return btoa(binary)
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-/** Generate cryptographically random string */
-function generateRandomString(length = 43): string {
-  const array = new Uint8Array(length);
-  window.crypto.getRandomValues(array);
-  return base64UrlEncode(array).slice(0, length);
+function base64UrlDecode(value: string): Uint8Array {
+  const padded = value.replace(/-/g, '+').replace(/_/g, '/');
+  const binary = atob(padded + '='.repeat((4 - (padded.length % 4)) % 4));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
 }
 
-/** Compute SHA-256 code challenge from verifier */
-async function computeSha256Challenge(codeVerifier: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(codeVerifier);
-  const digest = await window.crypto.subtle.digest('SHA-256', data);
-  return base64UrlEncode(digest);
-}
-
-/** Decode JWT payload */
-export function parseJwtPayload(token: string): Record<string, unknown> {
+function decodeJsonSegment<T>(segment: string, label: string): T {
   try {
-    const parts = token.split('.');
-    if (parts.length < 2) return {};
-    const base64Url = parts[1];
-    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-    const jsonPayload = decodeURIComponent(
-      atob(base64)
-        .split('')
-        .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
-        .join('')
+    return JSON.parse(new TextDecoder().decode(base64UrlDecode(segment))) as T;
+  } catch {
+    throw new OidcError('TOKEN_VERIFICATION', `The identity token ${label} is not valid JSON.`);
+  }
+}
+
+/** Generates a cryptographically random base64url string (RFC 7636). */
+function generateRandomString(bytes = 48): string {
+  const array = new Uint8Array(bytes);
+  window.crypto.getRandomValues(array);
+  return base64UrlEncode(array).slice(0, 64);
+}
+
+async function computeSha256Challenge(codeVerifier: string): Promise<string> {
+  const digest = await window.crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(codeVerifier)
+  );
+  return base64UrlEncode(new Uint8Array(digest));
+}
+
+interface AlgorithmSpec {
+  importParams: RsaHashedImportParams | EcKeyImportParams;
+  verifyParams: AlgorithmIdentifier | RsaPssParams | EcdsaParams;
+  kty: string;
+}
+
+function algorithmSpec(alg: string): AlgorithmSpec {
+  switch (alg) {
+    case 'RS256':
+      return {
+        importParams: { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+        verifyParams: { name: 'RSASSA-PKCS1-v1_5' },
+        kty: 'RSA',
+      };
+    case 'RS384':
+      return {
+        importParams: { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-384' },
+        verifyParams: { name: 'RSASSA-PKCS1-v1_5' },
+        kty: 'RSA',
+      };
+    case 'RS512':
+      return {
+        importParams: { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-512' },
+        verifyParams: { name: 'RSASSA-PKCS1-v1_5' },
+        kty: 'RSA',
+      };
+    case 'PS256':
+      return {
+        importParams: { name: 'RSA-PSS', hash: 'SHA-256' },
+        verifyParams: { name: 'RSA-PSS', saltLength: 32 },
+        kty: 'RSA',
+      };
+    case 'PS384':
+      return {
+        importParams: { name: 'RSA-PSS', hash: 'SHA-384' },
+        verifyParams: { name: 'RSA-PSS', saltLength: 48 },
+        kty: 'RSA',
+      };
+    case 'PS512':
+      return {
+        importParams: { name: 'RSA-PSS', hash: 'SHA-512' },
+        verifyParams: { name: 'RSA-PSS', saltLength: 64 },
+        kty: 'RSA',
+      };
+    case 'ES256':
+      return {
+        importParams: { name: 'ECDSA', namedCurve: 'P-256' },
+        verifyParams: { name: 'ECDSA', hash: 'SHA-256' },
+        kty: 'EC',
+      };
+    case 'ES384':
+      return {
+        importParams: { name: 'ECDSA', namedCurve: 'P-384' },
+        verifyParams: { name: 'ECDSA', hash: 'SHA-384' },
+        kty: 'EC',
+      };
+    case 'ES512':
+      return {
+        importParams: { name: 'ECDSA', namedCurve: 'P-521' },
+        verifyParams: { name: 'ECDSA', hash: 'SHA-512' },
+        kty: 'EC',
+      };
+    default:
+      throw new OidcError(
+        'TOKEN_VERIFICATION',
+        `The identity provider signed the token with unsupported algorithm ${alg}.`
+      );
+  }
+}
+
+async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(url, init);
+  } catch {
+    throw new OidcError('DISCOVERY', 'The identity provider could not be reached.');
+  }
+  if (!response.ok) {
+    throw new OidcError(
+      'DISCOVERY',
+      `The identity provider returned HTTP ${response.status} during discovery.`
     );
-    return JSON.parse(jsonPayload);
+  }
+  return (await response.json()) as T;
+}
+
+async function discover(authority: string): Promise<OidcMetadata> {
+  if (metadataCache?.authority === authority) {
+    return metadataCache.metadata;
+  }
+
+  const document = await fetchJson<{
+    issuer?: string;
+    authorization_endpoint?: string;
+    token_endpoint?: string;
+    jwks_uri?: string;
+  }>(`${authority}/.well-known/openid-configuration`, {
+    headers: { Accept: 'application/json' },
+  });
+
+  if (!document.authorization_endpoint || !document.token_endpoint || !document.jwks_uri) {
+    throw new OidcError(
+      'DISCOVERY',
+      'The identity provider discovery document is missing required endpoints.'
+    );
+  }
+
+  const metadata: OidcMetadata = {
+    issuer: document.issuer ?? authority,
+    authorizationEndpoint: document.authorization_endpoint,
+    tokenEndpoint: document.token_endpoint,
+    jwksUri: document.jwks_uri,
+  };
+  metadataCache = { authority, metadata };
+  return metadata;
+}
+
+async function fetchJwks(uri: string): Promise<Jwk[]> {
+  const now = Date.now();
+  if (jwksCache?.uri === uri && now - jwksCache.fetchedAt < JWKS_MAX_AGE_MS) {
+    return jwksCache.keys;
+  }
+
+  try {
+    const document = await fetchJson<{ keys?: Jwk[] }>(uri, {
+      headers: { Accept: 'application/json' },
+    });
+    if (!Array.isArray(document.keys) || document.keys.length === 0) {
+      throw new OidcError('TOKEN_VERIFICATION', 'The identity provider published no signing keys.');
+    }
+    jwksCache = { uri, keys: document.keys, fetchedAt: now };
+    return document.keys;
+  } catch (error) {
+    // A key-rotation fetch failure may fall back to a recently cached key set.
+    if (jwksCache?.uri === uri && now - jwksCache.fetchedAt < JWKS_STALE_GRACE_MS) {
+      return jwksCache.keys;
+    }
+    throw error;
+  }
+}
+
+/** Decodes a JWT payload without trusting it. Verification happens separately. */
+export function decodeJwtPayload(token: string): Record<string, unknown> {
+  const parts = token.split('.');
+  if (parts.length !== 3) return {};
+  try {
+    return decodeJsonSegment<Record<string, unknown>>(parts[1], 'payload');
   } catch {
     return {};
   }
 }
 
-/** Create signed-shape mock JWT for local or testing use */
-export function createMockJwt(claims: Record<string, unknown>): string {
-  const header = { alg: 'RS256', typ: 'JWT', kid: 'aegis-dev-key' };
-  const encodedHeader = base64UrlEncode(new TextEncoder().encode(JSON.stringify(header)));
-  const encodedPayload = base64UrlEncode(new TextEncoder().encode(JSON.stringify(claims)));
-  const dummySignature = base64UrlEncode(new TextEncoder().encode('mock_signature_bytes_verified'));
-  return `${encodedHeader}.${encodedPayload}.${dummySignature}`;
+interface VerifyOptions {
+  issuer: string;
+  clientId: string;
+  jwksUri: string;
+  nonce?: string;
+}
+
+/**
+ * Verifies an ID token's signature, issuer, audience, lifetime, and nonce.
+ * Returns the trusted claim set.
+ */
+export async function verifyIdToken(
+  idToken: string,
+  options: VerifyOptions
+): Promise<Record<string, unknown>> {
+  const parts = idToken.split('.');
+  if (parts.length !== 3) {
+    throw new OidcError('TOKEN_VERIFICATION', 'The identity token is not a signed JWT.');
+  }
+
+  const header = decodeJsonSegment<JwtHeader>(parts[0], 'header');
+  if (!header.alg || header.alg === 'none') {
+    throw new OidcError('TOKEN_VERIFICATION', 'The identity token is unsigned.');
+  }
+
+  const spec = algorithmSpec(header.alg);
+  const signature = base64UrlDecode(parts[2]);
+  const signingInput = new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
+  const keys = await fetchJwks(options.jwksUri);
+  const candidates = keys.filter((key) => {
+    if (key.kty !== spec.kty) return false;
+    if (header.kid && key.kid && key.kid !== header.kid) return false;
+    return true;
+  });
+
+  if (candidates.length === 0) {
+    throw new OidcError(
+      'TOKEN_VERIFICATION',
+      'The identity token was signed with a key the provider does not publish.'
+    );
+  }
+
+  let verified = false;
+  for (const key of candidates) {
+    try {
+      const imported = await window.crypto.subtle.importKey(
+        'jwk',
+        key,
+        spec.importParams,
+        false,
+        ['verify']
+      );
+      verified = await window.crypto.subtle.verify(
+        spec.verifyParams,
+        imported,
+        signature as unknown as BufferSource,
+        signingInput as unknown as BufferSource
+      );
+      if (verified) break;
+    } catch {
+      // Try the next published key; a key for another algorithm simply fails.
+    }
+  }
+
+  if (!verified) {
+    throw new OidcError('TOKEN_VERIFICATION', 'The identity token signature is not valid.');
+  }
+
+  const claims = decodeJsonSegment<Record<string, unknown>>(parts[1], 'payload');
+  const now = Math.floor(Date.now() / 1000);
+  const exp = typeof claims.exp === 'number' ? claims.exp : NaN;
+  const nbf = typeof claims.nbf === 'number' ? claims.nbf : null;
+
+  if (!Number.isFinite(exp) || exp + CLOCK_SKEW_SECONDS < now) {
+    throw new OidcError('TOKEN_VERIFICATION', 'The identity token has expired.');
+  }
+  if (nbf !== null && nbf - CLOCK_SKEW_SECONDS > now) {
+    throw new OidcError('TOKEN_VERIFICATION', 'The identity token is not valid yet.');
+  }
+  if (claims.iss !== options.issuer) {
+    throw new OidcError('TOKEN_VERIFICATION', 'The identity token issuer does not match.');
+  }
+
+  const audience = claims.aud;
+  const audiences = Array.isArray(audience) ? audience : [audience];
+  if (!audiences.includes(options.clientId)) {
+    throw new OidcError('TOKEN_VERIFICATION', 'The identity token was issued for another client.');
+  }
+
+  if (options.nonce !== undefined && claims.nonce !== options.nonce) {
+    throw new OidcError('TOKEN_VERIFICATION', 'The identity token nonce does not match.');
+  }
+
+  return claims;
+}
+
+function claimRoles(claims: Record<string, unknown>, clientId: string): UserRole[] {
+  const collected: string[] = [];
+
+  if (Array.isArray(claims.roles)) {
+    collected.push(...claims.roles.filter((role): role is string => typeof role === 'string'));
+  }
+
+  const realmAccess = claims.realm_access;
+  if (realmAccess && typeof realmAccess === 'object') {
+    const roles = (realmAccess as { roles?: unknown }).roles;
+    if (Array.isArray(roles)) {
+      collected.push(...roles.filter((role): role is string => typeof role === 'string'));
+    }
+  }
+
+  const resourceAccess = claims.resource_access;
+  if (resourceAccess && typeof resourceAccess === 'object') {
+    const clientRoles = (resourceAccess as Record<string, { roles?: unknown }>)[clientId]?.roles;
+    if (Array.isArray(clientRoles)) {
+      collected.push(...clientRoles.filter((role): role is string => typeof role === 'string'));
+    }
+  }
+
+  return Array.from(
+    new Set(
+      collected
+        .map((role) => role.toLowerCase())
+        .filter((role): role is UserRole => VALID_ROLES.includes(role as UserRole))
+    )
+  );
+}
+
+/** Builds the operator profile from verified claims only. */
+export function profileFromClaims(
+  claims: Record<string, unknown>,
+  clientId: string,
+  issuer: string
+): UserProfile {
+  const sub = typeof claims.sub === 'string' ? claims.sub : '';
+  if (!sub) {
+    throw new OidcError('TOKEN_VERIFICATION', 'The identity token has no subject claim.');
+  }
+
+  const roles = claimRoles(claims, clientId);
+  if (roles.length === 0) {
+    throw new OidcError(
+      'ACCESS_DENIED',
+      'Your account does not hold a console role (admin, operator, auditor, or viewer).'
+    );
+  }
+
+  const preferredUsername =
+    typeof claims.preferred_username === 'string' ? claims.preferred_username : undefined;
+  const email = typeof claims.email === 'string' ? claims.email : '';
+  const name =
+    (typeof claims.name === 'string' && claims.name.trim()) ||
+    preferredUsername ||
+    email ||
+    sub;
+
+  return {
+    sub,
+    name,
+    email,
+    preferredUsername,
+    roles,
+    idp: typeof claims.iss === 'string' ? claims.iss : issuer,
+    sessionExpiresAt: Date.now() + IDLE_SESSION_MS,
+  };
 }
 
 export class OidcService {
-  private config: OidcConfig;
+  private readonly config: OidcConfig;
 
-  constructor() {
-    const authority = (import.meta.env.VITE_OIDC_AUTHORITY as string | undefined) || '';
-    const isMock = !authority || authority.toLowerCase() === 'mock';
-
-    this.config = {
-      authority,
-      clientId: (import.meta.env.VITE_OIDC_CLIENT_ID as string | undefined) || 'aegismcp-console',
-      redirectUri:
-        (import.meta.env.VITE_OIDC_REDIRECT_URI as string | undefined) ||
-        (typeof window !== 'undefined' ? `${window.location.origin}/` : 'http://localhost:5173/'),
-      scope: (import.meta.env.VITE_OIDC_SCOPE as string | undefined) || 'openid profile email roles',
-      isMock,
-    };
+  constructor(config?: OidcConfig) {
+    this.config = config ?? readOidcConfig(import.meta.env);
   }
 
   getConfig(): OidcConfig {
     return this.config;
   }
 
-  /**
-   * Generates mock tokens and user profile for local developer personas
-   */
-  createMockSession(personaKey = 'elena'): { user: UserProfile; tokens: OidcTokens } {
-    const persona = ENTERPRISE_PERSONAS[personaKey] || ENTERPRISE_PERSONAS.elena;
-    const nowSec = Math.floor(Date.now() / 1000);
-    const expSec = nowSec + 3600; // 1 hour token lifetime
-
-    const idTokenClaims = {
-      sub: persona.sub,
-      name: persona.name,
-      email: persona.email,
-      preferred_username: persona.email.split('@')[0],
-      roles: persona.roles,
-      realm_access: { roles: persona.roles },
-      iss: this.config.isMock ? 'https://auth.aegismcp.mock/realms/aegis' : this.config.authority,
-      aud: this.config.clientId,
-      iat: nowSec,
-      exp: expSec,
-    };
-
-    const accessToken = createMockJwt({
-      ...idTokenClaims,
-      scope: this.config.scope,
-    });
-
-    const idToken = createMockJwt(idTokenClaims);
-
-    const user: UserProfile = {
-      sub: persona.sub,
-      name: persona.name,
-      email: persona.email,
-      preferred_username: persona.email.split('@')[0],
-      roles: persona.roles,
-      title: persona.title,
-      idp: this.config.isMock ? 'Dev / Demo Mock IdP' : 'Enterprise IdP',
-      sessionExpiresAt: Date.now() + 15 * 60 * 1000, // NFR-029: 15-minute idle limit
-    };
-
-    const tokens: OidcTokens = {
-      accessToken,
-      idToken,
-      expiresIn: 3600,
-      tokenType: 'Bearer',
-      scope: this.config.scope,
-    };
-
-    this.saveSession(user, tokens);
-    return { user, tokens };
+  get isConfigured(): boolean {
+    return this.config.configurationErrors.length === 0;
   }
 
-  /**
-   * Starts RFC 7636 Authorization Code Flow with PKCE against the live OIDC IdP
-   */
-  async startAuthorizationRedirect(): Promise<void> {
-    if (this.config.isMock) {
-      // In mock mode, defaults to Elena
-      this.createMockSession('elena');
-      return;
+  private assertConfigured(): void {
+    if (!this.isConfigured) {
+      throw new OidcError(
+        'CONFIGURATION',
+        `Missing identity configuration: ${this.config.configurationErrors.join(', ')}.`
+      );
     }
+  }
 
-    const codeVerifier = generateRandomString(64);
+  /** Starts Authorization Code Flow with PKCE at the configured provider. */
+  async startAuthorizationRedirect(): Promise<void> {
+    this.assertConfigured();
+    const metadata = await discover(this.config.authority);
+    const codeVerifier = generateRandomString();
     const codeChallenge = await computeSha256Challenge(codeVerifier);
-    const state = generateRandomString(32);
-    const nonce = generateRandomString(32);
+    const state = generateRandomString();
+    const nonce = generateRandomString();
 
     sessionStorage.setItem(STORAGE_PKCE_VERIFIER_KEY, codeVerifier);
     sessionStorage.setItem(STORAGE_STATE_KEY, state);
     sessionStorage.setItem(STORAGE_NONCE_KEY, nonce);
 
-    const authEndpoint = `${this.config.authority.replace(/\/+$/, '')}/protocol/openid-connect/auth`;
     const params = new URLSearchParams({
       client_id: this.config.clientId,
       redirect_uri: this.config.redirectUri,
@@ -209,31 +491,30 @@ export class OidcService {
       code_challenge_method: 'S256',
     });
 
-    window.location.href = `${authEndpoint}?${params.toString()}`;
+    window.location.assign(`${metadata.authorizationEndpoint}?${params.toString()}`);
   }
 
-  /**
-   * Handles redirect callback with authorization code
-   */
-  async handleCallback(searchParams: URLSearchParams): Promise<{ user: UserProfile; tokens: OidcTokens } | null> {
+  /** Exchanges the authorization code and verifies the returned ID token. */
+  async handleCallback(
+    searchParams: URLSearchParams
+  ): Promise<{ user: UserProfile; tokens: OidcTokens } | null> {
     const code = searchParams.get('code');
-    const returnedState = searchParams.get('state');
-
     if (!code) return null;
+    this.assertConfigured();
 
-    if (this.config.isMock) {
-      return this.createMockSession('elena');
-    }
-
+    const returnedState = searchParams.get('state');
     const savedState = sessionStorage.getItem(STORAGE_STATE_KEY);
     const codeVerifier = sessionStorage.getItem(STORAGE_PKCE_VERIFIER_KEY);
+    const nonce = sessionStorage.getItem(STORAGE_NONCE_KEY) ?? undefined;
 
     if (!savedState || returnedState !== savedState || !codeVerifier) {
-      throw new Error('OIDC State mismatch or missing PKCE verifier (potential CSRF).');
+      throw new OidcError(
+        'CALLBACK',
+        'The sign-in response could not be matched to this console session. Start sign-in again.'
+      );
     }
 
-    // Exchange code for tokens at the token endpoint
-    const tokenEndpoint = `${this.config.authority.replace(/\/+$/, '')}/protocol/openid-connect/token`;
+    const metadata = await discover(this.config.authority);
     const body = new URLSearchParams({
       grant_type: 'authorization_code',
       client_id: this.config.clientId,
@@ -242,57 +523,57 @@ export class OidcService {
       code_verifier: codeVerifier,
     });
 
-    const response = await fetch(tokenEndpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: body.toString(),
-    });
+    let response: Response;
+    try {
+      response = await fetch(metadata.tokenEndpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+      });
+    } catch {
+      throw new OidcError('TOKEN_EXCHANGE', 'The identity provider could not be reached.');
+    }
 
     if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`Failed to exchange authorization code for tokens: ${errText}`);
+      throw new OidcError(
+        'TOKEN_EXCHANGE',
+        `The identity provider rejected the authorization code with HTTP ${response.status}.`
+      );
     }
 
-    const data = await response.json();
-    const idTokenClaims = parseJwtPayload(data.id_token || data.access_token);
-
-    // Extract roles from realm_access or roles array
-    let roles: UserRole[] = ['viewer'];
-    const claimRoles = (idTokenClaims.roles as string[]) ||
-      ((idTokenClaims.realm_access as { roles?: string[] })?.roles) || [];
-
-    const validRoles: UserRole[] = ['admin', 'auditor', 'operator', 'viewer'];
-    const mappedRoles = claimRoles
-      .map((r: string) => r.toLowerCase() as UserRole)
-      .filter((r: UserRole) => validRoles.includes(r));
-
-    if (mappedRoles.length > 0) {
-      roles = mappedRoles;
-    }
-
-    const user: UserProfile = {
-      sub: String(idTokenClaims.sub || 'user-unknown'),
-      name: String(idTokenClaims.name || idTokenClaims.preferred_username || 'Enterprise Operator'),
-      email: String(idTokenClaims.email || 'operator@enterprise.internal'),
-      preferred_username: idTokenClaims.preferred_username ? String(idTokenClaims.preferred_username) : undefined,
-      roles,
-      title: roles.includes('admin') ? 'SecOps Admin' : roles.includes('auditor') ? 'CISO / Auditor' : 'Platform Engineer',
-      idp: this.config.authority,
-      sessionExpiresAt: Date.now() + 15 * 60 * 1000,
+    const data = (await response.json()) as {
+      id_token?: string;
+      access_token?: string;
+      refresh_token?: string;
+      expires_in?: number;
+      token_type?: string;
+      scope?: string;
     };
+
+    if (!data.id_token || !data.access_token) {
+      throw new OidcError(
+        'TOKEN_EXCHANGE',
+        'The identity provider did not return an ID token and access token.'
+      );
+    }
+
+    const claims = await verifyIdToken(data.id_token, {
+      issuer: metadata.issuer,
+      clientId: this.config.clientId,
+      jwksUri: metadata.jwksUri,
+      nonce,
+    });
+    const user = profileFromClaims(claims, this.config.clientId, metadata.issuer);
 
     const tokens: OidcTokens = {
+      idToken: data.id_token,
       accessToken: data.access_token,
-      idToken: data.id_token || data.access_token,
       refreshToken: data.refresh_token,
-      expiresIn: data.expires_in || 3600,
-      tokenType: data.token_type || 'Bearer',
-      scope: data.scope || this.config.scope,
+      expiresIn: typeof data.expires_in === 'number' ? data.expires_in : 0,
+      tokenType: data.token_type ?? 'Bearer',
+      scope: data.scope ?? this.config.scope,
     };
 
-    // Clean up temporary PKCE keys
     sessionStorage.removeItem(STORAGE_PKCE_VERIFIER_KEY);
     sessionStorage.removeItem(STORAGE_STATE_KEY);
     sessionStorage.removeItem(STORAGE_NONCE_KEY);
@@ -303,15 +584,9 @@ export class OidcService {
 
   saveSession(user: UserProfile, tokens: OidcTokens): void {
     try {
-      sessionStorage.setItem(
-        STORAGE_SESSION_KEY,
-        JSON.stringify({
-          user,
-          tokens,
-        })
-      );
+      sessionStorage.setItem(STORAGE_SESSION_KEY, JSON.stringify({ user, tokens }));
     } catch {
-      // Storage unavailable
+      // Storage may be blocked; the in-memory session still works for this tab.
     }
   }
 
@@ -319,10 +594,31 @@ export class OidcService {
     try {
       const raw = sessionStorage.getItem(STORAGE_SESSION_KEY);
       if (!raw) return null;
-      return JSON.parse(raw);
+      const parsed = JSON.parse(raw) as { user?: UserProfile; tokens?: OidcTokens };
+      if (!parsed.user || !parsed.tokens?.idToken || !parsed.tokens.accessToken) {
+        this.clearSession();
+        return null;
+      }
+      if (!this.isTokenFresh(parsed.tokens.idToken)) {
+        this.clearSession();
+        return null;
+      }
+      return { user: parsed.user, tokens: parsed.tokens };
     } catch {
       return null;
     }
+  }
+
+  getAccessToken(): string | null {
+    return this.getSavedSession()?.tokens.accessToken ?? null;
+  }
+
+  /** True while the ID token's own expiry leaves it usable. */
+  isTokenFresh(idToken: string): boolean {
+    const claims = decodeJwtPayload(idToken);
+    const exp = claims.exp;
+    if (typeof exp !== 'number') return false;
+    return exp - CLOCK_SKEW_SECONDS > Math.floor(Date.now() / 1000);
   }
 
   clearSession(): void {
@@ -332,7 +628,7 @@ export class OidcService {
       sessionStorage.removeItem(STORAGE_STATE_KEY);
       sessionStorage.removeItem(STORAGE_NONCE_KEY);
     } catch {
-      // Ignore
+      // Ignore storage failures during sign-out.
     }
   }
 }

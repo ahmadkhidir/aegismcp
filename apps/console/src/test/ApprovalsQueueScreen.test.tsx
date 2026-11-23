@@ -1,102 +1,167 @@
 /**
- * Specification Anchors: FEAT-006, FEAT-008, C-003, C-004
- * Approvals Queue Screen Tests
+ * Specification Anchors: FEAT-006, FEAT-008, C-003, C-004, C-014, C-019
+ * Approvals queue behaviour with contract fixtures held in this test module.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ApprovalsQueueScreen } from '../screens/ApprovalsQueueScreen';
 import { AegisApi } from '../services/api';
+import { ApprovalHistoryTicket, ApprovalTicket } from '../types/contracts';
 
-describe('ApprovalsQueueScreen Component', () => {
+const PENDING: ApprovalTicket[] = [
+  {
+    id: 'appr-401',
+    agentId: 'spiffe://example.org/ns/payments/sa/settlement-worker',
+    toolName: 'payments_transfer',
+    argumentsPayload: '{"amountCents":2500000,"customerToken":"[REDACTED]"}',
+    triggerPolicyId: 'SEC-02',
+    agentIntent: 'Settle the approved quarterly invoice.',
+    status: 'pending',
+    createdAt: new Date(Date.now() - 45000).toISOString(),
+    expiresAt: new Date(Date.now() + 255000).toISOString(),
+  },
+  {
+    id: 'appr-402',
+    agentId: 'spiffe://example.org/ns/infra/sa/cloud-optimizer',
+    toolName: 'k8s_delete_namespace',
+    argumentsPayload: '{"namespace":"staging-legacy-eu"}',
+    triggerPolicyId: 'SEC-07',
+    agentIntent: null,
+    status: 'pending',
+    createdAt: new Date(Date.now() - 120000).toISOString(),
+    expiresAt: new Date(Date.now() + 180000).toISOString(),
+  },
+];
+
+const APPROVED_HISTORY: ApprovalHistoryTicket[] = [
+  {
+    id: 'appr-300',
+    agentId: 'spiffe://example.org/ns/agents/sa/triage-bot',
+    toolName: 'user_reset_credentials',
+    argumentsPayload: '{"userId":"usr_883921"}',
+    triggerPolicyId: 'SEC-09',
+    status: 'approved',
+    createdAt: new Date(Date.now() - 3600000).toISOString(),
+    expiresAt: new Date(Date.now() - 3000000).toISOString(),
+    reviewedBy: 'operator@example.com',
+    rejectionReason: null,
+    processedAt: new Date(Date.now() - 3300000).toISOString(),
+  },
+];
+
+describe('ApprovalsQueueScreen', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.restoreAllMocks();
+    vi.spyOn(AegisApi, 'getPendingApprovals').mockResolvedValue({ tickets: PENDING });
+    vi.spyOn(AegisApi, 'getApprovalHistory').mockResolvedValue({
+      tickets: APPROVED_HISTORY,
+      total: APPROVED_HISTORY.length,
+    });
+    vi.spyOn(AegisApi, 'approveTicket').mockResolvedValue({
+      ticketId: 'appr-401',
+      status: 'approved',
+      reviewedBy: 'operator@example.com',
+      processedAt: new Date().toISOString(),
+    });
+    vi.spyOn(AegisApi, 'rejectTicket').mockResolvedValue({
+      ticketId: 'appr-402',
+      status: 'rejected',
+      reviewedBy: 'operator@example.com',
+      rejectionReason: 'Denied during change freeze.',
+      processedAt: new Date().toISOString(),
+    });
   });
 
-  it('renders pending approval tickets with risk scores and remaining TTL', async () => {
+  it('renders pending tickets with the triggering policy and agent intent', async () => {
     render(<ApprovalsQueueScreen />);
 
     expect(await screen.findByText('Human-in-the-Loop Approvals')).toBeInTheDocument();
-    expect(await screen.findByText('stripe_charge_create')).toBeInTheDocument();
+    expect(await screen.findByText('payments_transfer')).toBeInTheDocument();
     expect(screen.getByText('k8s_delete_namespace')).toBeInTheDocument();
-    expect(screen.getByText('user_reset_credentials')).toBeInTheDocument();
-
-    // Check risk score pills
-    expect(screen.getByText('Risk: 88/100')).toBeInTheDocument();
-    expect(screen.getByText('Risk: 92/100')).toBeInTheDocument();
+    expect(screen.getByText('Trigger: SEC-02')).toBeInTheDocument();
+    expect(screen.getByText('Settle the approved quarterly invoice.')).toBeInTheDocument();
+    expect(screen.getAllByText(/left$/).length).toBeGreaterThan(0);
   });
 
-  it('approves a ticket and dispatches C-004 decision', async () => {
-    const submitSpy = vi.spyOn(AegisApi, 'submitApprovalDecision');
+  it('approves a ticket through C-004 without sending a reviewer identity', async () => {
+    const approve = vi.mocked(AegisApi.approveTicket);
+    vi.mocked(AegisApi.getPendingApprovals)
+      .mockResolvedValueOnce({ tickets: PENDING })
+      .mockResolvedValue({ tickets: [] });
 
     render(<ApprovalsQueueScreen />);
 
-    const approveBtn = await screen.findByTestId('approve-button-appr-401');
-    fireEvent.click(approveBtn);
+    fireEvent.click(await screen.findByTestId('approve-button-appr-401'));
 
     await waitFor(() => {
-      expect(submitSpy).toHaveBeenCalledWith(
-        'appr-401',
-        expect.objectContaining({
-          decision: 'APPROVE',
-        })
-      );
+      expect(approve).toHaveBeenCalledWith('appr-401');
     });
-
-    // Verify card is removed from view
     await waitFor(() => {
       expect(screen.queryByTestId('approval-ticket-appr-401')).not.toBeInTheDocument();
     });
   });
 
-  it('rejects a ticket via rejection modal and dispatches C-004 with reason', async () => {
-    const submitSpy = vi.spyOn(AegisApi, 'submitApprovalDecision');
+  it('rejects a ticket with a mandatory reason through C-014', async () => {
+    const reject = vi.mocked(AegisApi.rejectTicket);
+    vi.mocked(AegisApi.getPendingApprovals)
+      .mockResolvedValueOnce({ tickets: PENDING })
+      .mockResolvedValue({ tickets: [] });
 
     render(<ApprovalsQueueScreen />);
 
-    // Click reject on ticket appr-402
-    const rejectBtn = await screen.findByTestId('reject-button-appr-402');
-    fireEvent.click(rejectBtn);
-
-    // Rejection modal appears
+    fireEvent.click(await screen.findByTestId('reject-button-appr-402'));
     expect(screen.getByText('Reject Approval Ticket')).toBeInTheDocument();
 
-    // Fill rejection reason
-    const reasonInput = screen.getByTestId('rejection-reason-input');
-    fireEvent.change(reasonInput, {
-      target: { value: 'Destructive deletion denied by platform safety policy' },
+    fireEvent.change(screen.getByTestId('rejection-reason-input'), {
+      target: { value: 'Denied during change freeze.' },
     });
-
-    // Confirm rejection
-    const confirmBtn = screen.getByTestId('confirm-reject-button');
-    fireEvent.click(confirmBtn);
+    fireEvent.click(screen.getByTestId('confirm-reject-button'));
 
     await waitFor(() => {
-      expect(submitSpy).toHaveBeenCalledWith(
-        'appr-402',
-        expect.objectContaining({
-          decision: 'REJECT',
-          reason: 'Destructive deletion denied by platform safety policy',
-        })
-      );
+      expect(reject).toHaveBeenCalledWith('appr-402', 'Denied during change freeze.');
     });
-
-    // Modal closes and card removed
     await waitFor(() => {
-      expect(screen.queryByTestId('approval-ticket-appr-402')).not.toBeInTheDocument();
+      expect(screen.queryByText('Reject Approval Ticket')).not.toBeInTheDocument();
     });
   });
 
-  it('switches tabs and displays empty state when queue has no items', async () => {
-    vi.spyOn(AegisApi, 'getApprovals').mockResolvedValue({ tickets: [] });
+  it('loads approved history and shows the recorded reviewer', async () => {
+    const history = vi.mocked(AegisApi.getApprovalHistory);
+    render(<ApprovalsQueueScreen />);
+
+    fireEvent.click(await screen.findByTestId('tab-approved'));
+
+    await waitFor(() => {
+      expect(history).toHaveBeenCalledWith('approved', 100, 0);
+    });
+    expect(await screen.findByText('operator@example.com')).toBeInTheDocument();
+    expect(screen.queryByTestId('approve-button-appr-300')).not.toBeInTheDocument();
+  });
+
+  it('shows an empty state for a tab with no tickets', async () => {
+    vi.mocked(AegisApi.getPendingApprovals).mockResolvedValue({ tickets: [] });
+    render(<ApprovalsQueueScreen />);
+
+    expect(await screen.findByText('No agent actions are waiting for approval')).toBeInTheDocument();
+  });
+
+  it('shows the screen error state when the queue cannot be read', async () => {
+    vi.mocked(AegisApi.getPendingApprovals).mockRejectedValue(new Error('Gateway unavailable'));
 
     render(<ApprovalsQueueScreen />);
 
-    const rejectedTab = await screen.findByTestId('tab-rejected');
-    fireEvent.click(rejectedTab);
+    expect(await screen.findByTestId('error-state')).toHaveTextContent('Gateway unavailable');
+  });
 
-    await waitFor(() => {
-      expect(screen.getByTestId('empty-state')).toBeInTheDocument();
-    });
+  it('surfaces an approval failure in place instead of a browser alert', async () => {
+    vi.mocked(AegisApi.approveTicket).mockRejectedValue(new Error('Ticket already resolved'));
+
+    render(<ApprovalsQueueScreen />);
+    fireEvent.click(await screen.findByTestId('approve-button-appr-401'));
+
+    expect(await screen.findByTestId('approval-action-error')).toHaveTextContent(
+      'Ticket already resolved'
+    );
   });
 });

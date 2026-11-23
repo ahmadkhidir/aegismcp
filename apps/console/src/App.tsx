@@ -1,9 +1,10 @@
 /**
  * Specification Anchors: FEAT-008, FEAT-009, NFR-029, screens.md, C-002..C-010
- * Main Application Shell & Navigation with OIDC Authentication & Session Guard
+ * Application shell: authentication gate, screen routing, fleet posture, and
+ * global overlays. Fleet values come from the gateway; no value is seeded.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Navbar } from './components/Navbar';
 import { Sidebar, ScreenId } from './components/Sidebar';
 import { OfflineBanner } from './components/OfflineBanner';
@@ -19,30 +20,26 @@ import { AegisApi } from './services/api';
 import { ThreatLevel } from './types/contracts';
 import { AuthProvider, useAuth } from './context/AuthContext';
 
+const SCREEN_IDS: ScreenId[] = ['dashboard', 'inspector', 'approvals', 'policies', 'audit'];
+
 const AppContent: React.FC = () => {
   const { isAuthenticated, isSessionExpired, renewSession, logout, user } = useAuth();
 
-  // Navigation state initialized from URL hash or path
   const getInitialScreen = (): ScreenId => {
     const hash = window.location.hash.replace('#/', '').replace('#', '');
-    if (['dashboard', 'inspector', 'approvals', 'policies', 'audit'].includes(hash)) {
+    if (SCREEN_IDS.includes(hash as ScreenId)) {
       return hash as ScreenId;
-    }
-    const path = window.location.pathname.replace('/', '');
-    if (['dashboard', 'inspector', 'approvals', 'policies', 'audit'].includes(path)) {
-      return path as ScreenId;
     }
     return 'dashboard';
   };
 
   const [currentScreen, setCurrentScreen] = useState<ScreenId>(getInitialScreen());
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
-  const [threatLevel, setThreatLevel] = useState<ThreatLevel>('NORMAL');
+  const [threatLevel, setThreatLevel] = useState<ThreatLevel | null>(null);
   const [isKillSwitchOpen, setIsKillSwitchOpen] = useState(false);
-  const [pendingCount, setPendingCount] = useState(3);
+  const [pendingCount, setPendingCount] = useState<number | null>(null);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
-  // Synchronize hash with currentScreen
   const handleNavigate = (screen: ScreenId) => {
     setCurrentScreen(screen);
     setIsMobileSidebarOpen(false);
@@ -52,7 +49,7 @@ const AppContent: React.FC = () => {
   useEffect(() => {
     const handleHashChange = () => {
       const hash = window.location.hash.replace('#/', '').replace('#', '');
-      if (['dashboard', 'inspector', 'approvals', 'policies', 'audit'].includes(hash)) {
+      if (SCREEN_IDS.includes(hash as ScreenId)) {
         setCurrentScreen(hash as ScreenId);
       }
     };
@@ -61,7 +58,6 @@ const AppContent: React.FC = () => {
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
 
-  // Offline detection
   useEffect(() => {
     const handleOnline = () => setIsOffline(false);
     const handleOffline = () => setIsOffline(true);
@@ -75,51 +71,77 @@ const AppContent: React.FC = () => {
     };
   }, []);
 
-  // Fetch initial threat level and approvals count
+  const refreshPendingCount = useCallback(async () => {
+    try {
+      const approvals = await AegisApi.getPendingApprovals(3);
+      setPendingCount(approvals.tickets.length);
+    } catch {
+      setPendingCount(null);
+    }
+  }, []);
+
+  const applySystemEvent = useCallback((status: ThreatLevel, pendingApprovals: number) => {
+    setThreatLevel(status);
+    setPendingCount(pendingApprovals);
+  }, []);
+
   useEffect(() => {
     if (!isAuthenticated) return;
-    const checkStatus = async () => {
+
+    let cancelled = false;
+    const loadFleetSummary = async () => {
+      try {
+        const status = await AegisApi.getSystemStatus();
+        if (!cancelled) setThreatLevel(status.status);
+      } catch {
+        if (!cancelled) setThreatLevel(null);
+      }
+      await refreshPendingCount();
+    };
+
+    loadFleetSummary();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, refreshPendingCount]);
+
+  const handleKillSwitchConfirm = async (
+    req: Parameters<typeof AegisApi.triggerEmergencyKill>[0]
+  ) => {
+    const res = await AegisApi.triggerEmergencyKill(req);
+    if (res.status === 'LOCKDOWN') {
+      setThreatLevel('LOCKDOWN');
+    } else {
       try {
         const status = await AegisApi.getSystemStatus();
         setThreatLevel(status.status);
-        const approvals = await AegisApi.getApprovals('pending');
-        setPendingCount(approvals.tickets.length);
       } catch {
-        // Fallback
+        setThreatLevel(null);
       }
-    };
-    checkStatus();
-  }, [isAuthenticated]);
-
-  const handleKillSwitchConfirm = async (req: Parameters<typeof AegisApi.triggerEmergencyKill>[0]) => {
-    const res = await AegisApi.triggerEmergencyKill(req);
-    setThreatLevel('LOCKDOWN');
+    }
+    await refreshPendingCount();
     return res;
   };
 
-  // If not authenticated, render the enterprise SSO / OIDC Login gate (screens.md § Navigation Map)
   if (!isAuthenticated) {
     return <LoginScreen />;
   }
 
   return (
     <div className="min-h-screen bg-grey-50 text-grey-900 flex flex-col font-sans">
-      {/* Offline Alert Banner */}
       <OfflineBanner isOffline={isOffline} />
 
-      {/* Top Navbar */}
       <Navbar
         threatLevel={threatLevel}
         onOpenKillSwitch={() => setIsKillSwitchOpen(true)}
         onToggleMobileMenu={() => setIsMobileSidebarOpen((prev) => !prev)}
       />
 
-      {/* Body Layout: Sidebar + Main Screen */}
       <div className="flex-1 flex overflow-hidden relative">
         <Sidebar
           currentScreen={currentScreen}
           onNavigate={handleNavigate}
-          pendingApprovalsCount={pendingCount}
+          pendingApprovalsCount={pendingCount ?? 0}
           isOpen={isMobileSidebarOpen}
           onClose={() => setIsMobileSidebarOpen(false)}
         />
@@ -132,24 +154,28 @@ const AppContent: React.FC = () => {
               threatLevel={threatLevel}
             />
           )}
-          {currentScreen === 'inspector' && <LiveInspectorScreen />}
+          {currentScreen === 'inspector' && (
+            <LiveInspectorScreen
+              onReconnected={refreshPendingCount}
+              onSystemEvent={applySystemEvent}
+              onApprovalEvent={refreshPendingCount}
+            />
+          )}
           {currentScreen === 'approvals' && <ApprovalsQueueScreen />}
           {currentScreen === 'policies' && <PolicyManagerScreen />}
           {currentScreen === 'audit' && <AuditExplorerScreen />}
         </main>
       </div>
 
-      {/* Emergency Kill-Switch Confirmation Modal (C-008) */}
       <KillSwitchModal
         isOpen={isKillSwitchOpen}
         onClose={() => setIsKillSwitchOpen(false)}
         onConfirm={handleKillSwitchConfirm}
       />
 
-      {/* Inactivity Session Timeout Re-authentication Modal (NFR-029) */}
       <SessionTimeoutModal
         isOpen={isSessionExpired}
-        userName={user?.name || 'Administrator'}
+        userName={user?.name ?? ''}
         onRenew={renewSession}
         onLogout={logout}
       />

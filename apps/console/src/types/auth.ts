@@ -1,6 +1,9 @@
 /**
- * Specification Anchors: FEAT-009, NFR-029, screens.md, user-personas.md
- * OIDC and RBAC Identity definitions for AegisMCP Web Security Console
+ * Specification Anchors: FEAT-009, NFR-029, screens.md, user-flow.md
+ * Identity, session, and role shapes for the web console.
+ *
+ * The profile is built only from claims of an ID token the console has verified
+ * against the configured provider. There is no local identity catalogue.
  */
 
 export type UserRole = 'admin' | 'auditor' | 'operator' | 'viewer';
@@ -9,10 +12,8 @@ export interface UserProfile {
   sub: string;
   name: string;
   email: string;
-  preferred_username?: string;
+  preferredUsername?: string;
   roles: UserRole[];
-  title: string;
-  avatarUrl?: string;
   idp: string;
   sessionExpiresAt: number;
 }
@@ -21,6 +22,7 @@ export interface OidcTokens {
   idToken: string;
   accessToken: string;
   refreshToken?: string;
+  /** Seconds from issue until the access token expires. */
   expiresIn: number;
   tokenType: string;
   scope: string;
@@ -31,7 +33,21 @@ export interface OidcConfig {
   clientId: string;
   redirectUri: string;
   scope: string;
-  isMock: boolean;
+  /** Required environment settings that are absent, named for the operator. */
+  configurationErrors: string[];
+}
+
+export type AuthErrorCode =
+  | 'CONFIGURATION'
+  | 'DISCOVERY'
+  | 'CALLBACK'
+  | 'TOKEN_EXCHANGE'
+  | 'TOKEN_VERIFICATION'
+  | 'ACCESS_DENIED';
+
+export interface AuthErrorInfo {
+  code: AuthErrorCode;
+  message: string;
 }
 
 export interface AuthContextType {
@@ -39,12 +55,13 @@ export interface AuthContextType {
   tokens: OidcTokens | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  isAuthenticating: boolean;
   isSessionExpired: boolean;
   idleRemainingSeconds: number;
-  login: (personaId?: string) => Promise<void>;
+  authError: AuthErrorInfo | null;
+  configurationErrors: string[];
+  login: () => Promise<void>;
   logout: () => void;
-  switchPersona: (personaId: string) => void;
-  renewSession: () => void;
+  renewSession: () => Promise<void>;
   hasRole: (role: UserRole | UserRole[]) => boolean;
-  oidcConfig: OidcConfig;
 }

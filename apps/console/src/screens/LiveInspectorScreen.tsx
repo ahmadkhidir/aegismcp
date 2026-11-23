@@ -1,9 +1,10 @@
 /**
- * Specification Anchors: FEAT-001, FEAT-004, FEAT-005, FEAT-008, C-002
- * Screen 2: Live Traffic Inspector
+ * Specification Anchors: FEAT-001, FEAT-004, FEAT-005, FEAT-008, C-002, C-003
+ * Screen 2: Live Traffic Inspector. Frames arrive from the gateway event
+ * stream; the buffer starts empty and a dropped stream is shown as such.
  */
 
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Play,
   Pause,
@@ -14,54 +15,65 @@ import {
   RotateCw,
   X,
   ExternalLink,
+  WifiOff,
 } from 'lucide-react';
-import { AegisApi, MOCK_STREAM_EVENTS } from '../services/api';
-import { InspectorEvent, EventVerdict } from '../types/contracts';
+import { AegisApi } from '../services/api';
+import { EventDecision, InspectorEvent, StreamStatus } from '../types/contracts';
 import { StatusPill } from '../components/StatusPill';
 import { JsonViewer } from '../components/JsonViewer';
 import { EmptyState } from '../components/EmptyState';
 
-export const LiveInspectorScreen: React.FC = () => {
-  const [events, setEvents] = useState<InspectorEvent[]>(MOCK_STREAM_EVENTS);
+interface LiveInspectorScreenProps {
+  /** Re-fetches the pending approval queue after the stream reconnects. */
+  onReconnected?: () => void;
+  /** Applies a C-002 system event to the shell posture and approval badge. */
+  onSystemEvent?: (status: 'NORMAL' | 'ELEVATED' | 'LOCKDOWN', pendingApprovals: number) => void;
+  /** Refreshes the approval badge when a ticket is created or resolved. */
+  onApprovalEvent?: () => void;
+}
+
+export const LiveInspectorScreen: React.FC<LiveInspectorScreenProps> = ({
+  onReconnected,
+  onSystemEvent,
+  onApprovalEvent,
+}) => {
+  const [events, setEvents] = useState<InspectorEvent[]>([]);
   const [isPaused, setIsPaused] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
-  const [selectedEvent, setSelectedEvent] = useState<InspectorEvent | null>(MOCK_STREAM_EVENTS[0]);
-  const [connectionStatus, setConnectionStatus] = useState<
-    'connecting' | 'connected' | 'reconnecting' | 'disconnected'
-  >('connected');
+  const [selectedEvent, setSelectedEvent] = useState<InspectorEvent | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<StreamStatus>('connecting');
+  const [streamError, setStreamError] = useState<string | null>(null);
+  const [retryNonce, setRetryNonce] = useState(0);
 
-  // Filters
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
-  const [agentFilter, setAgentFilter] = useState<string>('ALL');
 
+  const pausedRef = useRef(isPaused);
   const tableBottomRef = useRef<HTMLDivElement>(null);
+  pausedRef.current = isPaused;
 
-  // Subscribe to C-002 SSE stream
   useEffect(() => {
-    const unsubscribe = AegisApi.subscribeToInspectorStream(
-      (newEvent) => {
-        if (!isPaused) {
-          setEvents((prev) => {
-            const next = [newEvent, ...prev];
-            return next.slice(0, 500); // Buffer up to 500 events
-          });
-        }
+    const unsubscribe = AegisApi.subscribeToTrafficStream({
+      onEvent: (newEvent) => {
+        if (pausedRef.current) return;
+        setEvents((previous) => [newEvent, ...previous].slice(0, 500));
       },
-      (status) => {
+      onStatus: (status) => {
         setConnectionStatus(status);
-      }
-    );
+        if (status === 'connected') setStreamError(null);
+      },
+      onError: (message) => setStreamError(message),
+      onReconnected: () => onReconnected?.(),
+      onApproval: () => onApprovalEvent?.(),
+      onSystem: (event) => onSystemEvent?.(event.status, event.pendingApprovals),
+    });
 
-    return () => {
-      unsubscribe();
-    };
-  }, [isPaused]);
+    return () => unsubscribe();
+  }, [retryNonce, onReconnected, onSystemEvent, onApprovalEvent]);
 
-  // Auto-scroll when new events arrive
   useEffect(() => {
     if (autoScroll && tableBottomRef.current) {
-      // Smooth scroll if auto-scroll is engaged
+      tableBottomRef.current.scrollIntoView?.({ block: 'end' });
     }
   }, [events, autoScroll]);
 
@@ -70,25 +82,22 @@ export const LiveInspectorScreen: React.FC = () => {
     setSelectedEvent(null);
   };
 
-  const filteredEvents = events.filter((e) => {
+  const filteredEvents = events.filter((event) => {
     const matchesSearch =
       searchQuery === '' ||
-      e.toolName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      e.agentId.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      e.eventId.toLowerCase().includes(searchQuery.toLowerCase());
+      event.toolName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      event.agentId.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      event.eventId.toLowerCase().includes(searchQuery.toLowerCase());
 
-    const matchesStatus =
-      statusFilter === 'ALL' || e.verdict === (statusFilter as EventVerdict);
+    const matchesStatus = statusFilter === 'ALL' || event.decision === (statusFilter as EventDecision);
 
-    const matchesAgent =
-      agentFilter === 'ALL' || e.agentId.includes(agentFilter);
-
-    return matchesSearch && matchesStatus && matchesAgent;
+    return matchesSearch && matchesStatus;
   });
+
+  const isDisconnected = connectionStatus === 'disconnected' || !!streamError;
 
   return (
     <div className="h-[calc(100vh-3.5rem)] flex flex-col bg-grey-50 overflow-hidden animate-in fade-in duration-150">
-      {/* 1. Reconnecting Alert Banner if disconnected */}
       {connectionStatus === 'reconnecting' && (
         <div
           data-testid="reconnecting-banner"
@@ -96,16 +105,37 @@ export const LiveInspectorScreen: React.FC = () => {
         >
           <div className="flex items-center gap-2">
             <RotateCw className="w-3.5 h-3.5 animate-spin text-warning-500" />
-            <span>Reconnecting to live traffic stream (GET /api/v1/inspector/events)...</span>
+            <span>Reconnecting to the live traffic stream…</span>
           </div>
-          <span className="text-[11px] text-grey-500">Auto-retry active</span>
+          <span className="text-[11px] text-grey-500">Automatic retry is active</span>
         </div>
       )}
 
-      {/* 2. Stream Control Toolbar */}
+      {isDisconnected && connectionStatus !== 'reconnecting' && (
+        <div
+          data-testid="stream-error-banner"
+          role="alert"
+          className="bg-error-100 border-b border-error-300 text-error-900 px-space-md py-2 flex flex-wrap items-center justify-between gap-2 text-xs"
+        >
+          <div className="flex items-center gap-2">
+            <WifiOff className="w-4 h-4 text-error-500" />
+            <span>
+              {streamError || 'The live traffic stream is disconnected.'} Events received before
+              the drop are kept below.
+            </span>
+          </div>
+          <button
+            onClick={() => setRetryNonce((value) => value + 1)}
+            data-testid="reconnect-stream-button"
+            className="px-space-sm py-1 rounded-radius-sm bg-error-500 hover:bg-error-700 text-grey-900 font-semibold"
+          >
+            Reconnect stream
+          </button>
+        </div>
+      )}
+
       <div className="p-space-md bg-grey-100 border-b border-grey-300 flex flex-wrap items-center justify-between gap-space-md">
         <div className="flex items-center gap-space-sm">
-          {/* Pause / Play */}
           <button
             onClick={() => setIsPaused(!isPaused)}
             data-testid="stream-pause-toggle"
@@ -119,20 +149,16 @@ export const LiveInspectorScreen: React.FC = () => {
             <span>{isPaused ? 'Resume Stream' : 'Pause'}</span>
           </button>
 
-          {/* Auto-scroll toggle */}
           <button
             onClick={() => setAutoScroll(!autoScroll)}
             data-testid="autoscroll-toggle"
             className={`px-space-sm py-1.5 rounded-radius-md text-xs font-mono font-medium transition-colors ${
-              autoScroll
-                ? 'bg-grey-200 text-primary-500'
-                : 'bg-grey-200 text-grey-500'
+              autoScroll ? 'bg-grey-200 text-primary-500' : 'bg-grey-200 text-grey-500'
             }`}
           >
             Auto-scroll: {autoScroll ? 'ON' : 'OFF'}
           </button>
 
-          {/* Buffer counter & status */}
           <div className="flex items-center gap-2 px-space-sm py-1 bg-grey-200 border border-grey-300 rounded-radius-md text-xs font-mono">
             <span
               className={`w-2 h-2 rounded-radius-full ${
@@ -151,25 +177,23 @@ export const LiveInspectorScreen: React.FC = () => {
             </span>
           </div>
 
-          {/* Clear buffer */}
           <button
             onClick={handleClearBuffer}
             data-testid="clear-buffer-button"
             className="p-1.5 rounded-radius-md text-grey-500 hover:text-error-500 hover:bg-grey-200 transition-colors"
-            title="Clear Event Buffer"
+            title="Clear the event buffer"
           >
             <Trash2 className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Filter inputs */}
         <div className="flex items-center gap-space-sm flex-wrap">
           <div className="relative">
             <Search className="w-3.5 h-3.5 text-grey-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(event) => setSearchQuery(event.target.value)}
               placeholder="Filter tool, agent, or event ID..."
               className="pl-8 pr-space-md py-1.5 bg-grey-200 border border-grey-300 rounded-radius-md text-xs text-grey-900 placeholder:text-grey-500 focus:border-primary-500 outline-none w-64"
             />
@@ -179,7 +203,7 @@ export const LiveInspectorScreen: React.FC = () => {
             <Filter className="w-3.5 h-3.5 text-grey-500" />
             <select
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
+              onChange={(event) => setStatusFilter(event.target.value)}
               className="bg-transparent text-grey-800 outline-none cursor-pointer"
             >
               <option value="ALL">All Decisions</option>
@@ -191,27 +215,44 @@ export const LiveInspectorScreen: React.FC = () => {
         </div>
       </div>
 
-      {/* 3. Master-Detail Split Workspace */}
       <div className="flex-1 flex flex-col lg:flex-row overflow-hidden relative">
-        {/* Left Table Panel */}
-        <div className={`flex-1 overflow-y-auto border-r border-grey-300 bg-grey-50 ${selectedEvent ? 'hidden lg:block' : 'block'}`}>
+        <div
+          className={`flex-1 overflow-y-auto border-r border-grey-300 bg-grey-50 ${
+            selectedEvent ? 'hidden lg:block' : 'block'
+          }`}
+        >
           {filteredEvents.length === 0 ? (
             <div className="p-space-lg">
               {events.length === 0 ? (
                 <EmptyState
-                  icon={Activity}
-                  title="Waiting for agent tool activity..."
-                  description="Incoming JSON-RPC 2.0 tool calls passing through the AegisMCP gateway will stream here in real time."
+                  icon={connectionStatus === 'connected' ? Activity : WifiOff}
+                  title={
+                    connectionStatus === 'connected'
+                      ? 'Waiting for agent tool activity...'
+                      : 'No traffic received yet'
+                  }
+                  description={
+                    connectionStatus === 'connected'
+                      ? 'Tool calls passing through the gateway will appear here as they happen.'
+                      : 'Reconnect the stream to start receiving tool calls from the gateway.'
+                  }
+                  actionLabel={
+                    connectionStatus === 'connected' ? undefined : 'Reconnect stream'
+                  }
+                  onAction={
+                    connectionStatus === 'connected'
+                      ? undefined
+                      : () => setRetryNonce((value) => value + 1)
+                  }
                 />
               ) : (
                 <EmptyState
                   title="No matching events found"
-                  description="No streaming event frames match your active search and status filters."
+                  description="No event frames match the current search and decision filters."
                   actionLabel="Reset Filters"
                   onAction={() => {
                     setSearchQuery('');
                     setStatusFilter('ALL');
-                    setAgentFilter('ALL');
                   }}
                 />
               )}
@@ -222,20 +263,20 @@ export const LiveInspectorScreen: React.FC = () => {
                 <thead className="bg-grey-100 border-b border-grey-300 text-grey-500 sticky top-0 z-10">
                   <tr>
                     <th className="py-2.5 px-space-md font-medium">Time (UTC)</th>
-                    <th className="py-2.5 px-space-md font-medium">Status</th>
+                    <th className="py-2.5 px-space-md font-medium">Decision</th>
                     <th className="py-2.5 px-space-md font-medium">Agent Workload</th>
                     <th className="py-2.5 px-space-md font-medium">Target Tool</th>
                     <th className="py-2.5 px-space-md font-medium">Latency</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-grey-300/40">
-                  {filteredEvents.map((evt) => {
-                    const isSelected = selectedEvent?.eventId === evt.eventId;
+                  {filteredEvents.map((event) => {
+                    const isSelected = selectedEvent?.eventId === event.eventId;
                     return (
                       <tr
-                        key={evt.eventId}
-                        data-testid={`event-row-${evt.eventId}`}
-                        onClick={() => setSelectedEvent(evt)}
+                        key={event.eventId}
+                        data-testid={`event-row-${event.eventId}`}
+                        onClick={() => setSelectedEvent(event)}
                         className={`cursor-pointer transition-colors ${
                           isSelected
                             ? 'bg-primary-500/10 border-l-2 border-primary-500'
@@ -243,22 +284,22 @@ export const LiveInspectorScreen: React.FC = () => {
                         }`}
                       >
                         <td className="py-2 px-space-md text-grey-500 whitespace-nowrap">
-                          {new Date(evt.timestamp).toLocaleTimeString()}
+                          {new Date(event.timestamp).toLocaleTimeString()}
                         </td>
                         <td className="py-2 px-space-md whitespace-nowrap">
-                          <StatusPill verdict={evt.verdict} />
+                          <StatusPill verdict={event.decision} />
                         </td>
                         <td
                           className="py-2 px-space-md text-grey-800 max-w-[140px] truncate"
-                          title={evt.agentId}
+                          title={event.agentId}
                         >
-                          {evt.agentId.split('/').pop()}
+                          {event.agentId.split('/').pop()}
                         </td>
                         <td className="py-2 px-space-md font-semibold text-primary-700">
-                          {evt.toolName}
+                          {event.toolName}
                         </td>
                         <td className="py-2 px-space-md text-grey-500 font-mono">
-                          {evt.latencyMs}ms
+                          {event.latencyMs}ms
                         </td>
                       </tr>
                     );
@@ -270,8 +311,11 @@ export const LiveInspectorScreen: React.FC = () => {
           <div ref={tableBottomRef} />
         </div>
 
-        {/* Right Inspection Drawer Panel */}
-        <div className={`w-full lg:w-[480px] xl:w-[540px] border-t lg:border-t-0 lg:border-l border-grey-300 bg-grey-100 flex flex-col overflow-y-auto ${selectedEvent ? 'block' : 'hidden lg:flex'}`}>
+        <div
+          className={`w-full lg:w-[480px] xl:w-[540px] border-t lg:border-t-0 lg:border-l border-grey-300 bg-grey-100 flex flex-col overflow-y-auto ${
+            selectedEvent ? 'block' : 'hidden lg:flex'
+          }`}
+        >
           {selectedEvent ? (
             <div className="p-space-md space-y-space-md">
               <div className="flex items-center justify-between pb-space-sm border-b border-grey-300">
@@ -288,7 +332,7 @@ export const LiveInspectorScreen: React.FC = () => {
                       <span className="font-mono text-xs font-bold text-grey-900">
                         {selectedEvent.eventId}
                       </span>
-                      <StatusPill verdict={selectedEvent.verdict} />
+                      <StatusPill verdict={selectedEvent.decision} />
                     </div>
                     <p className="text-[11px] font-mono text-grey-500 mt-0.5">
                       {new Date(selectedEvent.timestamp).toISOString()}
@@ -304,61 +348,40 @@ export const LiveInspectorScreen: React.FC = () => {
                 </button>
               </div>
 
-              {/* Event Metadata card */}
               <div className="p-space-sm bg-grey-200 border border-grey-300 rounded-radius-md text-xs font-mono space-y-1.5">
                 <div>
                   <span className="text-grey-500">Agent SPIFFE ID: </span>
                   <span className="text-accent-500 break-all">{selectedEvent.agentId}</span>
                 </div>
                 <div>
-                  <span className="text-grey-500">Tool Invoked: </span>
+                  <span className="text-grey-500">Tool invoked: </span>
                   <span className="text-primary-700 font-semibold">{selectedEvent.toolName}</span>
                 </div>
-                {selectedEvent.matchedPolicyRule && (
+                {selectedEvent.matchedRuleIds.length > 0 && (
                   <div>
-                    <span className="text-grey-500">Matched Policy: </span>
-                    <span className="text-grey-800">{selectedEvent.matchedPolicyRule}</span>
+                    <span className="text-grey-500">Matched rules: </span>
+                    <span className="text-grey-800">{selectedEvent.matchedRuleIds.join(', ')}</span>
                   </div>
                 )}
                 <div>
-                  <span className="text-grey-500">Execution Latency: </span>
+                  <span className="text-grey-500">Execution latency: </span>
                   <span className="text-success-500">{selectedEvent.latencyMs} ms</span>
                 </div>
               </div>
 
-              {/* JSON-RPC Request Viewer */}
-              <div>
-                <JsonViewer
-                  title="JSON-RPC Request AST"
-                  data={
-                    selectedEvent.rawRequest || {
-                      jsonrpc: '2.0',
-                      id: selectedEvent.eventId,
-                      method: 'tools/call',
-                      params: {
-                        name: selectedEvent.toolName,
-                        arguments: JSON.parse(selectedEvent.payloadSummary || '{}'),
-                      },
-                    }
-                  }
-                  redactions={selectedEvent.redactions}
-                />
-              </div>
-
-              {/* JSON-RPC Response Viewer */}
-              {selectedEvent.rawResponse && (
-                <div>
-                  <JsonViewer
-                    title="JSON-RPC Response"
-                    data={selectedEvent.rawResponse}
-                  />
-                </div>
-              )}
+              <JsonViewer
+                title="Intercepted Tool Arguments"
+                data={selectedEvent.arguments}
+                redactions={selectedEvent.redactions}
+              />
             </div>
           ) : (
             <div className="h-full flex flex-col items-center justify-center p-space-lg text-center text-grey-500 text-xs">
               <ExternalLink className="w-8 h-8 mb-2 opacity-50" />
-              <span>Select any event row from the live stream to inspect formatted JSON-RPC payloads and security decisions.</span>
+              <span>
+                Select an event row to inspect the intercepted arguments and the security
+                decision.
+              </span>
             </div>
           )}
         </div>

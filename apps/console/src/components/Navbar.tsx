@@ -1,11 +1,17 @@
+/**
+ * Specification Anchors: FEAT-008, FEAT-010
+ * Top navigation bar: brand, current threat posture, kill-switch entry, and
+ * the signed-in operator menu.
+ */
+
 import React from 'react';
-import { Shield, ChevronDown, Server, Menu } from 'lucide-react';
+import { Shield, Menu } from 'lucide-react';
 import { ThreatLevel } from '../types/contracts';
 import { UserProfileMenu } from './UserProfileMenu';
 import { useAuth } from '../context/AuthContext';
 
 interface NavbarProps {
-  threatLevel: ThreatLevel;
+  threatLevel: ThreatLevel | null;
   onOpenKillSwitch: () => void;
   onToggleMobileMenu?: () => void;
 }
@@ -16,7 +22,6 @@ export const Navbar: React.FC<NavbarProps> = ({ threatLevel, onOpenKillSwitch, o
 
   return (
     <header className="h-14 border-b border-grey-300 bg-grey-100 px-space-md sm:px-space-lg flex items-center justify-between sticky top-0 z-40">
-      {/* Brand logo & mobile menu toggle */}
       <div className="flex items-center gap-2 sm:gap-3">
         {onToggleMobileMenu && (
           <button
@@ -29,10 +34,18 @@ export const Navbar: React.FC<NavbarProps> = ({ threatLevel, onOpenKillSwitch, o
           </button>
         )}
         <div className="w-8 h-8 flex items-center justify-center rounded-radius-md bg-grey-50 border border-grey-300 shadow-sm flex-shrink-0">
-          <svg className="w-5 h-5 text-primary-500" viewBox="0 0 32 32" fill="none">
-            <path d="M16 2L28 9V23L16 30L4 23V9L16 2Z" stroke="currentColor" strokeWidth="2" fill="#0B0F19"/>
-            <path d="M16 7L23 11V21L16 25L9 21V11L16 7Z" stroke="#93C5FD" strokeWidth="1.5" fill="#1E293B"/>
-            <circle cx="16" cy="16" r="3" fill="currentColor"/>
+          <svg className="w-5 h-5" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+            <path
+              d="M16 2L28 9V23L16 30L4 23V9L16 2Z"
+              className="stroke-primary-500 fill-grey-50"
+              strokeWidth="2"
+            />
+            <path
+              d="M16 7L23 11V21L16 25L9 21V11L16 7Z"
+              className="stroke-primary-300 fill-grey-200"
+              strokeWidth="1.5"
+            />
+            <circle cx="16" cy="16" r="3" className="fill-primary-500" />
           </svg>
         </div>
         <div className="flex items-center gap-1.5">
@@ -43,25 +56,16 @@ export const Navbar: React.FC<NavbarProps> = ({ threatLevel, onOpenKillSwitch, o
         </div>
       </div>
 
-      {/* Cluster selection & Environment badge */}
-      <div className="hidden md:flex items-center gap-space-md">
-        <div className="flex items-center gap-1.5 px-space-sm py-1 rounded-radius-md bg-grey-200 border border-grey-300 text-xs text-grey-700">
-          <Server className="w-3.5 h-3.5 text-primary-500" />
-          <span className="font-mono font-medium">prod-eu-central-1</span>
-          <ChevronDown className="w-3.5 h-3.5 text-grey-500" />
-        </div>
-        <span className="px-2 py-0.5 rounded-radius-full text-[11px] font-mono font-bold bg-primary-100 text-primary-800 border border-primary-300">
-          PRODUCTION
-        </span>
-      </div>
-
-      {/* Threat posture trigger & User profile */}
       <div className="flex items-center gap-space-md">
         <button
           onClick={onOpenKillSwitch}
           disabled={!canTriggerKillSwitch}
           data-testid="nav-killswitch-button"
-          title={canTriggerKillSwitch ? 'Emergency Kill-Switch (C-008)' : 'Restricted: Requires SecOps Admin role (NFR-029)'}
+          title={
+            canTriggerKillSwitch
+              ? 'Open the emergency kill-switch'
+              : 'The admin role is required to use the kill-switch'
+          }
           className={`px-space-md py-1.5 rounded-radius-md text-xs font-bold transition-all shadow-sm flex items-center gap-1.5 ${
             !canTriggerKillSwitch
               ? 'opacity-40 cursor-not-allowed bg-grey-200 text-grey-500 border border-grey-300'
@@ -74,7 +78,6 @@ export const Navbar: React.FC<NavbarProps> = ({ threatLevel, onOpenKillSwitch, o
           <span>{threatLevel === 'LOCKDOWN' ? 'SYSTEM IN LOCKDOWN' : 'Kill-Switch'}</span>
         </button>
 
-        {/* Dynamic OIDC User Profile & Session Dropdown */}
         <UserProfileMenu />
       </div>
     </header>

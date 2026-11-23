@@ -1,7 +1,6 @@
 /**
  * Specification Anchors: NFR-029, user-flow.md § Authentication Gate
- * Inactivity Re-authentication Modal displayed after 15 minutes of idle time.
- * Preserves in-progress policy drafts and current route state.
+ * Inactivity lock shown after 15 minutes without operator activity.
  */
 
 import React from 'react';
@@ -36,19 +35,23 @@ export const SessionTimeoutModal: React.FC<SessionTimeoutModalProps> = ({
           </div>
           <div>
             <h3 id="timeout-modal-title" className="text-base font-bold text-grey-900">
-              Session Locked (NFR-029)
+              Session locked
             </h3>
-            <p className="text-xs text-grey-500">15-minute inactivity security threshold reached</p>
+            <p className="text-xs text-grey-500">15 minutes of inactivity reached</p>
           </div>
         </div>
 
         <div className="p-space-sm rounded-radius-md bg-grey-200 border border-grey-300 mb-space-lg text-xs space-y-1.5">
           <div className="flex items-center gap-1.5 text-grey-700 font-medium">
             <ShieldAlert className="w-3.5 h-3.5 text-warning-500" />
-            <span>Active Operator: <strong className="text-grey-900">{userName}</strong></span>
+            <span>
+              Active operator: <strong className="text-grey-900">{userName}</strong>
+            </span>
           </div>
           <p className="text-grey-500 leading-relaxed">
-            AegisMCP administrative access is automatically suspended after 15 minutes of idle time. Your active screen state and draft configurations have been preserved.
+            Administrative access is suspended after 15 minutes without activity. Your current
+            screen and unsaved work on this page are preserved while the console asks you to
+            continue.
           </p>
         </div>
 
