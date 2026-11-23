@@ -11,6 +11,7 @@ import dev.aegismcp.gateway.codec.JsonRpcResponse;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -273,6 +274,56 @@ class DlpScrubberTest {
         assertTrue(scrubbed.error().message().contains("[REDACTED_API_KEY]"));
         assertFalse(scrubbed.error().message().contains("ghp_1234567890abcdefghijklmnopqrstuvwxyz"));
         assertEquals("[REDACTED_API_KEY]", scrubbed.error().data().get("token").asText());
+    }
+
+    @Test
+    @DisplayName("FEAT-005 / C-001: JSON bytes are scrubbed inside string values only")
+    void testJsonPayloadKeepsNumbersAndKeys() {
+        String json = "{\"result\":{\"creditCard\":4111111111111111,"
+                + "\"note\":\"card 4111-1111-1111-1111 on file\","
+                + "\"AKIAIOSFODNN7EXAMPLE\":\"value\"}}";
+
+        String scrubbed = new String(scrubber.scrub(json.getBytes(StandardCharsets.UTF_8)), StandardCharsets.UTF_8);
+
+        // A numeric JSON value keeps its type: rewriting it would produce an unparseable document.
+        assertTrue(scrubbed.contains("\"creditCard\":4111111111111111"),
+                "Numeric JSON values must not be rewritten");
+        assertFalse(scrubbed.contains("4111-1111-1111-1111"));
+        assertTrue(scrubbed.contains("[REDACTED_PII]"));
+        // Object keys keep their name: a redacted key silently renames an upstream result field.
+        assertTrue(scrubbed.contains("\"AKIAIOSFODNN7EXAMPLE\":\"value\""),
+                "JSON object keys must not be redacted");
+    }
+
+    @Test
+    @DisplayName("FEAT-005: A non-JSON payload is scanned as free text")
+    void testNonJsonPayloadScannedAsText() {
+        String body = "tool output: token AKIAIOSFODNN7EXAMPLE and mail admin@corp.net";
+        String scrubbed = new String(scrubber.scrub(body.getBytes(StandardCharsets.UTF_8)), StandardCharsets.UTF_8);
+
+        assertFalse(scrubbed.contains("AKIAIOSFODNN7EXAMPLE"));
+        assertFalse(scrubbed.contains("admin@corp.net"));
+        assertTrue(scrubbed.contains("[REDACTED_API_KEY]"));
+        assertTrue(scrubbed.contains("[REDACTED_PII]"));
+    }
+
+    @Test
+    @DisplayName("FEAT-005: Deeply nested json is masked instead of walking the tree")
+    void testDeeplyNestedTreeIsMasked() {
+        JsonNode node = mapper.createObjectNode();
+        JsonNode cursor = node;
+        for (int depth = 0; depth < 2_000; depth++) {
+            com.fasterxml.jackson.databind.node.ObjectNode child = mapper.createObjectNode();
+            ((ObjectNode) cursor).set("next", child);
+            cursor = child;
+        }
+        ((ObjectNode) cursor).put("secret", "AKIAIOSFODNN7EXAMPLE");
+
+        JsonNode scrubbed = scrubber.scrub(node);
+
+        assertNotNull(scrubbed);
+        assertFalse(mapper.valueToTree(scrubbed).toString().contains("AKIAIOSFODNN7EXAMPLE"));
+        assertTrue(mapper.valueToTree(scrubbed).toString().contains(DlpScrubber.SCAN_FAILURE_MASK));
     }
 
     @Test
