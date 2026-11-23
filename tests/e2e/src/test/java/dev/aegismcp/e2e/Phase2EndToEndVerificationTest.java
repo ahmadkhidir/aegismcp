@@ -718,7 +718,7 @@ class Phase2EndToEndVerificationTest {
     void testVelocityCircuitBreakerTripsAndQuarantines() throws Exception {
         // Configure low burst threshold of 5 calls within 10 seconds for testing
         fixture = new E2EGatewayFixture(
-                dev.aegismcp.gateway.proxy.UpstreamClient.mockEcho(),
+                dev.aegismcp.e2e.E2EGatewayFixture.echoUpstream(),
                 true,
                 100_000,
                 5, // velocity threshold: 5 calls

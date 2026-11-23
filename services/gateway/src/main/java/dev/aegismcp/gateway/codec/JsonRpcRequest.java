@@ -1,5 +1,6 @@
 package dev.aegismcp.gateway.codec;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -8,7 +9,12 @@ import java.util.Objects;
 
 /**
  * Model representing a JSON-RPC 2.0 Request or Notification.
- * Anchors: FEAT-001, C-001.
+ *
+ * <p>The serialized envelope carries exactly {@code jsonrpc}, {@code id}, {@code method}, and
+ * {@code params}. The predicates below are Java helpers and are excluded from JSON so a forwarded
+ * request never carries gateway-internal fields.
+ *
+ * <p>Anchors: FEAT-001, C-001.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record JsonRpcRequest(
@@ -36,6 +42,7 @@ public record JsonRpcRequest(
     /**
      * Checks if this request is a Model Context Protocol tool call (tools/call).
      */
+    @JsonIgnore
     public boolean isToolCall() {
         return METHOD_TOOLS_CALL.equals(method);
     }
@@ -63,6 +70,7 @@ public record JsonRpcRequest(
     /**
      * Identifies if this message is a JSON-RPC notification (no id).
      */
+    @JsonIgnore
     public boolean isNotification() {
         return id == null || id instanceof JsonRpcId.NullId;
     }

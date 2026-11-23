@@ -3,6 +3,7 @@ package dev.aegismcp.gateway.config;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import dev.aegismcp.gateway.proxy.UpstreamTransport;
 
 import java.io.IOException;
 import java.net.URI;
@@ -115,8 +116,8 @@ public record GatewayConfiguration(
         REQUIRE
     }
 
-    /** Upstream MCP server endpoint and timeouts; a null {@code url} means no upstream is wired. */
-    public record Upstream(URI url, Duration connectTimeout, Duration requestTimeout) {
+    /** Upstream MCP server endpoint, transport, and timeouts; a null {@code url} means no upstream is wired. */
+    public record Upstream(URI url, UpstreamTransport transport, Duration connectTimeout, Duration requestTimeout) {
         public Upstream {
             if (connectTimeout == null || connectTimeout.isNegative() || connectTimeout.isZero()) {
                 throw new ConfigurationException("AEGIS_UPSTREAM_CONNECT_TIMEOUT_MS must be positive");
@@ -124,17 +125,28 @@ public record GatewayConfiguration(
             if (requestTimeout == null || requestTimeout.isNegative() || requestTimeout.isZero()) {
                 throw new ConfigurationException("AEGIS_UPSTREAM_REQUEST_TIMEOUT_MS must be positive");
             }
+            if (transport == null) {
+                throw new ConfigurationException("AEGIS_UPSTREAM_TRANSPORT must name a transport");
+            }
             if (url != null) {
                 String scheme = url.getScheme() != null ? url.getScheme().toLowerCase(Locale.ROOT) : "";
-                if (!scheme.equals("http") && !scheme.equals("https")) {
+                boolean webSocketScheme = scheme.equals("ws") || scheme.equals("wss");
+                if (transport == UpstreamTransport.WEBSOCKET && !webSocketScheme) {
                     throw new ConfigurationException(
-                            "AEGIS_UPSTREAM_URL must be an http or https URL, got " + url);
+                            "AEGIS_UPSTREAM_URL must be a ws or wss URL when AEGIS_UPSTREAM_TRANSPORT is websocket, got "
+                                    + url);
+                }
+                if (transport != UpstreamTransport.WEBSOCKET
+                        && !scheme.equals("http") && !scheme.equals("https")) {
+                    throw new ConfigurationException(
+                            "AEGIS_UPSTREAM_URL must be an http or https URL for the "
+                                    + transport.name().toLowerCase(Locale.ROOT) + " transport, got " + url);
                 }
             }
         }
 
         public static Upstream none() {
-            return new Upstream(null, Duration.ofSeconds(2), Duration.ofSeconds(30));
+            return new Upstream(null, UpstreamTransport.HTTP, Duration.ofSeconds(2), Duration.ofSeconds(30));
         }
 
         public boolean configured() {
@@ -275,8 +287,11 @@ public record GatewayConfiguration(
         );
 
         String upstreamUrl = lookup.text("AEGIS_UPSTREAM_URL", "upstream.url", null);
+        UpstreamTransport upstreamTransport = resolveUpstreamTransport(
+                lookup.text("AEGIS_UPSTREAM_TRANSPORT", "upstream.transport", null), upstreamUrl);
         Upstream upstream = new Upstream(
                 upstreamUrl != null ? uri("AEGIS_UPSTREAM_URL", upstreamUrl) : null,
+                upstreamTransport,
                 Duration.ofMillis(lookup.integer("AEGIS_UPSTREAM_CONNECT_TIMEOUT_MS",
                         "upstream.connectTimeoutMs", 2000)),
                 Duration.ofMillis(lookup.integer("AEGIS_UPSTREAM_REQUEST_TIMEOUT_MS",
@@ -321,6 +336,29 @@ public record GatewayConfiguration(
                 Duration.ofSeconds(lookup.integer("AEGIS_VELOCITY_WINDOW_SECONDS",
                         "limits.velocityWindowSeconds", (int) DEFAULT_VELOCITY_WINDOW.toSeconds()))
         );
+    }
+
+    /**
+     * Resolves the configured upstream transport. An explicit setting must name one of the three
+     * transports FEAT-001 assigns an upstream; otherwise a {@code ws}/{@code wss} endpoint infers
+     * WebSocket and every other endpoint defaults to one request per HTTPS call.
+     */
+    private static UpstreamTransport resolveUpstreamTransport(String configured, String url) {
+        if (configured != null) {
+            try {
+                return UpstreamTransport.from(configured);
+            } catch (IllegalArgumentException e) {
+                throw new ConfigurationException(
+                        "AEGIS_UPSTREAM_TRANSPORT must be http, sse, or websocket; got '" + configured + "'");
+            }
+        }
+        if (url != null) {
+            String scheme = url.toLowerCase(Locale.ROOT);
+            if (scheme.startsWith("ws://") || scheme.startsWith("wss://")) {
+                return UpstreamTransport.WEBSOCKET;
+            }
+        }
+        return UpstreamTransport.HTTP;
     }
 
     private static ClientAuth parseClientAuth(String value) {

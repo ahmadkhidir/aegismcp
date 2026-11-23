@@ -168,6 +168,71 @@ class JsonRpcCodecTest {
     }
 
     @Test
+    @DisplayName("C-001: a success response serializes exactly jsonrpc, id, and result")
+    void testSuccessResponseCarriesNoExtraFields() throws Exception {
+        ObjectNode result = codec.createObjectNode();
+        result.put("content", "ok");
+        JsonRpcResponse response = JsonRpcResponse.success(JsonRpcId.of(7), result);
+
+        JsonNode encoded = codec.getMapper().readTree(codec.encode(response));
+
+        assertEquals(java.util.Set.of("jsonrpc", "id", "result"), fieldNames(encoded));
+        assertFalse(encoded.has("success"), "the response must not carry a success field");
+        assertFalse(encoded.has("error"));
+        assertEquals(7, encoded.get("id").asInt());
+    }
+
+    @Test
+    @DisplayName("C-001: an upstream failure is -32603 with machine code UPSTREAM_UNAVAILABLE")
+    void testUpstreamFailureUsesContractCodeAndMachineCode() throws Exception {
+        JsonRpcError error = JsonRpcError.upstreamUnavailable("did not answer");
+
+        assertEquals(JsonRpcError.INTERNAL_ERROR, error.code());
+        assertEquals(JsonRpcError.MACHINE_UPSTREAM_UNAVAILABLE, error.machineCode());
+        assertEquals(HttpResponseStatus.BAD_GATEWAY, error.toHttpStatus());
+
+        JsonRpcResponse response = JsonRpcResponse.error(JsonRpcId.of("req-1"), error);
+        JsonNode encoded = codec.getMapper().readTree(codec.encode(response));
+
+        assertEquals(java.util.Set.of("jsonrpc", "id", "error"), fieldNames(encoded));
+        assertEquals(JsonRpcError.INTERNAL_ERROR, encoded.get("error").get("code").asInt());
+        assertEquals(JsonRpcError.MACHINE_UPSTREAM_UNAVAILABLE,
+                encoded.get("error").get("data").get("code").asText());
+    }
+
+    @Test
+    @DisplayName("C-001: a forwarded request serializes exactly jsonrpc, id, method, and params")
+    void testRequestCarriesNoExtraFields() throws Exception {
+        ObjectNode params = codec.createObjectNode();
+        params.put("name", "read_file");
+        JsonRpcRequest request = new JsonRpcRequest(JsonRpcId.of(11), "tools/call", params);
+
+        JsonNode encoded = codec.getMapper().readTree(codec.encode(request));
+
+        assertEquals(java.util.Set.of("jsonrpc", "id", "method", "params"), fieldNames(encoded));
+        assertFalse(encoded.has("toolCall"));
+        assertFalse(encoded.has("notification"));
+    }
+
+    @Test
+    @DisplayName("C-001: an error response serializes exactly code, message, and data")
+    void testErrorObjectCarriesNoExtraFields() throws Exception {
+        JsonRpcResponse response = JsonRpcResponse.error(JsonRpcId.of(3),
+                JsonRpcError.policyViolation("denied"));
+
+        JsonNode encoded = codec.getMapper().readTree(codec.encode(response));
+
+        assertEquals(java.util.Set.of("jsonrpc", "id", "error"), fieldNames(encoded));
+        assertEquals(java.util.Set.of("code", "message", "data"), fieldNames(encoded.get("error")));
+    }
+
+    private static java.util.Set<String> fieldNames(JsonNode node) {
+        java.util.Set<String> names = new java.util.HashSet<>();
+        node.fieldNames().forEachRemaining(names::add);
+        return names;
+    }
+
+    @Test
     @DisplayName("FEAT-001 / C-001: HttpJsonRpcDecoder decodes valid POST /mcp/v1/rpc")
     void testHttpJsonRpcDecoderSuccess() {
         HttpJsonRpcDecoder decoder = new HttpJsonRpcDecoder();

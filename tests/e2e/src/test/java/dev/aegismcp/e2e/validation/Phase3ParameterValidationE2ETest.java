@@ -7,6 +7,7 @@ import dev.aegismcp.gateway.AegisGatewayServer;
 import dev.aegismcp.gateway.anomaly.SecurityViolation;
 import dev.aegismcp.gateway.audit.AuditLedger;
 import dev.aegismcp.gateway.codec.JsonRpcCodec;
+import dev.aegismcp.e2e.E2EGatewayFixture;
 import dev.aegismcp.gateway.policy.PolicyCache;
 import dev.aegismcp.gateway.policy.PolicyCompiler;
 import dev.aegismcp.gateway.policy.SecurityPolicy;
@@ -151,7 +152,7 @@ class Phase3ParameterValidationE2ETest {
                 McpProxyHandler.DEFAULT_RPC_PATH,
                 JsonRpcCodec.getInstance(),
                 validationInterceptor,
-                UpstreamClient.mockEcho(),
+                E2EGatewayFixture.echoUpstream(),
                 server.getVirtualThreadExecutor(),
                 false // Allow test requests with Bearer token
         );

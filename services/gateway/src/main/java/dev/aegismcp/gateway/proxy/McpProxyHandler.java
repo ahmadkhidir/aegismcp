@@ -210,6 +210,20 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
                     rpcRequest.toolName(), securityContext.identity().agentId());
 
             interceptor.intercept(securityContext, rpcRequest)
+                    // An approval deadline is an interception outcome (C-001 408), not an upstream
+                    // failure; any later TimeoutException can only come from the upstream exchange
+                    // and maps to UPSTREAM_UNAVAILABLE instead.
+                    .handle((verdict, failure) -> {
+                        if (failure == null) {
+                            return verdict;
+                        }
+                        Throwable cause = unwrapCompletion(failure);
+                        if (cause instanceof TimeoutException) {
+                            return InterceptionVerdict.block(
+                                    JsonRpcError.approvalTimedOut("No reviewer decided within the deadline"));
+                        }
+                        throw new java.util.concurrent.CompletionException(cause);
+                    })
                     .thenCompose(verdict -> {
                         if (verdict instanceof InterceptionVerdict.Block block) {
                             JsonRpcResponse errorResponse = JsonRpcResponse.error(rpcRequest.id(), block.error());
@@ -240,17 +254,19 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
 
         if (throwable != null) {
             logger.error("Upstream forwarding failed for request {}", rpcRequest.id(), throwable);
-            Throwable cause = throwable.getCause() != null ? throwable.getCause() : throwable;
-            if (cause instanceof TimeoutException) {
-                audit(agentId, toolName, "APPROVAL_TIMEOUT", startedAt, "status=408");
-                sendError(ctx, rpcRequest.id(),
-                        JsonRpcError.approvalTimedOut("Approval deadline expired"),
-                        HttpResponseStatus.REQUEST_TIMEOUT, keepAlive);
-            } else {
+            Throwable cause = unwrapCompletion(throwable);
+            // Every upstream crash, disconnect, refused exchange, malformed answer, or deadline
+            // maps to the C-001 502 row with -32603 and machine code UPSTREAM_UNAVAILABLE.
+            if (isUpstreamFailure(cause)) {
                 audit(agentId, toolName, "UPSTREAM_UNAVAILABLE", startedAt, "status=502");
                 sendError(ctx, rpcRequest.id(),
                         JsonRpcError.upstreamUnavailable("The upstream MCP server did not answer"),
                         HttpResponseStatus.BAD_GATEWAY, keepAlive);
+            } else {
+                audit(agentId, toolName, "INTERNAL_ERROR", startedAt, "status=500");
+                sendError(ctx, rpcRequest.id(),
+                        JsonRpcError.internalError("The gateway could not complete the request"),
+                        HttpResponseStatus.INTERNAL_SERVER_ERROR, keepAlive);
             }
             return;
         }
@@ -280,6 +296,27 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
         audit(agentId, toolName, responseWithMatchingId.isError() ? "BLOCKED" : "ALLOWED", startedAt,
                 "status=" + status.code());
         sendResponse(ctx, responseWithMatchingId, status, keepAlive);
+    }
+
+    /**
+     * An upstream exchange that never produced a JSON-RPC answer: a transport failure, a deadline,
+     * or a refused connection. These are the C-001 {@code UPSTREAM_UNAVAILABLE} row; an interceptor
+     * defect or an unexpected gateway error is the internal-error row instead.
+     */
+    private static boolean isUpstreamFailure(Throwable cause) {
+        return cause instanceof UpstreamException
+                || cause instanceof TimeoutException
+                || cause instanceof java.net.http.HttpTimeoutException
+                || cause instanceof java.net.ConnectException
+                || cause instanceof java.io.IOException;
+    }
+
+    private static Throwable unwrapCompletion(Throwable failure) {
+        Throwable current = failure;
+        while (current instanceof java.util.concurrent.CompletionException && current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current;
     }
 
     private void audit(String agentId, String toolName, String decision, long startedAt, String summary) {
