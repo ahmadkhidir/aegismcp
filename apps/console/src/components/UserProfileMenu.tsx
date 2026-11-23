@@ -1,30 +1,27 @@
 /**
- * Specification Anchors: FEAT-009, NFR-029, screens.md, user-personas.md
- * User Profile Dropdown Menu in Top Navigation.
- * Displays active operator identity, OIDC claims, RBAC roles, live NFR-029 idle timer,
- * and dev/demo persona switching.
+ * Specification Anchors: FEAT-009, NFR-029, screens.md
+ * User profile menu: verified identity, directory roles, and the idle lock
+ * countdown. There is no role-switching control; roles come from the provider.
  */
 
 import React, { useState, useRef, useEffect } from 'react';
-import { User, LogOut, Clock, Shield, RefreshCw, ChevronDown, Check } from 'lucide-react';
+import { User, LogOut, Clock, Shield, RefreshCw, ChevronDown } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { ENTERPRISE_PERSONAS } from '../services/oidc';
 
 export const UserProfileMenu: React.FC = () => {
-  const { user, logout, switchPersona, renewSession, idleRemainingSeconds, oidcConfig } = useAuth();
+  const { user, logout, renewSession, idleRemainingSeconds } = useAuth();
   const [isOpen, setIsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  // Close when clicking outside or pressing Escape
   useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
         setIsOpen(false);
       }
     };
 
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
         setIsOpen(false);
       }
     };
@@ -40,6 +37,9 @@ export const UserProfileMenu: React.FC = () => {
   }, [isOpen]);
 
   if (!user) return null;
+
+  const displayName = user.name || user.email || user.sub;
+  const displayRole = user.roles.length > 0 ? user.roles.join(' · ') : 'No console role';
 
   const formatIdleTime = (totalSeconds: number) => {
     const mins = Math.floor(totalSeconds / 60);
@@ -74,8 +74,10 @@ export const UserProfileMenu: React.FC = () => {
           <User className="w-3.5 h-3.5" />
         </div>
         <div className="hidden lg:block text-left">
-          <p className="text-xs font-medium text-grey-900 leading-none">{user.name}</p>
-          <p className="text-[10px] text-grey-500 font-mono leading-tight">{user.title}</p>
+          <p className="text-xs font-medium text-grey-900 leading-none">{displayName}</p>
+          <p className="text-[10px] text-grey-500 font-mono leading-tight truncate max-w-[12rem]">
+            {displayRole}
+          </p>
         </div>
         <ChevronDown className="w-3.5 h-3.5 text-grey-500" />
       </button>
@@ -85,23 +87,23 @@ export const UserProfileMenu: React.FC = () => {
           data-testid="user-profile-dropdown"
           className="absolute right-0 mt-2 w-72 rounded-radius-lg bg-grey-100 border border-grey-300 shadow-xl z-50 p-space-md text-grey-900 animate-fade-in font-sans"
         >
-          {/* User Details */}
-          <div className="flex items-start gap- space-sm pb-space-sm border-b border-grey-300">
+          <div className="flex items-start gap-space-sm pb-space-sm border-b border-grey-300">
             <div className="w-9 h-9 rounded-radius-full bg-primary-200 flex items-center justify-center text-primary-900 font-bold text-sm border border-primary-400 flex-shrink-0">
-              {user.name.charAt(0)}
+              {displayName.charAt(0).toUpperCase()}
             </div>
             <div className="overflow-hidden flex-1">
-              <p className="text-sm font-bold text-grey-900 truncate">{user.name}</p>
-              <p className="text-xs text-grey-500 truncate font-mono">{user.email}</p>
+              <p className="text-sm font-bold text-grey-900 truncate">{displayName}</p>
+              <p className="text-xs text-grey-500 truncate font-mono">
+                {user.email || 'Email not provided by the provider'}
+              </p>
               <p className="text-[10px] text-primary-800 font-mono mt-0.5 truncate">{user.idp}</p>
             </div>
           </div>
 
-          {/* Assigned RBAC Roles */}
           <div className="py-space-sm border-b border-grey-300">
             <div className="flex items-center gap-1 text-[11px] font-semibold text-grey-500 mb-1">
               <Shield className="w-3 h-3 text-primary-500" />
-              <span>RBAC Roles</span>
+              <span>Directory roles</span>
             </div>
             <div className="flex flex-wrap gap-1">
               {user.roles.map((role) => (
@@ -117,11 +119,10 @@ export const UserProfileMenu: React.FC = () => {
             </div>
           </div>
 
-          {/* Idle Session Countdown (NFR-029) */}
           <div className="py-space-sm border-b border-grey-300 flex items-center justify-between text-xs">
             <div className="flex items-center gap-1.5 text-grey-500">
               <Clock className="w-3.5 h-3.5 text-warning-500" />
-              <span>Idle timeout:</span>
+              <span>Session lock in:</span>
             </div>
             <div className="flex items-center gap-1">
               <span
@@ -134,7 +135,7 @@ export const UserProfileMenu: React.FC = () => {
               </span>
               <button
                 onClick={() => renewSession()}
-                title="Reset idle timer (NFR-029)"
+                title="Reset the idle lock timer"
                 data-testid="renew-idle-timer-button"
                 className="p-1 rounded-radius-sm hover:bg-grey-200 text-grey-500 hover:text-grey-900 transition-colors"
                 aria-label="Reset session idle timer"
@@ -144,44 +145,6 @@ export const UserProfileMenu: React.FC = () => {
             </div>
           </div>
 
-          {/* Persona Switcher (when in mock/dev mode) */}
-          {oidcConfig.isMock && (
-            <div className="py-space-sm border-b border-grey-300">
-              <p className="text-[11px] font-semibold text-grey-500 mb-1.5">
-                Switch Persona (Dev / Demo Mode)
-              </p>
-              <div className="space-y-1">
-                {Object.entries(ENTERPRISE_PERSONAS).map(([key, p]) => {
-                  const isSelected = user.email === p.email;
-                  return (
-                    <button
-                      key={key}
-                      onClick={() => {
-                        switchPersona(key);
-                        setIsOpen(false);
-                      }}
-                      data-testid={`switch-persona-${key}`}
-                      className={`w-full flex items-center justify-between px-2 py-1.5 rounded-radius-md text-xs text-left transition-colors ${
-                        isSelected
-                          ? 'bg-primary-100 text-primary-900 font-bold border border-primary-300'
-                          : 'hover:bg-grey-200 text-grey-700'
-                      }`}
-                    >
-                      <div className="truncate">
-                        <span className="block truncate">{p.name}</span>
-                        <span className="text-[10px] text-grey-500 block truncate font-mono">
-                          {p.title}
-                        </span>
-                      </div>
-                      {isSelected && <Check className="w-3.5 h-3.5 text-primary-600 flex-shrink-0" />}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Logout Action */}
           <div className="pt-space-sm">
             <button
               onClick={() => {

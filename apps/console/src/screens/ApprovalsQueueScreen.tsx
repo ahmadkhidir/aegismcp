@@ -1,85 +1,159 @@
 /**
- * Specification Anchors: FEAT-006, FEAT-008, C-003, C-004
- * Screen 3: Approvals Queue
+ * Specification Anchors: FEAT-006, FEAT-008, C-003, C-004, C-014, C-019
+ * Screen 3: Approvals Queue. Pending tickets come from C-003, history from
+ * C-019, and decisions post to C-004 or C-014. The reviewer identity is taken
+ * from the verified operator token by the gateway, never from the console.
  */
 
-import React, { useEffect, useState } from 'react';
-import {
-  Clock,
-  AlertTriangle,
-  Check,
-  X,
-  Loader2,
-  Inbox,
-} from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Clock, AlertTriangle, Check, X, Loader2, Inbox } from 'lucide-react';
 import { AegisApi } from '../services/api';
-import { ApprovalTicket } from '../types/contracts';
+import {
+  ApprovalHistoryStatus,
+  ApprovalHistoryTicket,
+  ApprovalTicket,
+} from '../types/contracts';
 import { Skeleton } from '../components/Skeleton';
 import { ErrorState } from '../components/ErrorState';
 import { EmptyState } from '../components/EmptyState';
 import { JsonViewer } from '../components/JsonViewer';
 
+type Tab = 'pending' | ApprovalHistoryStatus;
+
+interface DisplayTicket {
+  id: string;
+  agentId: string;
+  toolName: string;
+  argumentsPayload: string;
+  triggerPolicyId: string;
+  agentIntent: string | null;
+  status: string;
+  createdAt: string;
+  expiresAt: string;
+  reviewedBy: string | null;
+  rejectionReason: string | null;
+  processedAt: string | null;
+}
+
+function fromPending(ticket: ApprovalTicket): DisplayTicket {
+  return {
+    ...ticket,
+    reviewedBy: null,
+    rejectionReason: null,
+    processedAt: null,
+  };
+}
+
+function fromHistory(ticket: ApprovalHistoryTicket): DisplayTicket {
+  return {
+    ...ticket,
+    agentIntent: null,
+  };
+}
+
+/** The contract carries arguments as JSON text already masked by the gateway. */
+function parseArguments(payload: string): unknown {
+  try {
+    return JSON.parse(payload);
+  } catch {
+    return payload;
+  }
+}
+
 export const ApprovalsQueueScreen: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'pending' | 'approved' | 'rejected'>('pending');
-  const [tickets, setTickets] = useState<ApprovalTicket[]>([]);
+  const [activeTab, setActiveTab] = useState<Tab>('pending');
+  const [tickets, setTickets] = useState<DisplayTicket[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  // Rejection modal state
-  const [rejectingTicket, setRejectingTicket] = useState<ApprovalTicket | null>(null);
+  const [rejectingTicket, setRejectingTicket] = useState<DisplayTicket | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
-  const loadApprovals = async () => {
+  const loadApprovals = useCallback(async (tab: Tab = activeTab) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await AegisApi.getApprovals(activeTab);
-      setTickets(res.tickets);
+      if (tab === 'pending') {
+        const response = await AegisApi.getPendingApprovals(100);
+        setTickets(response.tickets.map(fromPending));
+      } else {
+        const response = await AegisApi.getApprovalHistory(tab, 100, 0);
+        setTickets(response.tickets.map(fromHistory));
+      }
       setLoading(false);
     } catch (err: unknown) {
       setLoading(false);
-      setError(err instanceof Error ? err.message : 'Failed to retrieve approval queue');
+      setError(err instanceof Error ? err.message : 'Failed to retrieve the approval queue');
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    loadApprovals(activeTab);
+  }, [activeTab, loadApprovals]);
+
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleApprove = async (ticket: DisplayTicket) => {
+    setActionLoadingId(ticket.id);
+    setActionError(null);
+    try {
+      await AegisApi.approveTicket(ticket.id);
+      await loadApprovals('pending');
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : 'The approval could not be submitted.');
+    } finally {
+      setActionLoadingId(null);
     }
   };
 
-  useEffect(() => {
-    loadApprovals();
-  }, [activeTab]);
-
-  const handleDecision = async (
-    ticketId: string,
-    decision: 'APPROVE' | 'REJECT',
-    reason = 'Approved by administrator console operator'
-  ) => {
-    setActionLoadingId(ticketId);
+  const handleReject = async () => {
+    if (!rejectingTicket) return;
+    setActionLoadingId(rejectingTicket.id);
+    setActionError(null);
     try {
-      await AegisApi.submitApprovalDecision(ticketId, {
-        decision,
-        reviewer: 'elena.rostova@aegis.internal',
-        reason,
-      });
-      // Remove ticket from local view
-      setTickets((prev) => prev.filter((t) => t.id !== ticketId));
-      setActionLoadingId(null);
+      await AegisApi.rejectTicket(rejectingTicket.id, rejectReason.trim());
       setRejectingTicket(null);
       setRejectReason('');
+      await loadApprovals('pending');
     } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : 'The rejection could not be submitted.');
+    } finally {
       setActionLoadingId(null);
-      alert(err instanceof Error ? err.message : 'Failed to submit decision');
     }
   };
 
   const getRemainingTime = (expiresAt: string) => {
-    const diff = Math.max(0, new Date(expiresAt).getTime() - Date.now());
-    const mins = Math.floor(diff / 60000);
-    const secs = Math.floor((diff % 60000) / 1000);
-    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    const difference = Math.max(0, new Date(expiresAt).getTime() - now);
+    const minutes = Math.floor(difference / 60000);
+    const seconds = Math.floor((difference % 60000) / 1000);
+    return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
   };
+
+  const emptyCopy =
+    activeTab === 'pending'
+      ? {
+          title: 'No agent actions are waiting for approval',
+          description:
+            'Requests appear here when a gateway policy routes an autonomous call to a human decision.',
+        }
+      : activeTab === 'approved'
+      ? {
+          title: 'No approved requests yet',
+          description: 'Approved approvals will be recorded here with the reviewer identity.',
+        }
+      : {
+          title: 'No rejected requests yet',
+          description: 'Rejected approvals will be recorded here with the rejection reason.',
+        };
 
   return (
     <div className="p-space-lg max-w-5xl mx-auto space-y-space-md animate-in fade-in duration-150">
-      {/* Header & Tabs */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-space-md border-b border-grey-300 gap-space-sm">
         <div>
           <h2 className="text-xl font-bold text-grey-900">Human-in-the-Loop Approvals</h2>
@@ -88,7 +162,6 @@ export const ApprovalsQueueScreen: React.FC = () => {
           </p>
         </div>
 
-        {/* Tab switcher */}
         <div className="flex items-center gap-1 bg-grey-100 p-1 rounded-radius-md border border-grey-300 text-xs">
           <button
             onClick={() => setActiveTab('pending')}
@@ -126,20 +199,25 @@ export const ApprovalsQueueScreen: React.FC = () => {
         </div>
       </div>
 
-      {error && <ErrorState message={error} onRetry={loadApprovals} />}
+      {error && <ErrorState message={error} onRetry={() => loadApprovals(activeTab)} />}
 
-      {/* Loading Skeleton */}
+      {actionError && (
+        <div
+          role="alert"
+          data-testid="approval-action-error"
+          className="p-space-sm bg-error-100 border border-error-300 text-error-900 rounded-radius-md text-xs"
+        >
+          {actionError}
+        </div>
+      )}
+
       {loading ? (
         <div className="space-y-space-md">
           <Skeleton className="h-44 w-full" />
           <Skeleton className="h-44 w-full" />
         </div>
       ) : tickets.length === 0 ? (
-        <EmptyState
-          icon={Inbox}
-          title="All clear — no pending agent actions requiring human approval"
-          description="Autonomous agent requests will appear here when policy rules flag elevated risk scores or sensitive tool execution."
-        />
+        <EmptyState icon={Inbox} title={emptyCopy.title} description={emptyCopy.description} />
       ) : (
         <div className="space-y-space-md">
           {tickets.map((ticket) => {
@@ -150,12 +228,9 @@ export const ApprovalsQueueScreen: React.FC = () => {
                 data-testid={`approval-ticket-${ticket.id}`}
                 className="bg-grey-100 border border-grey-300 rounded-radius-lg p-space-md space-y-space-md shadow-sm"
               >
-                {/* Ticket Header */}
                 <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-space-sm border-b border-grey-300 gap-space-sm">
                   <div className="flex items-center gap-space-sm flex-wrap">
-                    <span className="font-mono text-xs font-bold text-grey-900">
-                      {ticket.id}
-                    </span>
+                    <span className="font-mono text-xs font-bold text-grey-900">{ticket.id}</span>
                     <span className="font-mono text-xs px-2 py-0.5 rounded-radius-sm bg-accent-100 text-accent-900 border border-accent-300">
                       {ticket.agentId.split('/').pop()}
                     </span>
@@ -164,55 +239,66 @@ export const ApprovalsQueueScreen: React.FC = () => {
                     </span>
                   </div>
 
-                  <div className="flex items-center gap-space-sm">
-                    {/* Risk Score Pill */}
-                    <span
-                      className={`text-xs font-mono font-bold px-2 py-0.5 rounded-radius-full ${
-                        ticket.riskScore >= 80
-                          ? 'bg-error-100 text-error-900 border border-error-300'
-                          : 'bg-warning-100 text-warning-900 border border-warning-300'
-                      }`}
-                    >
-                      Risk: {ticket.riskScore}/100
+                  <div className="flex items-center gap-space-sm flex-wrap">
+                    <span className="text-[11px] font-mono text-grey-600 px-2 py-0.5 rounded-radius-sm bg-grey-200 border border-grey-300">
+                      Trigger: {ticket.triggerPolicyId}
                     </span>
 
-                    {/* TTL Countdown */}
                     {activeTab === 'pending' && (
                       <span className="inline-flex items-center gap-1 text-xs font-mono text-warning-500 bg-warning-100/50 px-2 py-0.5 rounded-radius-sm border border-warning-300/40">
                         <Clock className="w-3.5 h-3.5" />
                         <span>{getRemainingTime(ticket.expiresAt)} left</span>
                       </span>
                     )}
+
+                    {ticket.status !== 'pending' && <StatusLabel status={ticket.status} />}
                   </div>
                 </div>
 
-                {/* Reason & Agent Intent */}
                 <div className="text-xs space-y-1">
-                  <div className="flex items-start gap-1 text-error-700 font-medium">
-                    <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-                    <span>{ticket.reason}</span>
-                  </div>
                   {ticket.agentIntent && (
-                    <div className="text-grey-600 pl-4">
-                      <span className="font-semibold text-grey-500">Agent Stated Intent: </span>
+                    <div className="text-grey-600">
+                      <span className="font-semibold text-grey-500">Agent stated intent: </span>
                       <span>{ticket.agentIntent}</span>
+                    </div>
+                  )}
+                  <div className="text-grey-500">
+                    Requested {new Date(ticket.createdAt).toLocaleString()} · expires{' '}
+                    {new Date(ticket.expiresAt).toLocaleString()}
+                  </div>
+                  {ticket.reviewedBy && (
+                    <div className="text-grey-600">
+                      <span className="font-semibold text-grey-500">Reviewed by: </span>
+                      <span className="font-mono">{ticket.reviewedBy}</span>
+                      {ticket.processedAt && (
+                        <span className="text-grey-500">
+                          {' '}
+                          · {new Date(ticket.processedAt).toLocaleString()}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {ticket.rejectionReason && (
+                    <div className="flex items-start gap-1 text-error-700 font-medium">
+                      <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                      <span>{ticket.rejectionReason}</span>
                     </div>
                   )}
                 </div>
 
-                {/* Parameter Diff / Viewer */}
-                <div>
-                  <JsonViewer
-                    title="Suspended Execution Arguments"
-                    data={ticket.arguments}
-                  />
-                </div>
+                <JsonViewer
+                  title="Suspended Execution Arguments"
+                  data={parseArguments(ticket.argumentsPayload)}
+                />
 
-                {/* Action Footer (for Pending items) */}
                 {activeTab === 'pending' && (
                   <div className="flex items-center justify-end gap-space-sm pt-space-xs border-t border-grey-300">
                     <button
-                      onClick={() => setRejectingTicket(ticket)}
+                      onClick={() => {
+                        setRejectingTicket(ticket);
+                        setRejectReason('');
+                        setActionError(null);
+                      }}
                       disabled={isActionLoading}
                       data-testid={`reject-button-${ticket.id}`}
                       className="inline-flex items-center gap-1.5 px-space-md py-space-sm rounded-radius-md text-xs font-semibold border border-error-300 text-error-700 hover:bg-error-100 hover:text-error-900 transition-colors disabled:opacity-50"
@@ -222,9 +308,7 @@ export const ApprovalsQueueScreen: React.FC = () => {
                     </button>
 
                     <button
-                      onClick={() =>
-                        handleDecision(ticket.id, 'APPROVE', 'Authorized by SecOps lead')
-                      }
+                      onClick={() => handleApprove(ticket)}
                       disabled={isActionLoading}
                       data-testid={`approve-button-${ticket.id}`}
                       className="inline-flex items-center gap-1.5 px-space-lg py-space-sm rounded-radius-md text-xs font-bold bg-success-500 hover:bg-success-700 text-grey-50 transition-colors shadow-sm disabled:opacity-50"
@@ -244,36 +328,40 @@ export const ApprovalsQueueScreen: React.FC = () => {
         </div>
       )}
 
-      {/* Mandatory Rejection Reason Dialog (C-004) */}
       {rejectingTicket && (
         <div
           role="dialog"
           aria-modal="true"
+          aria-labelledby="reject-dialog-title"
           className="fixed inset-0 z-50 flex items-center justify-center p-space-md bg-grey-50/80 backdrop-blur-sm"
         >
           <div className="w-full max-w-md bg-grey-100 border border-error-300 rounded-radius-lg p-space-lg shadow-xl space-y-space-md">
             <div className="flex items-center justify-between pb-space-xs border-b border-grey-300">
-              <h3 className="font-bold text-sm text-error-900">Reject Approval Ticket</h3>
+              <h3 id="reject-dialog-title" className="font-bold text-sm text-error-900">
+                Reject Approval Ticket
+              </h3>
               <button
                 onClick={() => setRejectingTicket(null)}
                 className="p-1 text-grey-500 hover:text-grey-900"
+                aria-label="Close rejection dialog"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             <p className="text-xs text-grey-600">
-              Provide an explanatory rejection reason that will be transmitted back to the agent in the JSON-RPC error payload:
+              Provide a rejection reason. The gateway records it in the audit ledger and returns it
+              to the requesting agent.
             </p>
 
             <textarea
               value={rejectReason}
-              onChange={(e) => setRejectReason(e.target.value)}
+              onChange={(event) => setRejectReason(event.target.value)}
               required
               rows={3}
               data-testid="rejection-reason-input"
               className="w-full bg-grey-200 border border-grey-300 rounded-radius-md px-space-sm py-2 text-xs text-grey-900 focus:border-error-500 outline-none resize-none"
-              placeholder="e.g. Operation denied: Staging namespace deletion rejected during freeze..."
+              placeholder="Explain why this request is denied..."
             />
 
             <div className="flex items-center justify-end gap-space-sm pt-space-xs">
@@ -288,9 +376,7 @@ export const ApprovalsQueueScreen: React.FC = () => {
                 type="button"
                 data-testid="confirm-reject-button"
                 disabled={!rejectReason.trim() || actionLoadingId === rejectingTicket.id}
-                onClick={() =>
-                  handleDecision(rejectingTicket.id, 'REJECT', rejectReason)
-                }
+                onClick={handleReject}
                 className="px-space-md py-space-sm rounded-radius-md text-xs font-bold bg-error-500 hover:bg-error-700 text-grey-900 transition-colors disabled:opacity-50"
               >
                 Confirm Rejection
@@ -302,3 +388,9 @@ export const ApprovalsQueueScreen: React.FC = () => {
     </div>
   );
 };
+
+const StatusLabel: React.FC<{ status: string }> = ({ status }) => (
+  <span className="inline-flex items-center px-2 py-0.5 rounded-radius-full text-[10px] font-mono font-bold uppercase bg-grey-200 text-grey-700 border border-grey-300">
+    {status}
+  </span>
+);

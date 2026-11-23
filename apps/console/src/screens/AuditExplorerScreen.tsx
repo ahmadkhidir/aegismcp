@@ -1,9 +1,10 @@
 /**
- * Specification Anchors: FEAT-007, FEAT-008, FEAT-011, FEAT-012, C-007, C-011, C-013
- * Screen 5: Audit Explorer
+ * Specification Anchors: FEAT-007, FEAT-008, FEAT-011, FEAT-012, C-011, C-013, C-015
+ * Screen 5: Audit Explorer. The integrity banner reports the gateway's most
+ * recent completed verification; records and exports come from C-013/C-011.
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   ShieldCheck,
   Search,
@@ -19,20 +20,43 @@ import {
   ChevronRight,
   Loader2,
 } from 'lucide-react';
-import { AegisApi } from '../services/api';
-import { AuditRecordItem, AuditVerifyResponse } from '../types/contracts';
+import { AegisApi, ApiError } from '../services/api';
+import {
+  AuditDecision,
+  AuditIntegrityResponse,
+  AuditRecordItem,
+  ComplianceExportRequest,
+  ComplianceFramework,
+  ComplianceFormat,
+} from '../types/contracts';
 import { Skeleton } from '../components/Skeleton';
 import { ErrorState } from '../components/ErrorState';
 import { EmptyState } from '../components/EmptyState';
 import { StatusPill } from '../components/StatusPill';
 
+const PAGE_SIZE = 10;
+
+function localDateTimeInput(offsetMs: number): string {
+  const date = new Date(Date.now() + offsetMs);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
+    date.getHours()
+  )}:${pad(date.getMinutes())}`;
+}
+
+function toIso(localValue: string): string | null {
+  if (!localValue) return null;
+  const parsed = new Date(localValue);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
 export const AuditExplorerScreen: React.FC = () => {
   const [records, setRecords] = useState<AuditRecordItem[]>([]);
   const [totalRecords, setTotalRecords] = useState(0);
   const [page, setPage] = useState(0);
-  const pageSize = 10;
-  const [integrityStatus, setIntegrityStatus] = useState<AuditVerifyResponse | null>(null);
+  const [integrity, setIntegrity] = useState<AuditIntegrityResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [integrityLoading, setIntegrityLoading] = useState(true);
   const [verifying, setVerifying] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -40,70 +64,90 @@ export const AuditExplorerScreen: React.FC = () => {
   const [selectedRecord, setSelectedRecord] = useState<AuditRecordItem | null>(null);
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
 
-  // Search & Filter state
   const [searchQuery, setSearchQuery] = useState('');
-  const [decisionFilter, setDecisionFilter] = useState('ALL');
+  const [appliedQuery, setAppliedQuery] = useState('');
+  const [decisionFilter, setDecisionFilter] = useState<'ALL' | AuditDecision>('ALL');
 
-  // Export modal state
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
-  const [exportFramework, setExportFramework] = useState<'EU_AI_ACT' | 'SOC2_TYPE2'>('EU_AI_ACT');
-  const [exportFormat, setExportFormat] = useState<'JSON' | 'CSV'>('JSON');
+  const [exportFramework, setExportFramework] = useState<ComplianceFramework>('EU_AI_ACT');
+  const [exportFormat, setExportFormat] = useState<ComplianceFormat>('JSON');
+  const [exportFrom, setExportFrom] = useState(() => localDateTimeInput(-24 * 60 * 60 * 1000));
+  const [exportTo, setExportTo] = useState(() => localDateTimeInput(0));
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
 
-  const loadAuditData = async (
-    targetPage = page,
-    targetDecision = decisionFilter,
-    targetQuery = searchQuery
-  ) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [auditRes, verifyRes] = await Promise.all([
-        AegisApi.getAuditRecords({
-          agentId: targetQuery.trim().startsWith('spiffe://') ? targetQuery.trim() : undefined,
-          decision: targetDecision !== 'ALL' ? targetDecision : undefined,
-          limit: pageSize,
-          offset: targetPage * pageSize,
-        }),
-        AegisApi.verifyAuditLedger(),
-      ]);
-      setRecords(auditRes.records);
-      setTotalRecords(auditRes.total);
-      setIntegrityStatus(verifyRes);
-      if (!verifyRes.valid) {
-        setIntegrityError(
-          `Cryptographic chain broken at block #${verifyRes.brokenAtBlock ?? 'unknown'}. Merkle root mismatch.`
-        );
+  const loadRecords = useCallback(
+    async (targetPage: number, decision: 'ALL' | AuditDecision, queryText: string) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const trimmed = queryText.trim();
+        const filters: Parameters<typeof AegisApi.getAuditRecords>[0] = {
+          limit: PAGE_SIZE,
+          offset: targetPage * PAGE_SIZE,
+        };
+        if (decision !== 'ALL') filters.decision = decision;
+        if (trimmed) {
+          if (trimmed.startsWith('spiffe://')) filters.agentId = trimmed;
+          else if (/^(0x)?[0-9a-f]{8,}$/i.test(trimmed)) filters.blockHash = trimmed;
+          else filters.toolName = trimmed;
+        }
+
+        const response = await AegisApi.getAuditRecords(filters);
+        setRecords(response.records);
+        setTotalRecords(response.total);
+        setLoading(false);
+      } catch (err: unknown) {
+        setLoading(false);
+        setError(err instanceof Error ? err.message : 'Failed to retrieve audit records');
       }
-      setLoading(false);
+    },
+    []
+  );
+
+  const loadIntegrity = useCallback(async () => {
+    setIntegrityLoading(true);
+    setIntegrityError(null);
+    try {
+      const response = await AegisApi.getLedgerIntegrity();
+      setIntegrity(response);
+      if (!response.valid) {
+        setIntegrityError('The last completed ledger verification found a hash-chain mismatch.');
+      }
     } catch (err: unknown) {
-      setLoading(false);
-      setError(err instanceof Error ? err.message : 'Failed to retrieve cryptographic audit data');
+      setIntegrityError(
+        err instanceof Error
+          ? err.message
+          : 'The ledger integrity state could not be read from the gateway.'
+      );
+    } finally {
+      setIntegrityLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    loadAuditData(page, decisionFilter, searchQuery);
-  }, [page, decisionFilter]);
+    loadRecords(page, decisionFilter, appliedQuery);
+  }, [page, decisionFilter, appliedQuery, loadRecords]);
 
-  const handleDecisionFilterChange = (val: string) => {
-    setDecisionFilter(val);
+  useEffect(() => {
+    loadIntegrity();
+  }, [loadIntegrity]);
+
+  const handleDecisionFilterChange = (value: string) => {
+    setDecisionFilter(value as 'ALL' | AuditDecision);
     setPage(0);
+  };
+
+  const handleSearch = (event: React.FormEvent) => {
+    event.preventDefault();
+    setPage(0);
+    setAppliedQuery(searchQuery);
   };
 
   const handleVerifyNow = async () => {
     setVerifying(true);
-    try {
-      const res = await AegisApi.verifyAuditLedger();
-      setIntegrityStatus(res);
-      if (!res.valid) {
-        setIntegrityError(
-          `Cryptographic chain broken at block #${res.brokenAtBlock ?? 'unknown'}. Merkle root mismatch.`
-        );
-      }
-      setVerifying(false);
-    } catch {
-      setVerifying(false);
-    }
+    await loadIntegrity();
+    setVerifying(false);
   };
 
   const copyToClipboard = async (text: string) => {
@@ -112,46 +156,57 @@ export const AuditExplorerScreen: React.FC = () => {
       setCopiedHash(text);
       setTimeout(() => setCopiedHash(null), 2000);
     } catch {
-      // Fallback
+      // Clipboard access can be denied; the hash remains visible.
     }
   };
 
-  const filteredRecords = records.filter((r) => {
-    const matchesSearch =
-      searchQuery === '' ||
-      r.toolName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      r.agentId.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      r.blockHash.toLowerCase().includes(searchQuery.toLowerCase());
-
-    const matchesDecision =
-      decisionFilter === 'ALL' || r.decision === decisionFilter;
-
-    return matchesSearch && matchesDecision;
-  });
-
   const handleDownloadExport = async () => {
-    setIsExporting(true);
-    setIntegrityError(null);
-    try {
-      const res = await AegisApi.exportComplianceReport({
-        framework: exportFramework,
-        format: exportFormat,
-      });
+    const from = toIso(exportFrom);
+    const to = toIso(exportTo);
+    if (!from || !to) {
+      setExportError('Select a valid reporting period.');
+      return;
+    }
+    if (new Date(from) > new Date(to)) {
+      setExportError('The start of the reporting period must be before its end.');
+      return;
+    }
 
-      let downloadContent = res.content;
+    const request: ComplianceExportRequest = {
+      framework: exportFramework,
+      format: exportFormat,
+      from,
+      to,
+    };
+
+    setIsExporting(true);
+    setExportError(null);
+    setExportNotice(null);
+    try {
+      const response = await AegisApi.exportComplianceReport(request);
+
+      if (response.status === 'GENERATING') {
+        setExportNotice(
+          `Report ${response.reportId} was accepted for background generation. The signed archive will be delivered through the deployment's configured notification channels.`
+        );
+        setIsExportModalOpen(false);
+        return;
+      }
+
+      let downloadContent = response.content;
       if (exportFormat === 'JSON') {
         try {
-          const parsed = JSON.parse(res.content);
-          if (!parsed.signature) parsed.signature = res.signature;
-          if (!parsed.merkleRoot) parsed.merkleRoot = res.merkleRoot;
+          const parsed = JSON.parse(response.content);
+          if (!parsed.signature) parsed.signature = response.signature;
+          if (!parsed.merkleRoot) parsed.merkleRoot = response.merkleRoot;
           downloadContent = JSON.stringify(parsed, null, 2);
         } catch {
-          downloadContent = JSON.stringify(res, null, 2);
+          downloadContent = JSON.stringify(response, null, 2);
         }
       } else {
         if (!downloadContent.includes('Merkle Root') && !downloadContent.includes('Signature')) {
           downloadContent =
-            `# Merkle Root: ${res.merkleRoot}\n# Digital Signature: ${res.signature}\n` +
+            `# Merkle Root: ${response.merkleRoot}\n# Digital Signature: ${response.signature}\n` +
             downloadContent;
         }
       }
@@ -161,74 +216,109 @@ export const AuditExplorerScreen: React.FC = () => {
           type: exportFormat === 'JSON' ? 'application/json' : 'text/csv',
         });
         const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `aegis-compliance-${exportFramework.toLowerCase()}.${exportFormat.toLowerCase()}`;
-        a.click();
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = `aegis-compliance-${exportFramework.toLowerCase()}.${exportFormat.toLowerCase()}`;
+        anchor.click();
         window.URL.revokeObjectURL(url);
       }
       setIsExportModalOpen(false);
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Export failed';
-      const is409 =
-        (err as unknown as { status?: number })?.status === 409 ||
-        errorMsg.includes('409') ||
-        errorMsg.toLowerCase().includes('hash chain broken') ||
-        errorMsg.toLowerCase().includes('integrity');
-      if (is409) {
+      if (err instanceof ApiError && err.status === 409) {
         setIntegrityError(
-          'Integrity Violation (409 Conflict): Cryptographic hash chain is broken or compromised. Compliance report export aborted.'
+          err.brokenBlockIndex !== undefined
+            ? `Compliance export aborted: the hash chain is broken at block #${err.brokenBlockIndex}.`
+            : err.message
         );
         setIsExportModalOpen(false);
       } else {
-        alert(`Export error: ${errorMsg}`);
+        setExportError(err instanceof Error ? err.message : 'The compliance export failed.');
       }
     } finally {
       setIsExporting(false);
     }
   };
 
+  const pageCount = Math.max(1, Math.ceil(totalRecords / PAGE_SIZE));
+  const integrityUnavailable = !!integrityError && !integrity?.valid;
+
   return (
     <div className="p-space-lg max-w-7xl mx-auto space-y-space-md animate-in fade-in duration-150">
-      {/* 1. Cryptographic Ledger Integrity Status Banner (C-007) */}
       <div
         data-testid="audit-integrity-banner"
-        className="p-space-md rounded-radius-lg bg-grey-100 border border-grey-300 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-space-md shadow-sm"
+        className={`p-space-md rounded-radius-lg border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-space-md shadow-sm ${
+          integrityUnavailable
+            ? 'bg-warning-100 border-warning-300'
+            : 'bg-grey-100 border-grey-300'
+        }`}
       >
         <div className="flex items-center gap-space-md">
-          <div className="p-2.5 rounded-radius-md bg-success-100 text-success-900 border border-success-300">
-            <ShieldCheck className="w-6 h-6 text-success-500" />
+          <div
+            className={`p-2.5 rounded-radius-md border ${
+              integrityUnavailable
+                ? 'bg-warning-100 text-warning-900 border-warning-300'
+                : 'bg-success-100 text-success-900 border-success-300'
+            }`}
+          >
+            {integrityUnavailable ? (
+              <AlertTriangle className="w-6 h-6 text-warning-500" />
+            ) : (
+              <ShieldCheck className="w-6 h-6 text-success-500" />
+            )}
           </div>
           <div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-mono font-bold text-success-500 uppercase">
-                Cryptographic Chain Verified
+            <div className="flex items-center gap-2 flex-wrap">
+              <span
+                className={`text-xs font-mono font-bold uppercase ${
+                  integrityUnavailable ? 'text-warning-700' : 'text-success-500'
+                }`}
+              >
+                {integrityLoading
+                  ? 'Reading ledger integrity'
+                  : integrityUnavailable
+                  ? 'Ledger integrity unavailable'
+                  : integrity?.valid
+                  ? 'Cryptographic chain verified'
+                  : 'Ledger integrity alert'}
               </span>
-              <span className="text-xs font-mono text-grey-500">
-                (SHA-256 Merkle Ledger)
-              </span>
+              <span className="text-xs font-mono text-grey-500">(SHA-256 hash chain)</span>
             </div>
             <p className="text-sm font-semibold text-grey-900 mt-0.5">
-              {integrityStatus?.checkedBlocks.toLocaleString() ?? '1,048,590'} sealed blocks verified with 0 discrepancies
+              {integrity
+                ? `${integrity.totalVerifiedBlocks.toLocaleString()} sealed blocks covered by the last completed verification`
+                : integrityLoading
+                ? 'Loading the last completed verification…'
+                : 'No verification result is available.'}
             </p>
             <p className="text-[11px] font-mono text-grey-500 mt-0.5">
-              Merkle Root: {integrityStatus?.merkleRoot.slice(0, 24)}...
+              {integrity
+                ? `Last verified ${new Date(integrity.lastVerifiedAt).toLocaleString()}`
+                : '—'}
             </p>
           </div>
         </div>
 
         <button
           onClick={handleVerifyNow}
-          disabled={verifying}
+          disabled={verifying || integrityLoading}
           data-testid="verify-now-button"
           className="inline-flex items-center gap-1.5 px-space-md py-space-sm bg-grey-200 hover:bg-grey-300 text-grey-900 font-semibold text-xs rounded-radius-md transition-colors disabled:opacity-50 border border-grey-300"
         >
           <RotateCw className={`w-3.5 h-3.5 ${verifying ? 'animate-spin' : ''}`} />
-          <span>{verifying ? 'Verifying Merkle Root...' : 'Verify Now (C-007)'}</span>
+          <span>{verifying ? 'Reading verification status...' : 'Refresh Status'}</span>
         </button>
       </div>
 
-      {/* 409 Conflict / Compromised Chain Integrity Banner */}
+      {exportNotice && (
+        <div
+          data-testid="export-accepted-banner"
+          role="status"
+          className="p-space-sm rounded-radius-md bg-info-100 border border-info-300 text-info-900 text-xs"
+        >
+          {exportNotice}
+        </div>
+      )}
+
       {integrityError && (
         <div
           data-testid="audit-integrity-error-banner"
@@ -240,14 +330,12 @@ export const AuditExplorerScreen: React.FC = () => {
               <AlertTriangle className="w-6 h-6 text-error-700" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-mono font-bold text-error-700 uppercase">
-                  Cryptographic Integrity Alert (409 Conflict)
-                </span>
-              </div>
-              <p className="text-sm font-semibold text-error-900 mt-0.5">
-                {integrityError}
-              </p>
+              <span className="text-xs font-mono font-bold text-error-700 uppercase">
+                {integrity?.valid === false
+                  ? 'Cryptographic integrity alert'
+                  : 'Ledger integrity unavailable'}
+              </span>
+              <p className="text-sm font-semibold text-error-900 mt-0.5">{integrityError}</p>
             </div>
           </div>
           <button
@@ -260,67 +348,83 @@ export const AuditExplorerScreen: React.FC = () => {
         </div>
       )}
 
-      {error && <ErrorState message={error} onRetry={() => loadAuditData()} />}
+      {error && <ErrorState message={error} onRetry={() => loadRecords(page, decisionFilter, appliedQuery)} />}
 
-      {/* 2. Query and Filter Toolbar */}
-      <div className="flex flex-wrap items-center justify-between gap-space-md p-space-sm bg-grey-100 border border-grey-300 rounded-radius-md">
+      <form
+        onSubmit={handleSearch}
+        className="flex flex-wrap items-center justify-between gap-space-md p-space-sm bg-grey-100 border border-grey-300 rounded-radius-md"
+      >
         <div className="flex items-center gap-space-sm flex-wrap">
           <div className="relative">
             <Search className="w-3.5 h-3.5 text-grey-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(event) => setSearchQuery(event.target.value)}
               placeholder="Search by agent, tool, or SHA-256 hash..."
               className="pl-8 pr-space-md py-1.5 bg-grey-200 border border-grey-300 rounded-radius-md text-xs text-grey-900 placeholder:text-grey-500 focus:border-primary-500 outline-none w-full sm:w-72 font-mono"
             />
           </div>
 
+          <button
+            type="submit"
+            data-testid="audit-search-button"
+            className="px-space-md py-1.5 bg-grey-200 hover:bg-grey-300 border border-grey-300 rounded-radius-md text-xs font-semibold text-grey-800"
+          >
+            Search
+          </button>
+
           <div className="flex items-center gap-1.5 bg-grey-200 border border-grey-300 rounded-radius-md px-2 py-1 text-xs font-mono">
             <Filter className="w-3.5 h-3.5 text-grey-500" />
             <select
               value={decisionFilter}
-              onChange={(e) => handleDecisionFilterChange(e.target.value)}
+              onChange={(event) => handleDecisionFilterChange(event.target.value)}
               className="bg-transparent text-grey-800 outline-none cursor-pointer"
             >
               <option value="ALL">All Decisions</option>
-              <option value="ALLOWED">Allowed</option>
-              <option value="BLOCKED">Blocked</option>
+              <option value="allow">Allowed</option>
+              <option value="block">Blocked</option>
+              <option value="require_approval">Requires Approval</option>
             </select>
           </div>
         </div>
 
         <button
-          onClick={() => setIsExportModalOpen(true)}
+          type="button"
+          onClick={() => {
+            setExportError(null);
+            setIsExportModalOpen(true);
+          }}
           data-testid="export-report-button"
           className="inline-flex items-center gap-1.5 px-space-md py-1.5 bg-primary-500 hover:bg-primary-600 text-grey-900 font-bold text-xs rounded-radius-md transition-colors shadow-sm"
         >
           <Download className="w-3.5 h-3.5" />
           <span>Export Compliance Report</span>
         </button>
-      </div>
+      </form>
 
-      {/* 3. Forensic Event Data Table */}
       {loading ? (
         <div className="space-y-2">
           <Skeleton className="h-10 w-full" />
           <Skeleton className="h-16 w-full" />
           <Skeleton className="h-16 w-full" />
         </div>
-      ) : filteredRecords.length === 0 ? (
+      ) : records.length === 0 ? (
         <EmptyState
           icon={Search}
           title="No audit records found"
-          description="No ledger blocks match your query criteria. Verify block hash or reset active filters."
+          description="No ledger blocks match the current query. Check the block hash or reset the filters."
           actionLabel="Reset Search"
           onAction={() => {
             setSearchQuery('');
+            setAppliedQuery('');
             setDecisionFilter('ALL');
+            setPage(0);
           }}
         />
       ) : (
         <div className="bg-grey-100 border border-grey-300 rounded-radius-md overflow-x-auto shadow-sm">
-          <table className="w-full min-w-[700px] text-left text-xs font-mono">
+          <table className="w-full min-w-[900px] text-left text-xs font-mono">
             <thead className="bg-grey-200 border-b border-grey-300 text-grey-500">
               <tr>
                 <th className="py-2.5 px-space-md font-medium">Block #</th>
@@ -328,31 +432,33 @@ export const AuditExplorerScreen: React.FC = () => {
                 <th className="py-2.5 px-space-md font-medium">SHA-256 Hash</th>
                 <th className="py-2.5 px-space-md font-medium">Agent Workload</th>
                 <th className="py-2.5 px-space-md font-medium">Target Tool</th>
+                <th className="py-2.5 px-space-md font-medium">Arguments Hash</th>
                 <th className="py-2.5 px-space-md font-medium">Decision</th>
                 <th className="py-2.5 px-space-md font-medium">Approver</th>
                 <th className="py-2.5 px-space-md font-medium text-right">Proof</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-grey-300/40">
-              {filteredRecords.map((r) => (
+              {records.map((record) => (
                 <tr
-                  key={r.index}
-                  data-testid={`audit-row-${r.index}`}
+                  key={record.blockIndex}
+                  data-testid={`audit-row-${record.blockIndex}`}
                   className="hover:bg-grey-200/50 transition-colors"
                 >
-                  <td className="py-2.5 px-space-md text-primary-500 font-bold">#{r.index}</td>
+                  <td className="py-2.5 px-space-md text-primary-500 font-bold">#{record.blockIndex}</td>
                   <td className="py-2.5 px-space-md text-grey-500 whitespace-nowrap">
-                    {new Date(r.timestamp).toISOString()}
+                    {new Date(record.timestamp).toISOString()}
                   </td>
                   <td className="py-2.5 px-space-md text-grey-600">
                     <span className="inline-flex items-center gap-1">
-                      <span>{r.blockHash.slice(0, 10)}...</span>
+                      <span>{record.blockHash.slice(0, 10)}...</span>
                       <button
-                        onClick={() => copyToClipboard(r.blockHash)}
+                        onClick={() => copyToClipboard(record.blockHash)}
                         className="p-1 hover:text-grey-900"
-                        title="Copy Hash"
+                        title="Copy hash"
+                        aria-label="Copy block hash"
                       >
-                        {copiedHash === r.blockHash ? (
+                        {copiedHash === record.blockHash ? (
                           <Check className="w-3 h-3 text-success-500" />
                         ) : (
                           <Copy className="w-3 h-3" />
@@ -362,21 +468,29 @@ export const AuditExplorerScreen: React.FC = () => {
                   </td>
                   <td
                     className="py-2.5 px-space-md text-grey-800 max-w-[140px] truncate"
-                    title={r.agentId}
+                    title={record.agentId}
                   >
-                    {r.agentId.split('/').pop()}
+                    {record.agentId.split('/').pop()}
                   </td>
-                  <td className="py-2.5 px-space-md text-primary-700 font-semibold">{r.toolName}</td>
+                  <td className="py-2.5 px-space-md text-primary-700 font-semibold">
+                    {record.toolName}
+                  </td>
+                  <td
+                    className="py-2.5 px-space-md text-grey-500 max-w-[120px] truncate"
+                    title={record.argumentsHash}
+                  >
+                    {record.argumentsHash.slice(0, 10)}...
+                  </td>
                   <td className="py-2.5 px-space-md">
-                    <StatusPill verdict={r.decision} />
+                    <StatusPill verdict={record.decision} />
                   </td>
-                  <td className="py-2.5 px-space-md text-grey-500">
-                    {r.approver ? r.approver : 'Autonomous Policy'}
+                  <td className="py-2.5 px-space-md text-grey-500 truncate max-w-[140px]" title={record.reviewedBy ?? undefined}>
+                    {record.reviewedBy ?? 'Not applicable'}
                   </td>
                   <td className="py-2.5 px-space-md text-right">
                     <button
-                      onClick={() => setSelectedRecord(r)}
-                      data-testid={`view-proof-${r.index}`}
+                      onClick={() => setSelectedRecord(record)}
+                      data-testid={`view-proof-${record.blockIndex}`}
                       className="text-primary-500 hover:text-primary-400 font-semibold underline"
                     >
                       View Proof
@@ -387,15 +501,14 @@ export const AuditExplorerScreen: React.FC = () => {
             </tbody>
           </table>
 
-          {/* Pagination Toolbar */}
           <div className="p-space-sm bg-grey-200 border-t border-grey-300 flex items-center justify-between text-xs font-mono text-grey-700">
             <span data-testid="pagination-info">
-              Showing {filteredRecords.length > 0 ? page * pageSize + 1 : 0} -{' '}
-              {Math.min((page + 1) * pageSize, totalRecords)} of {totalRecords} records
+              Showing {records.length > 0 ? page * PAGE_SIZE + 1 : 0} -{' '}
+              {Math.min((page + 1) * PAGE_SIZE, totalRecords)} of {totalRecords} records
             </span>
             <div className="flex items-center gap-1.5">
               <button
-                onClick={() => setPage((p) => Math.max(0, p - 1))}
+                onClick={() => setPage((current) => Math.max(0, current - 1))}
                 disabled={page === 0}
                 data-testid="pagination-prev"
                 className="inline-flex items-center gap-1 px-2.5 py-1 bg-grey-100 border border-grey-300 hover:bg-grey-300 disabled:opacity-40 rounded-radius-sm"
@@ -404,11 +517,11 @@ export const AuditExplorerScreen: React.FC = () => {
                 <span>Prev</span>
               </button>
               <span className="px-2 font-bold">
-                Page {page + 1} of {Math.max(1, Math.ceil(totalRecords / pageSize))}
+                Page {page + 1} of {pageCount}
               </span>
               <button
-                onClick={() => setPage((p) => p + 1)}
-                disabled={(page + 1) * pageSize >= totalRecords}
+                onClick={() => setPage((current) => current + 1)}
+                disabled={(page + 1) * PAGE_SIZE >= totalRecords}
                 data-testid="pagination-next"
                 className="inline-flex items-center gap-1 px-2.5 py-1 bg-grey-100 border border-grey-300 hover:bg-grey-300 disabled:opacity-40 rounded-radius-sm"
               >
@@ -420,24 +533,25 @@ export const AuditExplorerScreen: React.FC = () => {
         </div>
       )}
 
-      {/* 4. Cryptographic Proof Drawer (Modal or side panel) */}
       {selectedRecord && (
         <div
           role="dialog"
           aria-modal="true"
+          aria-labelledby="proof-dialog-title"
           className="fixed inset-0 z-50 flex items-center justify-center p-space-md bg-grey-50/80 backdrop-blur-sm"
         >
           <div className="w-full max-w-xl bg-grey-100 border border-grey-300 rounded-radius-lg p-space-lg shadow-xl space-y-space-md">
             <div className="flex items-center justify-between pb-space-xs border-b border-grey-300">
               <div className="flex items-center gap-2">
                 <FileCheck2 className="w-5 h-5 text-success-500" />
-                <h3 className="font-bold text-sm text-grey-900">
-                  Cryptographic Ledger Proof #{selectedRecord.index}
+                <h3 id="proof-dialog-title" className="font-bold text-sm text-grey-900">
+                  Cryptographic Ledger Proof #{selectedRecord.blockIndex}
                 </h3>
               </div>
               <button
                 onClick={() => setSelectedRecord(null)}
                 className="p-1 text-grey-500 hover:text-grey-900"
+                aria-label="Close proof"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -445,21 +559,43 @@ export const AuditExplorerScreen: React.FC = () => {
 
             <div className="space-y-space-sm text-xs font-mono">
               <div className="p-space-sm bg-grey-200 rounded-radius-md space-y-1">
-                <span className="text-grey-500 block">Block SHA-256 Hash:</span>
+                <span className="text-grey-500 block">Block SHA-256 hash:</span>
                 <span className="text-primary-700 break-all">{selectedRecord.blockHash}</span>
               </div>
 
               <div className="p-space-sm bg-grey-200 rounded-radius-md space-y-1">
-                <span className="text-grey-500 block">Parent Previous Hash:</span>
-                <span className="text-grey-700 break-all">
-                  {selectedRecord.parentHash || selectedRecord.prevHash}
-                </span>
+                <span className="text-grey-500 block">Parent hash:</span>
+                <span className="text-grey-700 break-all">{selectedRecord.parentHash}</span>
               </div>
 
               <div className="p-space-sm bg-grey-200 rounded-radius-md space-y-1">
-                <span className="text-grey-500 block">ECDSA Digital Signature:</span>
-                <span className="text-grey-700 break-all">
-                  {selectedRecord.signature || 'ecdsa-p256-sha256:MEYCIQD...'}
+                <span className="text-grey-500 block">Arguments hash:</span>
+                <span className="text-grey-700 break-all">{selectedRecord.argumentsHash}</span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-space-sm">
+                <div className="p-space-sm bg-grey-200 rounded-radius-md">
+                  <span className="text-grey-500 block">Decision</span>
+                  <StatusPill verdict={selectedRecord.decision} />
+                </div>
+                <div className="p-space-sm bg-grey-200 rounded-radius-md">
+                  <span className="text-grey-500 block">Reviewed by</span>
+                  <span className="text-grey-700">{selectedRecord.reviewedBy ?? 'Not applicable'}</span>
+                </div>
+                <div className="p-space-sm bg-grey-200 rounded-radius-md">
+                  <span className="text-grey-500 block">Redactions</span>
+                  <span className="text-grey-700">{selectedRecord.redactionCount}</span>
+                </div>
+                <div className="p-space-sm bg-grey-200 rounded-radius-md">
+                  <span className="text-grey-500 block">Processing latency</span>
+                  <span className="text-grey-700">{selectedRecord.latencyMs} ms</span>
+                </div>
+              </div>
+
+              <div className="p-space-sm bg-grey-200 rounded-radius-md">
+                <span className="text-grey-500 block">Sealed at</span>
+                <span className="text-grey-700">
+                  {new Date(selectedRecord.timestamp).toISOString()}
                 </span>
               </div>
             </div>
@@ -476,39 +612,80 @@ export const AuditExplorerScreen: React.FC = () => {
         </div>
       )}
 
-      {/* 5. Compliance Export Modal */}
       {isExportModalOpen && (
         <div
           role="dialog"
           aria-modal="true"
+          aria-labelledby="export-dialog-title"
           className="fixed inset-0 z-50 flex items-center justify-center p-space-md bg-grey-50/80 backdrop-blur-sm"
         >
           <div className="w-full max-w-md bg-grey-100 border border-grey-300 rounded-radius-lg p-space-lg shadow-xl space-y-space-md">
             <div className="flex items-center justify-between pb-space-xs border-b border-grey-300">
-              <h3 className="font-bold text-sm text-grey-900">Export Tamper-Evident Audit Report</h3>
+              <h3 id="export-dialog-title" className="font-bold text-sm text-grey-900">
+                Export Tamper-Evident Audit Report
+              </h3>
               <button
                 onClick={() => setIsExportModalOpen(false)}
                 className="p-1 text-grey-500 hover:text-grey-900"
+                aria-label="Close export dialog"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
+            {exportError && (
+              <div
+                role="alert"
+                data-testid="export-error"
+                className="p-space-sm bg-error-100 border border-error-300 text-error-900 rounded-radius-md text-xs"
+              >
+                {exportError}
+              </div>
+            )}
+
             <div className="space-y-space-sm text-xs">
               <div>
-                <label className="block text-grey-600 font-semibold mb-1">
+                <label className="block text-grey-600 font-semibold mb-1" htmlFor="export-framework">
                   Compliance Framework
                 </label>
                 <select
+                  id="export-framework"
                   value={exportFramework}
-                  onChange={(e) =>
-                    setExportFramework(e.target.value as 'EU_AI_ACT' | 'SOC2_TYPE2')
+                  onChange={(event) =>
+                    setExportFramework(event.target.value as ComplianceFramework)
                   }
                   className="w-full bg-grey-200 border border-grey-300 rounded-radius-md p-2 text-grey-900 outline-none"
                 >
                   <option value="EU_AI_ACT">EU AI Act (Article 12/14 Human Oversight Record)</option>
                   <option value="SOC2_TYPE2">SOC 2 Type II (Continuous Access Control Log)</option>
                 </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-space-sm">
+                <div>
+                  <label className="block text-grey-600 font-semibold mb-1" htmlFor="export-from">
+                    Period start
+                  </label>
+                  <input
+                    id="export-from"
+                    type="datetime-local"
+                    value={exportFrom}
+                    onChange={(event) => setExportFrom(event.target.value)}
+                    className="w-full bg-grey-200 border border-grey-300 rounded-radius-md p-2 text-grey-900 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-grey-600 font-semibold mb-1" htmlFor="export-to">
+                    Period end
+                  </label>
+                  <input
+                    id="export-to"
+                    type="datetime-local"
+                    value={exportTo}
+                    onChange={(event) => setExportTo(event.target.value)}
+                    className="w-full bg-grey-200 border border-grey-300 rounded-radius-md p-2 text-grey-900 outline-none"
+                  />
+                </div>
               </div>
 
               <div>

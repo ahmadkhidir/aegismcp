@@ -121,12 +121,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <span className="text-grey-700">JSON-RPC 2.0</span>
         </div>
         <div className="flex justify-between">
-          <span>SVID:</span>
-          <span className="text-grey-700">X.509 Active</span>
+          <span>Identity:</span>
+          <span className="text-grey-700">SPIFFE / OIDC</span>
         </div>
         <div className="flex justify-between">
-          <span>Gateway:</span>
-          <span className="text-success-500 font-semibold">Healthy</span>
+          <span>Telemetry:</span>
+          <span className="text-grey-700">SSE stream</span>
         </div>
       </div>
     </>
