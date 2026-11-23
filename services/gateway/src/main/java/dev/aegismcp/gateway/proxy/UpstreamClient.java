@@ -17,6 +17,7 @@ public interface UpstreamClient {
 
     /**
      * Creates an in-memory mock client that echoes back success results.
+     * Test double only: the shipped composition root never selects it (FEAT-001).
      */
     static UpstreamClient mockEcho() {
         return (context, request) -> {
@@ -31,5 +32,14 @@ public interface UpstreamClient {
             }
             return CompletableFuture.completedFuture(JsonRpcResponse.success(request.id(), result));
         };
+    }
+
+    /**
+     * Fail-closed client used when no upstream endpoint is configured: every forwarded call fails
+     * as {@code UPSTREAM_UNAVAILABLE} instead of inventing a success body (C-001, NFR-027).
+     */
+    static UpstreamClient unconfigured() {
+        return (context, request) -> CompletableFuture.failedFuture(
+                new UpstreamException("No upstream MCP server is configured"));
     }
 }
