@@ -24,12 +24,12 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
       <div className="p-space-md rounded-radius-full bg-grey-200 text-grey-400 mb-space-md">
         <Icon className="w-12 h-12" aria-hidden="true" />
       </div>
-      <h3 className="text-lg font-semibold text-grey-900 mb-space-xs">{title}</h3>
-      <p className="text-sm text-grey-500 max-w-md mb-space-md">{description}</p>
+      <h3 className="text-h3 font-semibold text-grey-900 mb-space-xs">{title}</h3>
+      <p className="text-body-small text-grey-500 max-w-md mb-space-md">{description}</p>
       {actionLabel && onAction && (
         <button
           onClick={onAction}
-          className="px-space-md py-space-sm bg-primary-500 hover:bg-primary-600 text-grey-900 font-medium text-sm rounded-radius-md transition-colors"
+          className="px-space-md py-space-sm bg-primary-500 hover:bg-primary-600 text-grey-900 font-medium text-body-small rounded-radius-md transition-colors"
         >
           {actionLabel}
         </button>

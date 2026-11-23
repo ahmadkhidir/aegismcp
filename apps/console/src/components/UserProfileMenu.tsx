@@ -70,12 +70,12 @@ export const UserProfileMenu: React.FC = () => {
         aria-label="User profile and session options"
         className="flex items-center gap-2 pl-space-sm border-l border-grey-300 hover:opacity-90 transition-opacity focus:outline-none"
       >
-        <div className="w-7 h-7 rounded-radius-full bg-primary-200 flex items-center justify-center text-primary-900 font-semibold text-xs border border-primary-400 flex-shrink-0">
+        <div className="w-7 h-7 rounded-radius-full bg-primary-200 flex items-center justify-center text-primary-900 font-semibold text-caption border border-primary-400 flex-shrink-0">
           <User className="w-3.5 h-3.5" />
         </div>
         <div className="hidden lg:block text-left">
-          <p className="text-xs font-medium text-grey-900 leading-none">{displayName}</p>
-          <p className="text-[10px] text-grey-500 font-mono leading-tight truncate max-w-[12rem]">
+          <p className="text-caption font-medium text-grey-900 leading-none">{displayName}</p>
+          <p className="text-caption text-grey-500 font-mono leading-tight truncate max-w-[12rem]">
             {displayRole}
           </p>
         </div>
@@ -88,20 +88,20 @@ export const UserProfileMenu: React.FC = () => {
           className="absolute right-0 mt-2 w-72 rounded-radius-lg bg-grey-100 border border-grey-300 shadow-xl z-50 p-space-md text-grey-900 animate-fade-in font-sans"
         >
           <div className="flex items-start gap-space-sm pb-space-sm border-b border-grey-300">
-            <div className="w-9 h-9 rounded-radius-full bg-primary-200 flex items-center justify-center text-primary-900 font-bold text-sm border border-primary-400 flex-shrink-0">
+            <div className="w-9 h-9 rounded-radius-full bg-primary-200 flex items-center justify-center text-primary-900 font-bold text-body-small border border-primary-400 flex-shrink-0">
               {displayName.charAt(0).toUpperCase()}
             </div>
             <div className="overflow-hidden flex-1">
-              <p className="text-sm font-bold text-grey-900 truncate">{displayName}</p>
-              <p className="text-xs text-grey-500 truncate font-mono">
+              <p className="text-body-small font-bold text-grey-900 truncate">{displayName}</p>
+              <p className="text-caption text-grey-500 truncate font-mono">
                 {user.email || 'Email not provided by the provider'}
               </p>
-              <p className="text-[10px] text-primary-800 font-mono mt-0.5 truncate">{user.idp}</p>
+              <p className="text-caption text-primary-800 font-mono mt-0.5 truncate">{user.idp}</p>
             </div>
           </div>
 
           <div className="py-space-sm border-b border-grey-300">
-            <div className="flex items-center gap-1 text-[11px] font-semibold text-grey-500 mb-1">
+            <div className="flex items-center gap-1 text-caption font-semibold text-grey-500 mb-1">
               <Shield className="w-3 h-3 text-primary-500" />
               <span>Directory roles</span>
             </div>
@@ -109,7 +109,7 @@ export const UserProfileMenu: React.FC = () => {
               {user.roles.map((role) => (
                 <span
                   key={role}
-                  className={`px-1.5 py-0.5 rounded-radius-sm text-[10px] font-mono font-bold uppercase border ${getRoleColor(
+                  className={`px-1.5 py-0.5 rounded-radius-sm text-caption font-mono font-bold uppercase border ${getRoleColor(
                     role
                   )}`}
                 >
@@ -119,7 +119,7 @@ export const UserProfileMenu: React.FC = () => {
             </div>
           </div>
 
-          <div className="py-space-sm border-b border-grey-300 flex items-center justify-between text-xs">
+          <div className="py-space-sm border-b border-grey-300 flex items-center justify-between text-caption">
             <div className="flex items-center gap-1.5 text-grey-500">
               <Clock className="w-3.5 h-3.5 text-warning-500" />
               <span>Session lock in:</span>
@@ -127,7 +127,7 @@ export const UserProfileMenu: React.FC = () => {
             <div className="flex items-center gap-1">
               <span
                 data-testid="idle-timer-display"
-                className={`font-mono text-xs font-bold ${
+                className={`font-mono text-caption font-bold ${
                   idleRemainingSeconds < 180 ? 'text-error-500 animate-pulse' : 'text-grey-700'
                 }`}
               >
@@ -152,7 +152,7 @@ export const UserProfileMenu: React.FC = () => {
                 setIsOpen(false);
               }}
               data-testid="logout-button"
-              className="w-full flex items-center gap-2 px-2 py-1.5 rounded-radius-md text-xs font-semibold text-error-500 hover:bg-error-500/10 hover:text-error-700 transition-colors"
+              className="w-full flex items-center gap-2 px-2 py-1.5 rounded-radius-md text-caption font-semibold text-error-500 hover:bg-error-500/10 hover:text-error-700 transition-colors"
             >
               <LogOut className="w-3.5 h-3.5" />
               <span>Sign Out</span>

@@ -212,4 +212,14 @@ describe('AuditExplorerScreen', () => {
 
     expect(await screen.findByText('No audit records found')).toBeInTheDocument();
   });
+
+  it('renders loading rows while the record query is in flight', async () => {
+    vi.mocked(AegisApi.getAuditRecords).mockReturnValue(
+      new Promise<{ records: AuditRecordItem[]; total: number }>(() => {})
+    );
+
+    render(<AuditExplorerScreen />);
+
+    expect(await screen.findAllByRole('status')).not.toHaveLength(0);
+  });
 });

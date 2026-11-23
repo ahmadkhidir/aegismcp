@@ -269,7 +269,7 @@ export const AuditExplorerScreen: React.FC = () => {
           <div>
             <div className="flex items-center gap-2 flex-wrap">
               <span
-                className={`text-xs font-mono font-bold uppercase ${
+                className={`text-caption font-mono font-bold uppercase ${
                   integrityUnavailable ? 'text-warning-700' : 'text-success-500'
                 }`}
               >
@@ -281,16 +281,16 @@ export const AuditExplorerScreen: React.FC = () => {
                   ? 'Cryptographic chain verified'
                   : 'Ledger integrity alert'}
               </span>
-              <span className="text-xs font-mono text-grey-500">(SHA-256 hash chain)</span>
+              <span className="text-caption font-mono text-grey-500">(SHA-256 hash chain)</span>
             </div>
-            <p className="text-sm font-semibold text-grey-900 mt-0.5">
+            <p className="text-body-small font-semibold text-grey-900 mt-0.5">
               {integrity
                 ? `${integrity.totalVerifiedBlocks.toLocaleString()} sealed blocks covered by the last completed verification`
                 : integrityLoading
                 ? 'Loading the last completed verification…'
                 : 'No verification result is available.'}
             </p>
-            <p className="text-[11px] font-mono text-grey-500 mt-0.5">
+            <p className="text-caption font-mono text-grey-500 mt-0.5">
               {integrity
                 ? `Last verified ${new Date(integrity.lastVerifiedAt).toLocaleString()}`
                 : '—'}
@@ -302,7 +302,7 @@ export const AuditExplorerScreen: React.FC = () => {
           onClick={handleVerifyNow}
           disabled={verifying || integrityLoading}
           data-testid="verify-now-button"
-          className="inline-flex items-center gap-1.5 px-space-md py-space-sm bg-grey-200 hover:bg-grey-300 text-grey-900 font-semibold text-xs rounded-radius-md transition-colors disabled:opacity-50 border border-grey-300"
+          className="inline-flex items-center gap-1.5 px-space-md py-space-sm bg-grey-200 hover:bg-grey-300 text-grey-900 font-semibold text-caption rounded-radius-md transition-colors disabled:opacity-50 border border-grey-300"
         >
           <RotateCw className={`w-3.5 h-3.5 ${verifying ? 'animate-spin' : ''}`} />
           <span>{verifying ? 'Reading verification status...' : 'Refresh Status'}</span>
@@ -313,7 +313,7 @@ export const AuditExplorerScreen: React.FC = () => {
         <div
           data-testid="export-accepted-banner"
           role="status"
-          className="p-space-sm rounded-radius-md bg-info-100 border border-info-300 text-info-900 text-xs"
+          className="p-space-sm rounded-radius-md bg-info-100 border border-info-300 text-info-900 text-caption"
         >
           {exportNotice}
         </div>
@@ -330,12 +330,12 @@ export const AuditExplorerScreen: React.FC = () => {
               <AlertTriangle className="w-6 h-6 text-error-700" />
             </div>
             <div>
-              <span className="text-xs font-mono font-bold text-error-700 uppercase">
+              <span className="text-caption font-mono font-bold text-error-700 uppercase">
                 {integrity?.valid === false
                   ? 'Cryptographic integrity alert'
                   : 'Ledger integrity unavailable'}
               </span>
-              <p className="text-sm font-semibold text-error-900 mt-0.5">{integrityError}</p>
+              <p className="text-body-small font-semibold text-error-900 mt-0.5">{integrityError}</p>
             </div>
           </div>
           <button
@@ -362,19 +362,19 @@ export const AuditExplorerScreen: React.FC = () => {
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
               placeholder="Search by agent, tool, or SHA-256 hash..."
-              className="pl-8 pr-space-md py-1.5 bg-grey-200 border border-grey-300 rounded-radius-md text-xs text-grey-900 placeholder:text-grey-500 focus:border-primary-500 outline-none w-full sm:w-72 font-mono"
+              className="pl-8 pr-space-md py-1.5 bg-grey-200 border border-grey-300 rounded-radius-md text-caption text-grey-900 placeholder:text-grey-500 focus:border-primary-500 outline-none w-full sm:w-72 font-mono"
             />
           </div>
 
           <button
             type="submit"
             data-testid="audit-search-button"
-            className="px-space-md py-1.5 bg-grey-200 hover:bg-grey-300 border border-grey-300 rounded-radius-md text-xs font-semibold text-grey-800"
+            className="px-space-md py-1.5 bg-grey-200 hover:bg-grey-300 border border-grey-300 rounded-radius-md text-caption font-semibold text-grey-800"
           >
             Search
           </button>
 
-          <div className="flex items-center gap-1.5 bg-grey-200 border border-grey-300 rounded-radius-md px-2 py-1 text-xs font-mono">
+          <div className="flex items-center gap-1.5 bg-grey-200 border border-grey-300 rounded-radius-md px-2 py-1 text-caption font-mono">
             <Filter className="w-3.5 h-3.5 text-grey-500" />
             <select
               value={decisionFilter}
@@ -396,7 +396,7 @@ export const AuditExplorerScreen: React.FC = () => {
             setIsExportModalOpen(true);
           }}
           data-testid="export-report-button"
-          className="inline-flex items-center gap-1.5 px-space-md py-1.5 bg-primary-500 hover:bg-primary-600 text-grey-900 font-bold text-xs rounded-radius-md transition-colors shadow-sm"
+          className="inline-flex items-center gap-1.5 px-space-md py-1.5 bg-primary-500 hover:bg-primary-600 text-grey-900 font-bold text-caption rounded-radius-md transition-colors shadow-sm"
         >
           <Download className="w-3.5 h-3.5" />
           <span>Export Compliance Report</span>
@@ -424,7 +424,7 @@ export const AuditExplorerScreen: React.FC = () => {
         />
       ) : (
         <div className="bg-grey-100 border border-grey-300 rounded-radius-md overflow-x-auto shadow-sm">
-          <table className="w-full min-w-[900px] text-left text-xs font-mono">
+          <table className="w-full min-w-[900px] text-left text-caption font-mono">
             <thead className="bg-grey-200 border-b border-grey-300 text-grey-500">
               <tr>
                 <th className="py-2.5 px-space-md font-medium">Block #</th>
@@ -501,7 +501,7 @@ export const AuditExplorerScreen: React.FC = () => {
             </tbody>
           </table>
 
-          <div className="p-space-sm bg-grey-200 border-t border-grey-300 flex items-center justify-between text-xs font-mono text-grey-700">
+          <div className="p-space-sm bg-grey-200 border-t border-grey-300 flex items-center justify-between text-caption font-mono text-grey-700">
             <span data-testid="pagination-info">
               Showing {records.length > 0 ? page * PAGE_SIZE + 1 : 0} -{' '}
               {Math.min((page + 1) * PAGE_SIZE, totalRecords)} of {totalRecords} records
@@ -544,7 +544,7 @@ export const AuditExplorerScreen: React.FC = () => {
             <div className="flex items-center justify-between pb-space-xs border-b border-grey-300">
               <div className="flex items-center gap-2">
                 <FileCheck2 className="w-5 h-5 text-success-500" />
-                <h3 id="proof-dialog-title" className="font-bold text-sm text-grey-900">
+                <h3 id="proof-dialog-title" className="font-bold text-body-small text-grey-900">
                   Cryptographic Ledger Proof #{selectedRecord.blockIndex}
                 </h3>
               </div>
@@ -557,7 +557,7 @@ export const AuditExplorerScreen: React.FC = () => {
               </button>
             </div>
 
-            <div className="space-y-space-sm text-xs font-mono">
+            <div className="space-y-space-sm text-caption font-mono">
               <div className="p-space-sm bg-grey-200 rounded-radius-md space-y-1">
                 <span className="text-grey-500 block">Block SHA-256 hash:</span>
                 <span className="text-primary-700 break-all">{selectedRecord.blockHash}</span>
@@ -603,7 +603,7 @@ export const AuditExplorerScreen: React.FC = () => {
             <div className="flex justify-end pt-space-xs">
               <button
                 onClick={() => setSelectedRecord(null)}
-                className="px-space-md py-space-sm bg-grey-200 hover:bg-grey-300 rounded-radius-md text-xs font-medium text-grey-800"
+                className="px-space-md py-space-sm bg-grey-200 hover:bg-grey-300 rounded-radius-md text-caption font-medium text-grey-800"
               >
                 Close Proof
               </button>
@@ -621,7 +621,7 @@ export const AuditExplorerScreen: React.FC = () => {
         >
           <div className="w-full max-w-md bg-grey-100 border border-grey-300 rounded-radius-lg p-space-lg shadow-xl space-y-space-md">
             <div className="flex items-center justify-between pb-space-xs border-b border-grey-300">
-              <h3 id="export-dialog-title" className="font-bold text-sm text-grey-900">
+              <h3 id="export-dialog-title" className="font-bold text-body-small text-grey-900">
                 Export Tamper-Evident Audit Report
               </h3>
               <button
@@ -637,13 +637,13 @@ export const AuditExplorerScreen: React.FC = () => {
               <div
                 role="alert"
                 data-testid="export-error"
-                className="p-space-sm bg-error-100 border border-error-300 text-error-900 rounded-radius-md text-xs"
+                className="p-space-sm bg-error-100 border border-error-300 text-error-900 rounded-radius-md text-caption"
               >
                 {exportError}
               </div>
             )}
 
-            <div className="space-y-space-sm text-xs">
+            <div className="space-y-space-sm text-caption">
               <div>
                 <label className="block text-grey-600 font-semibold mb-1" htmlFor="export-framework">
                   Compliance Framework
@@ -716,7 +716,7 @@ export const AuditExplorerScreen: React.FC = () => {
             <div className="flex justify-end gap-space-sm pt-space-xs border-t border-grey-300">
               <button
                 onClick={() => setIsExportModalOpen(false)}
-                className="px-space-md py-space-sm rounded-radius-md text-xs text-grey-600 hover:text-grey-900"
+                className="px-space-md py-space-sm rounded-radius-md text-caption text-grey-600 hover:text-grey-900"
               >
                 Cancel
               </button>
@@ -724,7 +724,7 @@ export const AuditExplorerScreen: React.FC = () => {
                 onClick={handleDownloadExport}
                 disabled={isExporting}
                 data-testid="confirm-download-report"
-                className="inline-flex items-center gap-1.5 px-space-md py-space-sm bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-grey-900 font-bold text-xs rounded-radius-md transition-colors"
+                className="inline-flex items-center gap-1.5 px-space-md py-space-sm bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-grey-900 font-bold text-caption rounded-radius-md transition-colors"
               >
                 {isExporting ? (
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />

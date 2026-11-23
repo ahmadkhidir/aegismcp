@@ -34,14 +34,14 @@ export const SessionTimeoutModal: React.FC<SessionTimeoutModalProps> = ({
             <Lock className="w-5 h-5 text-warning-500" />
           </div>
           <div>
-            <h3 id="timeout-modal-title" className="text-base font-bold text-grey-900">
+            <h3 id="timeout-modal-title" className="text-body font-bold text-grey-900">
               Session locked
             </h3>
-            <p className="text-xs text-grey-500">15 minutes of inactivity reached</p>
+            <p className="text-caption text-grey-500">15 minutes of inactivity reached</p>
           </div>
         </div>
 
-        <div className="p-space-sm rounded-radius-md bg-grey-200 border border-grey-300 mb-space-lg text-xs space-y-1.5">
+        <div className="p-space-sm rounded-radius-md bg-grey-200 border border-grey-300 mb-space-lg text-caption space-y-1.5">
           <div className="flex items-center gap-1.5 text-grey-700 font-medium">
             <ShieldAlert className="w-3.5 h-3.5 text-warning-500" />
             <span>
@@ -60,7 +60,7 @@ export const SessionTimeoutModal: React.FC<SessionTimeoutModalProps> = ({
             type="button"
             onClick={onLogout}
             data-testid="timeout-logout-button"
-            className="w-full sm:w-auto px-space-md py-2 rounded-radius-md text-xs font-semibold text-grey-600 hover:text-grey-900 hover:bg-grey-200 transition-colors flex items-center justify-center gap-1.5"
+            className="w-full sm:w-auto px-space-md py-2 rounded-radius-md text-caption font-semibold text-grey-600 hover:text-grey-900 hover:bg-grey-200 transition-colors flex items-center justify-center gap-1.5"
           >
             <LogOut className="w-3.5 h-3.5" />
             <span>Sign Out</span>
@@ -70,7 +70,7 @@ export const SessionTimeoutModal: React.FC<SessionTimeoutModalProps> = ({
             type="button"
             onClick={onRenew}
             data-testid="timeout-renew-button"
-            className="w-full sm:w-auto px-space-lg py-2 rounded-radius-md text-xs font-bold bg-primary-600 hover:bg-primary-500 text-grey-900 shadow-sm transition-all flex items-center justify-center gap-1.5"
+            className="w-full sm:w-auto px-space-lg py-2 rounded-radius-md text-caption font-bold bg-primary-600 hover:bg-primary-500 text-grey-900 shadow-sm transition-all flex items-center justify-center gap-1.5"
           >
             <span>Resume Session</span>
             <ArrowRight className="w-3.5 h-3.5" />

@@ -21,15 +21,15 @@ export const ErrorState: React.FC<ErrorStateProps> = ({
       <div className="flex items-start gap-space-sm">
         <AlertTriangle className="w-6 h-6 text-error-500 flex-shrink-0 mt-0.5" />
         <div>
-          <h4 className="font-semibold text-sm text-error-900">{title}</h4>
-          <p className="text-xs text-error-700 mt-0.5">{message}</p>
+          <h4 className="font-semibold text-body-small text-error-900">{title}</h4>
+          <p className="text-caption text-error-700 mt-0.5">{message}</p>
         </div>
       </div>
       {onRetry && (
         <button
           onClick={onRetry}
           data-testid="retry-button"
-          className="inline-flex items-center gap-1.5 px-space-md py-space-xs bg-error-500 hover:bg-error-700 text-grey-900 font-medium text-xs rounded-radius-md transition-colors flex-shrink-0"
+          className="inline-flex items-center gap-1.5 px-space-md py-space-xs bg-error-500 hover:bg-error-700 text-grey-900 font-medium text-caption rounded-radius-md transition-colors flex-shrink-0"
         >
           <RotateCw className="w-3.5 h-3.5" />
           <span>Retry Connection</span>

@@ -19,11 +19,18 @@ import { AuditExplorerScreen } from './screens/AuditExplorerScreen';
 import { AegisApi } from './services/api';
 import { ThreatLevel } from './types/contracts';
 import { AuthProvider, useAuth } from './context/AuthContext';
-
-const SCREEN_IDS: ScreenId[] = ['dashboard', 'inspector', 'approvals', 'policies', 'audit'];
+import {
+  SCREEN_IDS,
+  canAccessScreen,
+  canManagePolicy,
+  canOperateEmergency,
+  canReadApprovals,
+  canSimulatePolicy,
+} from './context/access';
 
 const AppContent: React.FC = () => {
   const { isAuthenticated, isSessionExpired, renewSession, logout, user } = useAuth();
+  const roles = user?.roles ?? [];
 
   const getInitialScreen = (): ScreenId => {
     const hash = window.location.hash.replace('#/', '').replace('#', '');
@@ -40,11 +47,18 @@ const AppContent: React.FC = () => {
   const [pendingCount, setPendingCount] = useState<number | null>(null);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
-  const handleNavigate = (screen: ScreenId) => {
-    setCurrentScreen(screen);
-    setIsMobileSidebarOpen(false);
-    window.location.hash = `#/${screen}`;
-  };
+  const canReadPendingApprovals = canReadApprovals(roles);
+  const canUseEmergencyControls = canOperateEmergency(roles);
+
+  const handleNavigate = useCallback(
+    (screen: ScreenId) => {
+      if (!canAccessScreen(roles, screen)) return;
+      setCurrentScreen(screen);
+      setIsMobileSidebarOpen(false);
+      window.location.hash = `#/${screen}`;
+    },
+    [roles]
+  );
 
   useEffect(() => {
     const handleHashChange = () => {
@@ -57,6 +71,15 @@ const AppContent: React.FC = () => {
     window.addEventListener('hashchange', handleHashChange);
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
+
+  // A deep link or a role change never leaves the operator on a screen whose
+  // contract would refuse them; the dashboard admits every console role.
+  useEffect(() => {
+    if (isAuthenticated && !canAccessScreen(roles, currentScreen)) {
+      setCurrentScreen('dashboard');
+      window.location.hash = '#/dashboard';
+    }
+  }, [isAuthenticated, roles, currentScreen]);
 
   useEffect(() => {
     const handleOnline = () => setIsOffline(false);
@@ -72,13 +95,17 @@ const AppContent: React.FC = () => {
   }, []);
 
   const refreshPendingCount = useCallback(async () => {
+    if (!canReadPendingApprovals) {
+      setPendingCount(null);
+      return;
+    }
     try {
       const approvals = await AegisApi.getPendingApprovals(3);
       setPendingCount(approvals.tickets.length);
     } catch {
       setPendingCount(null);
     }
-  }, []);
+  }, [canReadPendingApprovals]);
 
   const applySystemEvent = useCallback((status: ThreatLevel, pendingApprovals: number) => {
     setThreatLevel(status);
@@ -105,6 +132,11 @@ const AppContent: React.FC = () => {
     };
   }, [isAuthenticated, refreshPendingCount]);
 
+  const openKillSwitch = useCallback(() => {
+    if (!canUseEmergencyControls) return;
+    setIsKillSwitchOpen(true);
+  }, [canUseEmergencyControls]);
+
   const handleKillSwitchConfirm = async (
     req: Parameters<typeof AegisApi.triggerEmergencyKill>[0]
   ) => {
@@ -127,51 +159,65 @@ const AppContent: React.FC = () => {
     return <LoginScreen />;
   }
 
+  const activeScreen = canAccessScreen(roles, currentScreen) ? currentScreen : 'dashboard';
+
   return (
     <div className="min-h-screen bg-grey-50 text-grey-900 flex flex-col font-sans">
       <OfflineBanner isOffline={isOffline} />
 
       <Navbar
         threatLevel={threatLevel}
-        onOpenKillSwitch={() => setIsKillSwitchOpen(true)}
+        onOpenKillSwitch={openKillSwitch}
         onToggleMobileMenu={() => setIsMobileSidebarOpen((prev) => !prev)}
       />
 
       <div className="flex-1 flex overflow-hidden relative">
         <Sidebar
-          currentScreen={currentScreen}
+          currentScreen={activeScreen}
           onNavigate={handleNavigate}
-          pendingApprovalsCount={pendingCount ?? 0}
+          roles={roles}
+          pendingApprovalsCount={canReadPendingApprovals ? pendingCount ?? 0 : 0}
           isOpen={isMobileSidebarOpen}
           onClose={() => setIsMobileSidebarOpen(false)}
         />
 
         <main className="flex-1 overflow-y-auto">
-          {currentScreen === 'dashboard' && (
+          {activeScreen === 'dashboard' && (
             <DashboardScreen
               onNavigateTo={handleNavigate}
-              onOpenKillSwitch={() => setIsKillSwitchOpen(true)}
+              onOpenKillSwitch={openKillSwitch}
               threatLevel={threatLevel}
+              canReadApprovals={canReadPendingApprovals}
+              canOperateEmergency={canUseEmergencyControls}
             />
           )}
-          {currentScreen === 'inspector' && (
+          {activeScreen === 'inspector' && (
             <LiveInspectorScreen
               onReconnected={refreshPendingCount}
               onSystemEvent={applySystemEvent}
               onApprovalEvent={refreshPendingCount}
             />
           )}
-          {currentScreen === 'approvals' && <ApprovalsQueueScreen />}
-          {currentScreen === 'policies' && <PolicyManagerScreen />}
-          {currentScreen === 'audit' && <AuditExplorerScreen />}
+          {activeScreen === 'approvals' && (
+            <ApprovalsQueueScreen canReviewPending={canReadPendingApprovals} />
+          )}
+          {activeScreen === 'policies' && (
+            <PolicyManagerScreen
+              canManagePolicy={canManagePolicy(roles)}
+              canSimulatePolicy={canSimulatePolicy(roles)}
+            />
+          )}
+          {activeScreen === 'audit' && <AuditExplorerScreen />}
         </main>
       </div>
 
-      <KillSwitchModal
-        isOpen={isKillSwitchOpen}
-        onClose={() => setIsKillSwitchOpen(false)}
-        onConfirm={handleKillSwitchConfirm}
-      />
+      {canUseEmergencyControls && (
+        <KillSwitchModal
+          isOpen={isKillSwitchOpen}
+          onClose={() => setIsKillSwitchOpen(false)}
+          onConfirm={handleKillSwitchConfirm}
+        />
+      )}
 
       <SessionTimeoutModal
         isOpen={isSessionExpired}

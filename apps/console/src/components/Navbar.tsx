@@ -18,7 +18,7 @@ interface NavbarProps {
 
 export const Navbar: React.FC<NavbarProps> = ({ threatLevel, onOpenKillSwitch, onToggleMobileMenu }) => {
   const { hasRole } = useAuth();
-  const canTriggerKillSwitch = hasRole('admin');
+  const canTriggerKillSwitch = hasRole(['admin', 'operator']);
 
   return (
     <header className="h-14 border-b border-grey-300 bg-grey-100 px-space-md sm:px-space-lg flex items-center justify-between sticky top-0 z-40">
@@ -49,8 +49,8 @@ export const Navbar: React.FC<NavbarProps> = ({ threatLevel, onOpenKillSwitch, o
           </svg>
         </div>
         <div className="flex items-center gap-1.5">
-          <span className="font-bold text-lg tracking-tight text-grey-900 font-sans">Aegis</span>
-          <span className="font-mono text-xs font-semibold px-1.5 py-0.5 rounded-radius-sm bg-grey-200 text-primary-800 border border-grey-300">
+          <span className="font-bold text-h3 tracking-tight text-grey-900 font-sans">Aegis</span>
+          <span className="font-mono text-caption font-semibold px-1.5 py-0.5 rounded-radius-sm bg-grey-200 text-primary-800 border border-grey-300">
             MCP
           </span>
         </div>
@@ -64,9 +64,9 @@ export const Navbar: React.FC<NavbarProps> = ({ threatLevel, onOpenKillSwitch, o
           title={
             canTriggerKillSwitch
               ? 'Open the emergency kill-switch'
-              : 'The admin role is required to use the kill-switch'
+              : 'The operator or admin role is required to use the kill-switch'
           }
-          className={`px-space-md py-1.5 rounded-radius-md text-xs font-bold transition-all shadow-sm flex items-center gap-1.5 ${
+          className={`px-space-md py-1.5 rounded-radius-md text-caption font-bold transition-all shadow-sm flex items-center gap-1.5 ${
             !canTriggerKillSwitch
               ? 'opacity-40 cursor-not-allowed bg-grey-200 text-grey-500 border border-grey-300'
               : threatLevel === 'LOCKDOWN'

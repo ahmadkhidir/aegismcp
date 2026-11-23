@@ -34,14 +34,14 @@ export const JsonViewer: React.FC<JsonViewerProps> = ({
   };
 
   return (
-    <div className="rounded-radius-md border border-grey-300 bg-grey-50 overflow-hidden font-mono text-xs">
+    <div className="rounded-radius-md border border-grey-300 bg-grey-50 overflow-hidden font-mono text-caption">
       <div className="flex items-center justify-between px-space-md py-space-xs bg-grey-100 border-b border-grey-300 text-grey-500">
         <div className="flex items-center gap-space-sm">
           <span className="font-semibold text-grey-700">{title}</span>
           {redactionCount > 0 && (
             <span
               data-testid="redaction-badge"
-              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-radius-sm bg-accent-100 text-accent-900 border border-accent-300 text-[11px]"
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-radius-sm bg-accent-100 text-accent-900 border border-accent-300 text-caption"
             >
               <ShieldAlert className="w-3 h-3 text-accent-500" />
               <span>{redactionCount} DLP redacted</span>
@@ -59,7 +59,7 @@ export const JsonViewer: React.FC<JsonViewerProps> = ({
       </div>
 
       {redactions && redactions.length > 0 && (
-        <div className="px-space-md py-space-xs bg-accent-100/30 border-b border-accent-300/30 text-[11px] text-accent-900 flex flex-wrap gap-2">
+        <div className="px-space-md py-space-xs bg-accent-100/30 border-b border-accent-300/30 text-caption text-accent-900 flex flex-wrap gap-2">
           {redactions.map((redaction) => (
             <span
               key={`${redaction.category}-${redaction.type}`}
