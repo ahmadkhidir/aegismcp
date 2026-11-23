@@ -1,0 +1,110 @@
+# Continuous integration for every pull request and every push to main.
+#
+# Phase 0 (Foundation) requires the gateway, CLI, and console suites plus the packaged-artifact
+# boot check to run as required jobs, so a failure in any of them fails the workflow and blocks
+# the pull request. The gateway and CLI suites also cover the latency-sensitive paths the
+# specification budgets in NFR-001 and NFR-002.
+#
+# Every job installs the pinned toolchain itself (Java 21 via actions/setup-java, Node via
+# actions/setup-node) and installs dependencies from the committed lockfile, so a job never
+# depends on another job's workspace.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# The workflow reads the repository; it never needs a write token.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gateway-tests:
+    name: Gateway tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Run the gateway test suite
+        run: ./gradlew :services:gateway:test --console=plain
+
+  cli-tests:
+    name: CLI tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Run the CLI test suite
+        run: ./gradlew :apps:cli:test --console=plain
+
+  console-tests:
+    name: Console tests and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/console
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/console/package-lock.json
+      - name: Install from the lockfile
+        run: npm ci
+      - name: Run the console component tests
+        run: npm test
+      - name: Type-check and build the console
+        run: npm run build
+
+  artifact-boot-check:
+    name: Packaged artifact boot check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Build the distribution, boot it, and assert GET /health
+        run: scripts/verify-artifact
+
+  contract-set:
+    name: Contract set validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Validate the contract set
+        run: scripts/check-contracts
