@@ -6,8 +6,7 @@ labels: ""
 assignees: ""
 ---
 
-Class: implement | fix | verify | spec | asset | chore
-Area:
+Class: implement | fix | verify | spec | chore
 Own:
 Depends on: none
 Contract:
