@@ -49,9 +49,18 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
     private final UpstreamClient upstreamClient;
     private final ExecutorService virtualExecutor;
     private final boolean requireAuth;
+    private final boolean verifiedIdentityOnly;
+    private final AuditTrail auditTrail;
 
     public McpProxyHandler() {
-        this(DEFAULT_RPC_PATH, ToolCallInterceptor.allowAll(), UpstreamClient.mockEcho(), false);
+        // Fail-closed pass-through seam: the handler forwards non-owned paths untouched and refuses
+        // any tool call because no interceptor chain or upstream was supplied. The shipped path is
+        // assembled by AegisGatewayServer and never selects this constructor.
+        this(DEFAULT_RPC_PATH, JsonRpcCodec.getInstance(),
+                (context, request) -> CompletableFuture.completedFuture(InterceptionVerdict.block(
+                        JsonRpcError.internalError("No interceptor chain is configured"))),
+                UpstreamClient.unconfigured(), Executors.newVirtualThreadPerTaskExecutor(), false,
+                AuditTrail.noop(), false);
     }
 
     public McpProxyHandler(ToolCallInterceptor interceptor, UpstreamClient upstreamClient) {
@@ -69,6 +78,17 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
 
     public McpProxyHandler(String rpcPath, JsonRpcCodec codec, ToolCallInterceptor interceptor,
                            UpstreamClient upstreamClient, ExecutorService virtualExecutor, boolean requireAuth) {
+        this(rpcPath, codec, interceptor, upstreamClient, virtualExecutor, requireAuth,
+                AuditTrail.noop(), false);
+    }
+
+    /**
+     * Shipped constructor: the identity was verified at the edge and bound to the channel, and every
+     * terminal outcome is recorded to the audit trail.
+     */
+    public McpProxyHandler(String rpcPath, JsonRpcCodec codec, ToolCallInterceptor interceptor,
+                           UpstreamClient upstreamClient, ExecutorService virtualExecutor, boolean requireAuth,
+                           AuditTrail auditTrail, boolean verifiedIdentityOnly) {
         super(false); // Manual retain/release control for pass-through compatibility
         this.rpcPath = Objects.requireNonNull(rpcPath, "rpcPath must not be null");
         this.codec = Objects.requireNonNull(codec, "codec must not be null");
@@ -76,6 +96,23 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
         this.upstreamClient = Objects.requireNonNull(upstreamClient, "upstreamClient must not be null");
         this.virtualExecutor = Objects.requireNonNull(virtualExecutor, "virtualExecutor must not be null");
         this.requireAuth = requireAuth;
+        this.verifiedIdentityOnly = verifiedIdentityOnly;
+        this.auditTrail = auditTrail != null ? auditTrail : AuditTrail.noop();
+    }
+
+    /**
+     * Records a terminal outcome of one proxied request. Implementations must not persist the raw
+     * tool arguments or response payload (FEAT-007, NFR-023); the summary is the method name, the
+     * verdict, and the HTTP status only.
+     */
+    @FunctionalInterface
+    public interface AuditTrail {
+        void record(String agentId, String toolName, String decision, double latencyMs, String summary);
+
+        static AuditTrail noop() {
+            return (agentId, toolName, decision, latencyMs, summary) -> {
+            };
+        }
     }
 
     @Override
@@ -97,18 +134,23 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
 
     private void processMcpRequest(ChannelHandlerContext ctx, FullHttpRequest request) {
         boolean keepAlive = HttpUtil.isKeepAlive(request);
+        long startedAt = System.nanoTime();
         try {
             if (!HttpMethod.POST.equals(request.method())) {
+                audit("unauthenticated", "mcp/rpc", "METHOD_NOT_ALLOWED", startedAt,
+                        "method=" + request.method() + " status=405");
                 sendError(ctx, JsonRpcId.nullId(),
-                        new JsonRpcError(JsonRpcError.INVALID_REQUEST, "Method Not Allowed: MCP RPC endpoint requires POST"),
+                        JsonRpcError.invalidRequest("MCP RPC endpoint requires POST"),
                         HttpResponseStatus.METHOD_NOT_ALLOWED, keepAlive);
                 return;
             }
 
-            AgentIdentity identity = AgentIdentity.extract(request, ctx);
+            AgentIdentity identity = resolveIdentity(request, ctx);
             SecurityContext securityContext = SecurityContext.of(identity, ctx.channel().remoteAddress());
 
             if (requireAuth && !securityContext.isAuthenticated()) {
+                audit(identity.agentId(), "mcp/authentication", "AUTHENTICATION_FAILED", startedAt,
+                        "status=401");
                 sendError(ctx, JsonRpcId.nullId(),
                         JsonRpcError.authenticationFailed("Missing or invalid agent credentials"),
                         HttpResponseStatus.UNAUTHORIZED, keepAlive);
@@ -117,6 +159,7 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
 
             ByteBuf content = request.content();
             if (!content.isReadable()) {
+                audit(identity.agentId(), "mcp/rpc", "INVALID_REQUEST", startedAt, "empty body status=400");
                 sendError(ctx, JsonRpcId.nullId(),
                         JsonRpcError.invalidRequest("Empty request body"),
                         HttpResponseStatus.BAD_REQUEST, keepAlive);
@@ -128,24 +171,40 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
                 rpcRequest = codec.decodeRequest(content);
             } catch (JsonRpcCodecException e) {
                 logger.debug("Failed decoding JSON-RPC request: {}", e.getMessage());
+                audit(identity.agentId(), "mcp/rpc", "INVALID_REQUEST", startedAt,
+                        "status=" + e.getHttpStatus().code());
                 sendError(ctx, e.getId(), e.getError(), e.getHttpStatus(), keepAlive);
                 return;
             }
 
-            executeInterceptionPipeline(ctx, securityContext, rpcRequest, keepAlive);
+            executeInterceptionPipeline(ctx, securityContext, rpcRequest, keepAlive, startedAt);
 
         } catch (Exception e) {
             logger.error("Unhandled error in MCP proxy pipeline", e);
+            audit("unauthenticated", "mcp/rpc", "INTERNAL_ERROR", startedAt, "status=500");
             sendError(ctx, JsonRpcId.nullId(),
-                    JsonRpcError.internalError("Proxy pipeline internal error: " + e.getMessage()),
+                    JsonRpcError.internalError("The gateway could not complete the request"),
                     HttpResponseStatus.INTERNAL_SERVER_ERROR, keepAlive);
         } finally {
             request.release();
         }
     }
 
+    /**
+     * Reads the identity the edge bound to the channel. The shipped path never trusts a header the
+     * gateway did not verify; the header fallback exists only for the handler's own unit seam, which
+     * is never attached without the identity verifier in front of it (FEAT-009, NFR-027).
+     */
+    private AgentIdentity resolveIdentity(FullHttpRequest request, ChannelHandlerContext ctx) {
+        AgentIdentity verified = ctx.channel().attr(AgentIdentity.VERIFIED_ATTRIBUTE).get();
+        if (verified != null) {
+            return verified;
+        }
+        return verifiedIdentityOnly ? AgentIdentity.anonymous() : AgentIdentity.extract(request, ctx);
+    }
+
     private void executeInterceptionPipeline(ChannelHandlerContext ctx, SecurityContext securityContext,
-                                            JsonRpcRequest rpcRequest, boolean keepAlive) {
+                                            JsonRpcRequest rpcRequest, boolean keepAlive, long startedAt) {
         if (rpcRequest.isToolCall()) {
             logger.debug("Intercepting MCP tool call: {} for agent: {}",
                     rpcRequest.toolName(), securityContext.identity().agentId());
@@ -163,44 +222,54 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
 
                         return upstreamClient.forward(securityContext, targetRequest);
                     })
-                    .whenComplete((response, throwable) -> handlePipelineResult(ctx, rpcRequest.id(), response, throwable, keepAlive));
+                    .whenComplete((response, throwable) -> handlePipelineResult(
+                            ctx, securityContext, rpcRequest, response, throwable, keepAlive, startedAt));
         } else {
             // Non-tool call (e.g. tools/list, initialize, ping) passes directly to upstream
             upstreamClient.forward(securityContext, rpcRequest)
-                    .whenComplete((response, throwable) -> handlePipelineResult(ctx, rpcRequest.id(), response, throwable, keepAlive));
+                    .whenComplete((response, throwable) -> handlePipelineResult(
+                            ctx, securityContext, rpcRequest, response, throwable, keepAlive, startedAt));
         }
     }
 
-    private void handlePipelineResult(ChannelHandlerContext ctx, JsonRpcId requestId,
-                                       JsonRpcResponse response, Throwable throwable, boolean keepAlive) {
+    private void handlePipelineResult(ChannelHandlerContext ctx, SecurityContext securityContext,
+                                       JsonRpcRequest rpcRequest, JsonRpcResponse response,
+                                       Throwable throwable, boolean keepAlive, long startedAt) {
+        String agentId = securityContext.identity().agentId();
+        String toolName = rpcRequest.toolName() != null ? rpcRequest.toolName() : rpcRequest.method();
+
         if (throwable != null) {
-            logger.error("Upstream forwarding failed for request {}", requestId, throwable);
+            logger.error("Upstream forwarding failed for request {}", rpcRequest.id(), throwable);
             Throwable cause = throwable.getCause() != null ? throwable.getCause() : throwable;
             if (cause instanceof TimeoutException) {
-                sendError(ctx, requestId,
-                        JsonRpcError.approvalTimedOut("Upstream request timed out"),
+                audit(agentId, toolName, "APPROVAL_TIMEOUT", startedAt, "status=408");
+                sendError(ctx, rpcRequest.id(),
+                        JsonRpcError.approvalTimedOut("Approval deadline expired"),
                         HttpResponseStatus.REQUEST_TIMEOUT, keepAlive);
             } else {
-                sendError(ctx, requestId,
-                        JsonRpcError.upstreamUnavailable("Upstream MCP server unreachable: " + cause.getMessage()),
+                audit(agentId, toolName, "UPSTREAM_UNAVAILABLE", startedAt, "status=502");
+                sendError(ctx, rpcRequest.id(),
+                        JsonRpcError.upstreamUnavailable("The upstream MCP server did not answer"),
                         HttpResponseStatus.BAD_GATEWAY, keepAlive);
             }
             return;
         }
 
         if (response == null) {
-            sendError(ctx, requestId,
-                    JsonRpcError.internalError("Null response received from upstream"),
+            audit(agentId, toolName, "INTERNAL_ERROR", startedAt, "status=500");
+            sendError(ctx, rpcRequest.id(),
+                    JsonRpcError.internalError("The upstream MCP server returned no response"),
                     HttpResponseStatus.INTERNAL_SERVER_ERROR, keepAlive);
             return;
         }
 
         // Exact preservation of request id per C-001 / FEAT-001
         JsonRpcResponse responseWithMatchingId = response;
-        if (!Objects.equals(requestId, response.id()) && requestId != null && !(requestId instanceof JsonRpcId.NullId)) {
+        if (!Objects.equals(rpcRequest.id(), response.id())
+                && rpcRequest.id() != null && !(rpcRequest.id() instanceof JsonRpcId.NullId)) {
             responseWithMatchingId = response.isError()
-                    ? JsonRpcResponse.error(requestId, response.error())
-                    : JsonRpcResponse.success(requestId, response.result());
+                    ? JsonRpcResponse.error(rpcRequest.id(), response.error())
+                    : JsonRpcResponse.success(rpcRequest.id(), response.result());
         }
 
         HttpResponseStatus status = HttpResponseStatus.OK;
@@ -208,7 +277,20 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
             status = responseWithMatchingId.error().toHttpStatus();
         }
 
+        audit(agentId, toolName, responseWithMatchingId.isError() ? "BLOCKED" : "ALLOWED", startedAt,
+                "status=" + status.code());
         sendResponse(ctx, responseWithMatchingId, status, keepAlive);
+    }
+
+    private void audit(String agentId, String toolName, String decision, long startedAt, String summary) {
+        double latencyMs = (System.nanoTime() - startedAt) / 1_000_000.0;
+        try {
+            auditTrail.record(agentId, toolName, decision, latencyMs, summary);
+        } catch (RuntimeException e) {
+            // An audit sink failure must never turn into a client-visible success or an unhandled
+            // pipeline error; the ledger append reports its own failures.
+            logger.error("Failed to record audit outcome for decision {}", decision, e);
+        }
     }
 
     private void sendError(ChannelHandlerContext ctx, JsonRpcId id, JsonRpcError error,
@@ -243,7 +325,7 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         logger.error("Exception caught in McpProxyHandler", cause);
         sendError(ctx, JsonRpcId.nullId(),
-                JsonRpcError.internalError("Channel pipeline failure: " + cause.getMessage()),
+                JsonRpcError.internalError("The gateway could not complete the request"),
                 HttpResponseStatus.INTERNAL_SERVER_ERROR, false);
     }
 }

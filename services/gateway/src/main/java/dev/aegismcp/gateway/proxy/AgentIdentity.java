@@ -4,6 +4,7 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.ssl.SslHandler;
+import io.netty.util.AttributeKey;
 
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSession;
@@ -24,6 +25,14 @@ public record AgentIdentity(
 ) {
     public static final String BEARER_PREFIX = "Bearer ";
     public static final String HEADER_SPIFFE_ID = "X-Spiffe-Id";
+
+    /**
+     * Channel attribute carrying the identity the gateway verified at the edge. The proxy handler
+     * reads this instead of re-parsing headers, so a caller cannot assert an identity the edge did
+     * not verify (FEAT-009, NFR-027).
+     */
+    public static final AttributeKey<AgentIdentity> VERIFIED_ATTRIBUTE =
+            AttributeKey.valueOf("aegis.verifiedAgentIdentity");
 
     public static AgentIdentity anonymous() {
         return new AgentIdentity("anonymous", null, null, false);
