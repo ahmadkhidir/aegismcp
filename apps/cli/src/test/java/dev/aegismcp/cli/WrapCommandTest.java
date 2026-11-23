@@ -48,7 +48,7 @@ class WrapCommandTest {
     }
 
     @Test
-    @DisplayName("FEAT-003: Non-existent policy file returns exit code 1")
+    @DisplayName("FEAT-003: Non-existent policy file is an unreadable input path and exits 2")
     void testNonExistentPolicyFile() {
         ByteArrayOutputStream errContent = new ByteArrayOutputStream();
         PrintStream origErr = System.err;
@@ -59,8 +59,52 @@ class WrapCommandTest {
             CommandLine cmd = new CommandLine(new WrapCommand());
             int exitCode = cmd.execute("-p", "/tmp/does-not-exist-" + System.currentTimeMillis() + ".yaml", "--", "echo", "test");
 
-            assertEquals(1, exitCode);
-            assertTrue(errContent.toString().contains("Policy file does not exist"));
+            assertEquals(ExitCode.USAGE, exitCode);
+            assertTrue(errContent.toString().contains("Policy file not found"));
+        } finally {
+            System.setErr(origErr);
+        }
+    }
+
+    @Test
+    @DisplayName("FEAT-003 AC: A missing '--' separator is a usage error before any child exists")
+    void testMissingCommandSeparator() throws Exception {
+        Path policyFile = tempDir.resolve("separator-policy.yaml");
+        Files.writeString(policyFile, "id: separator\nname: Separator\nversion: 1.0\nrules: []\n");
+
+        ByteArrayOutputStream errContent = new ByteArrayOutputStream();
+        PrintStream origErr = System.err;
+
+        try {
+            System.setErr(new PrintStream(errContent));
+
+            CommandLine cmd = new CommandLine(new WrapCommand());
+            int exitCode = cmd.execute("-p", policyFile.toString(), "echo", "test");
+
+            assertEquals(ExitCode.USAGE, exitCode);
+            assertTrue(errContent.toString().contains("'--' separator"));
+        } finally {
+            System.setErr(origErr);
+        }
+    }
+
+    @Test
+    @DisplayName("FEAT-003: wrap has no SSE transport; --upstream is an unknown option")
+    void testUpstreamOptionIsRejected() throws Exception {
+        Path policyFile = tempDir.resolve("upstream-policy.yaml");
+        Files.writeString(policyFile, "id: upstream\nname: Upstream\nversion: 1.0\nrules: []\n");
+
+        ByteArrayOutputStream errContent = new ByteArrayOutputStream();
+        PrintStream origErr = System.err;
+
+        try {
+            System.setErr(new PrintStream(errContent));
+
+            CommandLine cmd = new CommandLine(new WrapCommand());
+            int exitCode = cmd.execute("-p", policyFile.toString(), "--upstream", "sse", "--", "echo", "test");
+
+            assertEquals(ExitCode.USAGE, exitCode);
+            assertTrue(errContent.toString().contains("--upstream"));
         } finally {
             System.setErr(origErr);
         }
@@ -114,6 +158,34 @@ class WrapCommandTest {
         );
 
         assertEquals(0, exitCode);
+    }
+
+    @Test
+    @DisplayName("FEAT-003: A non-zero child status is reported and mapped to exit code 1")
+    void testChildFailureMapsToDocumentedFailure() throws Exception {
+        Path policyFile = tempDir.resolve("child-failure-policy.yaml");
+        Files.writeString(policyFile, """
+                id: child-failure-policy
+                name: Child Failure Test
+                version: 1.0.0
+                rules: []
+                """);
+
+        String javaBin = ProcessHandle.current().info().command().orElse(System.getProperty("java.home") + "/bin/java");
+        String classPath = System.getProperty("java.class.path");
+
+        int exitCode = AegisCliMain.execute(
+                new PrintWriter(new StringWriter()),
+                new PrintWriter(new StringWriter()),
+                "wrap",
+                "-p", policyFile.toString(),
+                "--color=never",
+                "--",
+                javaBin, "-cp", classPath, "dev.aegismcp.cli.MockMcpChildServer", "exit-immediately", "9"
+        );
+
+        assertEquals(ExitCode.FAILURE, exitCode,
+                "a raw child status must not become the CLI exit code");
     }
 
     @Test

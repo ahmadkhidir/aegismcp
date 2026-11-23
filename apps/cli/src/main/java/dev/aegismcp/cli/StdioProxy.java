@@ -17,26 +17,40 @@ import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * High-performance Stdio proxy intercepting JSON-RPC MCP messages between parent client and child server.
- * Evaluates tool calls against declarative policies, scrubs responses via DLP engine, and logs inspections.
- * Anchors: FEAT-003, FEAT-005, NFR-001, NFR-002, C-001.
+ * High-performance Stdio proxy intercepting JSON-RPC MCP messages between parent client and child
+ * server. Evaluates tool calls against declarative policies, scrubs responses via the DLP engine,
+ * and logs inspections.
+ *
+ * <p>Child lifecycle is hermetic (FEAT-003): the child is spawned only after the command has
+ * validated its inputs; standard output and standard error are drained on their own virtual threads
+ * from the first byte; the child's input is closed on parent EOF; the child and every descendant are
+ * terminated on interruption, signal, or exit so no orphan outlives the CLI. A non-zero child status
+ * is reported and mapped onto {@link ExitCode#FAILURE}, because a raw status could collide with a
+ * code the CLI documents for a different outcome.
+ *
+ * <p>Anchors: FEAT-003, FEAT-005, NFR-001, NFR-002, C-001.
  */
 public class StdioProxy {
 
     private static final Logger logger = LoggerFactory.getLogger(StdioProxy.class);
+
+    /** Upper bound on a graceful child shutdown before the tree is killed. FEAT-003. */
+    private static final long SHUTDOWN_GRACE_MILLIS = 5_000L;
+
+    /** Upper bound on waiting for the drain threads after the child exits. */
+    private static final long DRAIN_JOIN_MILLIS = 5_000L;
 
     private final List<String> command;
     private final PolicyEvaluator policyEvaluator;
@@ -45,14 +59,25 @@ public class StdioProxy {
     private final AgentIdentity localAgentIdentity;
     private final JsonRpcCodec codec;
     private final AtomicBoolean running = new AtomicBoolean(false);
+    private final Object terminationLock = new Object();
+
+    /**
+     * Descendants seen while the child was alive. A child that exits after spawning a helper would
+     * otherwise be invisible to {@link Process#descendants()} by the time shutdown runs, leaving the
+     * helper orphaned. ProcessHandle identity is safe against PID reuse because the JDK compares the
+     * process start time before reporting one alive.
+     */
+    private final Set<ProcessHandle> observedDescendants = ConcurrentHashMap.newKeySet();
 
     private volatile Process childProcess;
+    private volatile int shutdownExitCode;
 
     public StdioProxy(List<String> command, PolicyEvaluator policyEvaluator) {
         this(command, policyEvaluator, DlpScrubber.getInstance(), new TerminalInspector());
     }
 
-    public StdioProxy(List<String> command, PolicyEvaluator policyEvaluator, DlpScrubber dlpScrubber, TerminalInspector inspector) {
+    public StdioProxy(List<String> command, PolicyEvaluator policyEvaluator, DlpScrubber dlpScrubber,
+                      TerminalInspector inspector) {
         this.command = List.copyOf(Objects.requireNonNull(command, "command must not be null"));
         this.policyEvaluator = Objects.requireNonNull(policyEvaluator, "policyEvaluator must not be null");
         this.dlpScrubber = Objects.requireNonNull(dlpScrubber, "dlpScrubber must not be null");
@@ -62,137 +87,219 @@ public class StdioProxy {
     }
 
     /**
-     * Starts the managed child process and runs stdio interception until streams close or process terminates.
-     * Returns child process exit code (or 1 on failure).
+     * Starts the managed child process and runs stdio interception until streams close or the
+     * process terminates.
+     *
+     * @return {@link ExitCode#SUCCESS} when the child exits 0, {@link ExitCode#FAILURE} when it
+     *         exits non-zero or cannot start, and {@link ExitCode#INTERRUPTED} when the proxy thread
+     *         is interrupted
      */
-    public int start(InputStream parentIn, PrintStream parentOut, PrintStream parentErr) throws IOException, InterruptedException {
+    public int start(InputStream parentIn, PrintStream parentOut, PrintStream parentErr) {
         if (command.isEmpty()) {
             inspector.logError("No target MCP server command provided.");
-            return 1;
+            return ExitCode.FAILURE;
         }
 
-        ProcessBuilder pb = new ProcessBuilder(command);
+        Process process;
         try {
-            childProcess = pb.start();
+            process = new ProcessBuilder(command).start();
         } catch (IOException e) {
             inspector.logError("Failed to launch target MCP server: " + e.getMessage());
-            return 1;
+            return ExitCode.FAILURE;
         }
-
+        childProcess = process;
         running.set(true);
 
-        // Register shutdown hook for graceful cleanup
         Thread shutdownHook = new Thread(this::terminateChildProcess, "aegis-cli-shutdown-hook");
         Runtime.getRuntime().addShutdownHook(shutdownHook);
 
+        Thread stdoutDrain = Thread.ofVirtual()
+                .name("aegis-cli-child-stdout")
+                .start(() -> drainStdout(process, parentOut));
+        Thread stderrDrain = Thread.ofVirtual()
+                .name("aegis-cli-child-stderr")
+                .start(() -> drainStderr(process, parentErr));
+
+        Thread descendantWatch = Thread.ofVirtual()
+                .name("aegis-cli-descendant-watch")
+                .start(() -> watchDescendants(process));
+
+        // When the child exits first, closing the parent channel unblocks a parent read that would
+        // otherwise keep the CLI alive after its upstream disappeared.
+        Thread exitWatcher = Thread.ofVirtual()
+                .name("aegis-cli-child-exit-watch")
+                .start(() -> {
+                    try {
+                        process.waitFor();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        running.set(false);
+                        closeQuietly(parentIn);
+                    }
+                });
+
+        int exitCode;
         try {
-            // Asynchronously drain child stderr to parentErr
-            Thread errDrainThread = Thread.ofVirtual().name("child-stderr-drain").start(() -> {
-                try (BufferedReader reader = new BufferedReader(new InputStreamReader(childProcess.getErrorStream(), StandardCharsets.UTF_8))) {
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        parentErr.println(line);
-                        parentErr.flush();
-                    }
-                } catch (IOException ignored) {
-                }
-            });
-
-            // Asynchronously proxy child stdout -> parent stdout with DLP scrubbing
-            CompletableFuture<Void> childOutFuture = CompletableFuture.runAsync(() -> {
-                try (BufferedReader reader = new BufferedReader(new InputStreamReader(childProcess.getInputStream(), StandardCharsets.UTF_8))) {
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        if (line.isBlank()) {
-                            parentOut.println(line);
-                            parentOut.flush();
-                            continue;
-                        }
-                        String scrubbed = dlpScrubber.scrubJson(line);
-                        parentOut.println(scrbedOrOriginal(line, scrubbed));
-                        parentOut.flush();
-                    }
-                } catch (IOException ignored) {
-                }
-            }, Executors.newVirtualThreadPerTaskExecutor());
-
-            // Synchronously proxy parent stdin -> child stdin with Policy Interception
-            try (BufferedReader parentReader = new BufferedReader(new InputStreamReader(parentIn, StandardCharsets.UTF_8));
-                 BufferedWriter childWriter = new BufferedWriter(new OutputStreamWriter(childProcess.getOutputStream(), StandardCharsets.UTF_8))) {
-
-                String line;
-                while (running.get() && (line = parentReader.readLine()) != null) {
-                    if (line.isBlank()) {
-                        childWriter.write(line);
-                        childWriter.newLine();
-                        childWriter.flush();
-                        continue;
-                    }
-
-                    JsonRpcRequest request = tryParseJsonRpc(line);
-                    if (request != null && request.isToolCall()) {
-                        String toolName = request.toolName();
-                        JsonNode toolArgs = request.toolArguments();
-
-                        long startNs = System.nanoTime();
-                        PolicyEvaluationResult evalResult = policyEvaluator.evaluate(localAgentIdentity, toolName, toolArgs);
-                        double latencyMs = (System.nanoTime() - startNs) / 1_000_000.0;
-
-                        if (evalResult.isAllowed()) {
-                            inspector.logToolCall(toolName, toolArgs, latencyMs, true, null);
-                            childWriter.write(line);
-                            childWriter.newLine();
-                            childWriter.flush();
-                        } else {
-                            String reason = evalResult.reason() != null ? evalResult.reason() : "Tool call rejected by policy";
-                            inspector.logToolCall(toolName, toolArgs, latencyMs, false, reason);
-
-                            // Synthesize JSON-RPC 2.0 error response directly to parent
-                            JsonRpcError error = JsonRpcError.policyViolation(reason);
-                            JsonRpcResponse errorResponse = JsonRpcResponse.error(request.id(), error);
-                            byte[] errorBytes = codec.encode(errorResponse);
-                            parentOut.println(new String(errorBytes, StandardCharsets.UTF_8));
-                            parentOut.flush();
-                        }
-                    } else {
-                        // Forward non-tool call (initialize, notifications, tools/list) directly to upstream child
-                        childWriter.write(line);
-                        childWriter.newLine();
-                        childWriter.flush();
-                    }
-                }
-            } catch (IOException e) {
-                logger.debug("Parent input stream closed or error: {}", e.getMessage());
-            }
-
-            // Close child stdin to notify child process of EOF
-            try {
-                childProcess.getOutputStream().close();
-            } catch (IOException ignored) {
-            }
-
-            int exitCode = childProcess.waitFor();
-            running.set(false);
-
-            try {
-                childOutFuture.get(1, TimeUnit.SECONDS);
-            } catch (Exception ignored) {
-            }
-
-            return exitCode;
-
+            pumpParentInput(parentIn, process, parentOut);
+            exitCode = awaitChild(process);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            shutdownExitCode = ExitCode.INTERRUPTED;
+            exitCode = ExitCode.INTERRUPTED;
         } finally {
+            running.set(false);
+            terminateChildProcess();
+            joinQuietly(stdoutDrain);
+            joinQuietly(stderrDrain);
+            joinQuietly(descendantWatch);
+            joinQuietly(exitWatcher);
             try {
                 Runtime.getRuntime().removeShutdownHook(shutdownHook);
             } catch (IllegalStateException ignored) {
-                // JVM already shutting down
+                // The JVM is already shutting down; the hook is running.
             }
-            terminateChildProcess();
+        }
+
+        if (shutdownExitCode != ExitCode.SUCCESS) {
+            return shutdownExitCode;
+        }
+        if (exitCode != ExitCode.SUCCESS) {
+            inspector.logError("Target MCP server exited with code " + exitCode + ".");
+        }
+        return ExitCode.fromChildExit(exitCode);
+    }
+
+    /**
+     * Forwards a signal to the managed child tree and records the exit status the CLI must report.
+     * Production signal handlers call this and then halt the process with the returned code.
+     *
+     * @param code {@link ExitCode#INTERRUPTED} or {@link ExitCode#TERMINATED}
+     * @return the same code, for the caller's convenience
+     */
+    int forwardShutdownSignal(int code) {
+        shutdownExitCode = code;
+        running.set(false);
+        terminateChildProcess();
+        return code;
+    }
+
+    private void pumpParentInput(InputStream parentIn, Process process, PrintStream parentOut) {
+        try (BufferedReader parentReader =
+                     new BufferedReader(new InputStreamReader(parentIn, StandardCharsets.UTF_8));
+             BufferedWriter childWriter =
+                     new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8))) {
+
+            String line;
+            while (running.get() && (line = parentReader.readLine()) != null) {
+                if (!running.get()) {
+                    break;
+                }
+                if (line.isBlank()) {
+                    childWriter.write(line);
+                    childWriter.newLine();
+                    childWriter.flush();
+                    continue;
+                }
+
+                JsonRpcRequest request = tryParseJsonRpc(line);
+                if (request != null && request.isToolCall()) {
+                    handleToolCall(request, line, childWriter, parentOut);
+                } else {
+                    writeToChild(childWriter, line);
+                }
+            }
+        } catch (IOException e) {
+            logger.debug("Parent input stream closed or failed: {}", e.getMessage());
         }
     }
 
-    private String scrbedOrOriginal(String original, String scrubbed) {
-        return scrubbed != null ? scrubbed : original;
+    private void handleToolCall(JsonRpcRequest request, String line, BufferedWriter childWriter,
+                                PrintStream parentOut) throws IOException {
+        String toolName = request.toolName();
+        JsonNode toolArgs = request.toolArguments();
+
+        long startNs = System.nanoTime();
+        PolicyEvaluationResult evalResult = policyEvaluator.evaluate(localAgentIdentity, toolName, toolArgs);
+        double latencyMs = (System.nanoTime() - startNs) / 1_000_000.0;
+
+        if (evalResult.isAllowed()) {
+            inspector.logToolCall(toolName, toolArgs, latencyMs, true, null);
+            writeToChild(childWriter, line);
+        } else {
+            String reason = evalResult.reason() != null ? evalResult.reason() : "Tool call rejected by policy";
+            inspector.logToolCall(toolName, toolArgs, latencyMs, false, reason);
+
+            // Answer the caller directly; the rejected call never reaches the upstream child.
+            JsonRpcError error = JsonRpcError.policyViolation(reason);
+            JsonRpcResponse errorResponse = JsonRpcResponse.error(request.id(), error);
+            writeProtocolFrame(parentOut, codec.encode(errorResponse));
+        }
+    }
+
+    private static void writeProtocolFrame(PrintStream out, byte[] frame) {
+        out.println(new String(frame, StandardCharsets.UTF_8));
+        out.flush();
+    }
+
+    private static void writeToChild(BufferedWriter childWriter, String line) throws IOException {
+        childWriter.write(line);
+        childWriter.newLine();
+        childWriter.flush();
+    }
+
+    private void drainStdout(Process process, PrintStream parentOut) {
+        try (BufferedReader reader =
+                     new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isBlank()) {
+                    parentOut.println(line);
+                    parentOut.flush();
+                    continue;
+                }
+                String scrubbed = dlpScrubber.scrubJson(line);
+                parentOut.println(scrubbed != null ? scrubbed : line);
+                parentOut.flush();
+            }
+        } catch (IOException e) {
+            logger.debug("Child stdout drain ended: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Records descendants while the child runs, so a grandchild that outlives its parent is still
+     * known when the CLI shuts down.
+     */
+    private void watchDescendants(Process process) {
+        while (running.get() && process.isAlive()) {
+            process.descendants().forEach(observedDescendants::add);
+            try {
+                Thread.sleep(100L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+
+    private void drainStderr(Process process, PrintStream parentErr) {
+        try (BufferedReader reader =
+                     new BufferedReader(new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                parentErr.println(line);
+                parentErr.flush();
+            }
+        } catch (IOException e) {
+            logger.debug("Child stderr drain ended: {}", e.getMessage());
+        }
+    }
+
+    private int awaitChild(Process process) throws InterruptedException {
+        // A signal handler may have recorded its code and halted the process; the wait stays
+        // interruptible so an in-process interrupt unwinds the same way.
+        return process.waitFor();
     }
 
     private JsonRpcRequest tryParseJsonRpc(String line) {
@@ -204,20 +311,74 @@ public class StdioProxy {
     }
 
     /**
-     * Shuts down the managed child process hermetically.
+     * Terminates the managed child and every descendant. A graceful destroy is given five seconds;
+     * whatever remains is killed forcibly, so no grandchild outlives the CLI.
      */
     public void terminateChildProcess() {
-        Process p = childProcess;
-        if (p != null && p.isAlive()) {
-            p.destroy();
-            try {
-                if (!p.waitFor(1500, TimeUnit.MILLISECONDS)) {
-                    p.destroyForcibly();
+        Process process = childProcess;
+        if (process == null) {
+            return;
+        }
+        synchronized (terminationLock) {
+            Set<ProcessHandle> tree = new LinkedHashSet<>(observedDescendants);
+            process.toHandle().descendants().forEach(tree::add);
+            tree.add(process.toHandle());
+
+            for (ProcessHandle handle : tree) {
+                if (handle.isAlive()) {
+                    handle.destroy();
                 }
+            }
+
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(SHUTDOWN_GRACE_MILLIS);
+            while (System.nanoTime() < deadline && anyAlive(tree)) {
+                try {
+                    Thread.sleep(25);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+
+            for (ProcessHandle handle : tree) {
+                if (handle.isAlive()) {
+                    handle.destroyForcibly();
+                }
+            }
+            if (process.isAlive()) {
+                process.destroyForcibly();
+            }
+            try {
+                process.waitFor(2, TimeUnit.SECONDS);
             } catch (InterruptedException e) {
-                p.destroyForcibly();
+                process.destroyForcibly();
                 Thread.currentThread().interrupt();
             }
+        }
+    }
+
+    private static boolean anyAlive(Set<ProcessHandle> handles) {
+        for (ProcessHandle handle : handles) {
+            if (handle.isAlive()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void joinQuietly(Thread thread) {
+        try {
+            thread.join(DRAIN_JOIN_MILLIS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private static void closeQuietly(InputStream stream) {
+        try {
+            stream.close();
+        } catch (IOException ignored) {
+            // Closing is best effort; the reader unblocks on the child's exit regardless.
         }
     }
 

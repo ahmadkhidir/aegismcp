@@ -1,5 +1,7 @@
 package dev.aegismcp.cli;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -67,9 +69,72 @@ class TerminalInspectorTest {
     }
 
     @Test
-    @DisplayName("FEAT-003: captured streams are never treated as interactive terminals")
+    @DisplayName("FEAT-003: Captured streams are never treated as interactive terminals")
     void testCapturedStreamIsNotInteractive() {
         assertFalse(TerminalInspector.isInteractiveTerminal(stream(new ByteArrayOutputStream())));
+    }
+
+    @Test
+    @DisplayName("FEAT-003 / FEAT-005: credential-shaped argument values are replaced, not printed")
+    void testCredentialShapedArgumentIsRedacted() throws Exception {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        TerminalInspector inspector = new TerminalInspector(stream(buffer), false);
+
+        ObjectNode arguments = new ObjectMapper().createObjectNode();
+        arguments.put("awsKey", TestCredential.awsAccessKey());
+        arguments.put("path", "/tmp/notes.txt");
+
+        inspector.logToolCall("read_file", arguments, 1.0, true, null);
+
+        String output = buffer.toString(StandardCharsets.UTF_8);
+        assertFalse(output.contains(TestCredential.awsAccessKey()), "the raw credential must never reach the terminal");
+        assertTrue(output.contains("[REDACTED_API_KEY]"));
+        assertTrue(output.contains("/tmp/notes.txt"), "benign values stay visible");
+    }
+
+    @Test
+    @DisplayName("FEAT-003: every argument value is truncated to 512 characters")
+    void testArgumentValuesAreTruncated() throws Exception {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        TerminalInspector inspector = new TerminalInspector(stream(buffer), false);
+
+        ObjectNode arguments = new ObjectMapper().createObjectNode();
+        arguments.put("body", "y".repeat(2048));
+
+        inspector.logToolCall("write_file", arguments, 1.0, true, null);
+
+        String output = buffer.toString(StandardCharsets.UTF_8);
+        assertFalse(output.contains("y".repeat(TerminalInspector.MAX_ARGUMENT_VALUE_LENGTH + 1)),
+                "a value longer than 512 characters must be cut");
+        assertTrue(output.contains("y".repeat(TerminalInspector.MAX_ARGUMENT_VALUE_LENGTH)));
+    }
+
+    @Test
+    @DisplayName("FEAT-003: the wrapped command line is scrubbed in the startup banner")
+    void testBannerCommandIsScrubbed() {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        TerminalInspector inspector = new TerminalInspector(stream(buffer), false);
+
+        inspector.printBanner("policy-1", "1.0.0",
+                "npx server --api-key " + TestCredential.awsAccessKey());
+
+        String output = buffer.toString(StandardCharsets.UTF_8);
+        assertFalse(output.contains(TestCredential.awsAccessKey()));
+        assertTrue(output.contains("[REDACTED_API_KEY]"));
+    }
+
+    @Test
+    @DisplayName("FEAT-003: a rejection reason is scrubbed before it reaches the terminal")
+    void testReasonIsScrubbed() {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        TerminalInspector inspector = new TerminalInspector(stream(buffer), false);
+
+        inspector.logToolCall("bash:exec", null, 1.0, false,
+                "denied value " + TestCredential.awsAccessKey());
+
+        String output = buffer.toString(StandardCharsets.UTF_8);
+        assertFalse(output.contains(TestCredential.awsAccessKey()));
+        assertTrue(output.contains("[REDACTED_API_KEY]"));
     }
 
     private static PrintStream stream(ByteArrayOutputStream buffer) {

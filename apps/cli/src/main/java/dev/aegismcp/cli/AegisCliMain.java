@@ -21,6 +21,15 @@ import java.util.concurrent.Callable;
         description = "AegisMCP Local Developer CLI & Security Tool",
         mixinStandardHelpOptions = true,
         version = "1.0.0",
+        footer = {
+                "",
+                "Exit codes:",
+                "  0    success",
+                "  1    failure: invalid policy, refused request, child failure, or internal error",
+                "  2    usage error or unreadable input path",
+                "  130  interrupted",
+                "  143  terminated"
+        },
         subcommands = {
                 WrapCommand.class,
                 LintCommand.class,
@@ -28,6 +37,21 @@ import java.util.concurrent.Callable;
         }
 )
 public class AegisCliMain implements Callable<Integer> {
+
+    private final boolean signalsEnabled;
+
+    public AegisCliMain() {
+        this(false);
+    }
+
+    /**
+     * @param signalsEnabled whether this root may install process signal handlers. Only the
+     *                       production entrypoint enables it; tests drive {@code execute} directly
+     *                       and must not replace the test JVM's signal handlers.
+     */
+    public AegisCliMain(boolean signalsEnabled) {
+        this.signalsEnabled = signalsEnabled;
+    }
 
     @Spec
     private CommandSpec spec;
@@ -53,7 +77,7 @@ public class AegisCliMain implements Callable<Integer> {
     @Override
     public Integer call() {
         spec.commandLine().usage(spec.commandLine().getOut());
-        return 0;
+        return ExitCode.SUCCESS;
     }
 
     /**
@@ -63,6 +87,11 @@ public class AegisCliMain implements Callable<Integer> {
         return noColor ? ColorMode.NEVER : colorMode;
     }
 
+    /** True only for the production entrypoint, which forwards signals to the managed child. */
+    boolean signalsEnabled() {
+        return signalsEnabled;
+    }
+
     public static void main(String[] args) {
         int exitCode = execute(args);
         System.exit(exitCode);
@@ -70,27 +99,30 @@ public class AegisCliMain implements Callable<Integer> {
 
     /**
      * Executes the CLI with the process streams. This is the production path: {@code auto} may color
-     * only when the JVM is attached to a console.
+     * only when the JVM is attached to a console, and signal handlers are installed so a wrapped
+     * child is reaped on interrupt or termination.
      */
     public static int execute(String... args) {
         PrintWriter out = new PrintWriter(System.out, true);
         PrintWriter err = new PrintWriter(System.err, true);
-        return run(out, err, System.console() != null, args);
+        return run(out, err, System.console() != null, true, args);
     }
 
     /**
      * Executes the CLI with custom output and error streams (for testing). Captured writers are never
      * considered interactive terminals, so {@code auto} stays plain; {@code --color=always} still forces
-     * ANSI escapes.
+     * ANSI escapes. Signal handlers are left untouched so the test JVM keeps its own.
      */
     public static int execute(PrintWriter out, PrintWriter err, String... args) {
-        return run(out, err, false, args);
+        return run(out, err, false, false, args);
     }
 
-    private static int run(PrintWriter out, PrintWriter err, boolean interactiveTerminal, String... args) {
-        CommandLine cmd = new CommandLine(new AegisCliMain());
+    private static int run(PrintWriter out, PrintWriter err, boolean interactiveTerminal,
+                           boolean signalsEnabled, String... args) {
+        CommandLine cmd = new CommandLine(new AegisCliMain(signalsEnabled));
         cmd.setOut(out);
         cmd.setErr(err);
+        applyExitCodePolicy(cmd);
 
         ColorMode requested = detectColorMode(args);
         boolean colorEnabled = TerminalInspector.isColorEnabled(requested, interactiveTerminal);
@@ -101,6 +133,27 @@ public class AegisCliMain implements Callable<Integer> {
         } finally {
             out.flush();
             err.flush();
+        }
+    }
+
+    /**
+     * Pins every outcome of the command framework to the documented vocabulary, including the
+     * subcommands: bad input is {@link ExitCode#USAGE}, an uncaught execution failure is
+     * {@link ExitCode#FAILURE}, and help or version output is success. Keeping the mapping here means
+     * no command can silently inherit a different default.
+     */
+    static void applyExitCodePolicy(CommandLine commandLine) {
+        commandLine.getCommandSpec().exitCodeOnInvalidInput(ExitCode.USAGE);
+        commandLine.getCommandSpec().exitCodeOnExecutionException(ExitCode.FAILURE);
+        commandLine.getCommandSpec().exitCodeOnUsageHelp(ExitCode.SUCCESS);
+        commandLine.getCommandSpec().exitCodeOnVersionHelp(ExitCode.SUCCESS);
+        commandLine.setExecutionExceptionHandler((exception, failedCommand, parseResult) -> {
+            failedCommand.getErr().println("Error: " + exception.getMessage());
+            failedCommand.getErr().flush();
+            return ExitCode.FAILURE;
+        });
+        for (CommandLine subcommand : commandLine.getSubcommands().values()) {
+            applyExitCodePolicy(subcommand);
         }
     }
 

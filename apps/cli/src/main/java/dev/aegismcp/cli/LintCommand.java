@@ -46,18 +46,18 @@ public class LintCommand implements Callable<Integer> {
     public Integer call() {
         if (policyFile == null) {
             System.err.println("Error: Policy file parameter is required.");
-            return 1;
+            return ExitCode.USAGE;
         }
 
         Path path = policyFile.toPath();
         if (!Files.exists(path)) {
             System.err.println("Error: Policy file not found: " + policyFile.getPath());
-            return 1;
+            return ExitCode.USAGE;
         }
 
-        if (!Files.isRegularFile(path)) {
-            System.err.println("Error: Path is not a regular file: " + policyFile.getPath());
-            return 1;
+        if (!Files.isRegularFile(path) || !Files.isReadable(path)) {
+            System.err.println("Error: Path is not a readable regular file: " + policyFile.getPath());
+            return ExitCode.USAGE;
         }
 
         String content;
@@ -65,12 +65,12 @@ public class LintCommand implements Callable<Integer> {
             content = Files.readString(path);
         } catch (IOException e) {
             System.err.println("Error: Unable to read file '" + policyFile.getPath() + "': " + e.getMessage());
-            return 1;
+            return ExitCode.USAGE;
         }
 
         if (content.isBlank()) {
             System.err.println("Error: Policy file is empty.");
-            return 1;
+            return ExitCode.FAILURE;
         }
 
         PolicyAst ast;
@@ -79,11 +79,11 @@ public class LintCommand implements Callable<Integer> {
         } catch (PolicyCompilationException e) {
             System.err.println("Validation Failed: Syntax or schema error in policy file:");
             System.err.println("  " + e.getMessage());
-            return 1;
+            return ExitCode.FAILURE;
         } catch (Exception e) {
             System.err.println("Validation Failed: Unexpected error compiling policy:");
             System.err.println("  " + e.getMessage());
-            return 1;
+            return ExitCode.FAILURE;
         }
 
         // Analyze rules for unreachable/shadowed rules
@@ -102,7 +102,7 @@ public class LintCommand implements Callable<Integer> {
             }
         }
 
-        return 0;
+        return ExitCode.SUCCESS;
     }
 
     /**

@@ -8,12 +8,18 @@ import dev.aegismcp.gateway.policy.SecurityPolicy;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -103,7 +109,7 @@ class StdioProxyTest {
         String output = parentOut.toString(StandardCharsets.UTF_8);
 
         // Verify DLP engine scrubbed the secret key from MockMcpChildServer
-        assertFalse(output.contains("AKIAIOSFODNN7EXAMPLE"), "AWS secret access key must be scrubbed by DLP");
+        assertFalse(output.contains(TestCredential.awsAccessKey()), "AWS secret access key must be scrubbed by DLP");
         assertTrue(output.contains("[REDACTED_API_KEY]"), "Scrubbed output should contain redaction token");
 
         // Verify inspector rendered log
@@ -143,7 +149,7 @@ class StdioProxyTest {
     }
 
     @Test
-    @DisplayName("FEAT-003: Propagates child process non-zero exit code cleanly")
+    @DisplayName("FEAT-003: Propagates a non-zero child status as a documented failure")
     void testChildExitCodePropagation() throws Exception {
         List<String> childCmd = List.of(javaBin, "-cp", classPath, "dev.aegismcp.cli.MockMcpChildServer", "exit-immediately", "7");
 
@@ -156,7 +162,9 @@ class StdioProxyTest {
 
         int exitCode = proxy.start(parentIn, new PrintStream(parentOut), new PrintStream(parentErr));
 
-        assertEquals(7, exitCode, "Proxy must propagate child exit code");
+        assertEquals(ExitCode.FAILURE, exitCode,
+                "a raw child status must not collide with a documented CLI code");
+        assertTrue(parentErr.toString(StandardCharsets.UTF_8).contains("Target MCP server exited with code 7"));
     }
 
     @Test
@@ -171,7 +179,102 @@ class StdioProxyTest {
 
         int exitCode = proxy.start(parentIn, new PrintStream(parentOut), new PrintStream(parentErr));
 
-        assertEquals(1, exitCode);
+        assertEquals(ExitCode.FAILURE, exitCode);
         assertTrue(parentErr.toString(StandardCharsets.UTF_8).contains("No target MCP server command provided"));
+    }
+
+    @Test
+    @Timeout(30)
+    @DisplayName("FEAT-003: Both child streams drain concurrently without deadlock")
+    void testLargeConcurrentOutputDrains() throws Exception {
+        List<String> childCmd = List.of(javaBin, "-cp", classPath, "dev.aegismcp.cli.MockMcpChildServer",
+                "flood", Integer.toString(256 * 1024));
+
+        ByteArrayInputStream parentIn = new ByteArrayInputStream(new byte[0]);
+        ByteArrayOutputStream parentOut = new ByteArrayOutputStream();
+        ByteArrayOutputStream parentErr = new ByteArrayOutputStream();
+
+        TerminalInspector inspector = new TerminalInspector(new PrintStream(parentErr), false);
+        StdioProxy proxy = new StdioProxy(childCmd, evaluator, DlpScrubber.getInstance(), inspector);
+
+        int exitCode = proxy.start(parentIn, new PrintStream(parentOut), new PrintStream(parentErr));
+
+        assertEquals(ExitCode.SUCCESS, exitCode);
+        String out = parentOut.toString(StandardCharsets.UTF_8);
+        String err = parentErr.toString(StandardCharsets.UTF_8);
+        assertTrue(out.startsWith("OUT 0 "), "stdout must be drained from the first byte");
+        assertTrue(err.startsWith("ERR 0 "), "stderr must be drained from the first byte");
+        assertTrue(out.length() > 256 * 1024, "the whole child stdout must be forwarded");
+        assertTrue(err.length() > 256 * 1024, "the whole child stderr must be forwarded");
+    }
+
+    @Test
+    @Timeout(30)
+    @DisplayName("FEAT-003: Terminating the proxy reaps the child and its grandchildren")
+    void testTerminationReapsGrandchildren() throws Exception {
+        List<String> childCmd = List.of(javaBin, "-cp", classPath, "dev.aegismcp.cli.MockMcpChildServer",
+                "spawn-grandchild");
+
+        PipedInputStream parentIn = new PipedInputStream();
+        PipedOutputStream keepOpen = new PipedOutputStream(parentIn);
+        ByteArrayOutputStream parentOut = new ByteArrayOutputStream();
+        ByteArrayOutputStream parentErr = new ByteArrayOutputStream();
+
+        TerminalInspector inspector = new TerminalInspector(new PrintStream(parentErr), false);
+        StdioProxy proxy = new StdioProxy(childCmd, evaluator, DlpScrubber.getInstance(), inspector);
+
+        Thread runner = Thread.ofVirtual().start(() -> {
+            try {
+                proxy.start(parentIn, new PrintStream(parentOut), new PrintStream(parentErr));
+            } catch (RuntimeException ignored) {
+                // The test only inspects the process tree; the exit status is covered elsewhere.
+            }
+        });
+
+        try {
+            Process child = await(() -> proxy.getChildProcess(), Duration.ofSeconds(10));
+            ProcessHandle grandchild = await(() -> firstDescendant(child), Duration.ofSeconds(10));
+
+            assertTrue(child.isAlive());
+            assertTrue(grandchild.isAlive());
+
+            assertEquals(ExitCode.INTERRUPTED,
+                    proxy.forwardShutdownSignal(ExitCode.INTERRUPTED),
+                    "the forwarded signal status is the status the CLI reports");
+
+            assertTrue(awaitGone(child.toHandle(), Duration.ofSeconds(10)), "the child must not survive");
+            assertTrue(awaitGone(grandchild, Duration.ofSeconds(10)), "the grandchild must not be orphaned");
+        } finally {
+            keepOpen.close();
+            proxy.terminateChildProcess();
+            runner.join(10_000L);
+        }
+    }
+
+    private static ProcessHandle firstDescendant(Process process) {
+        return process.toHandle().descendants().findFirst().orElse(null);
+    }
+
+    private static <T> T await(Supplier<T> supplier, Duration timeout) throws InterruptedException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (System.nanoTime() < deadline) {
+            T value = supplier.get();
+            if (value != null) {
+                return value;
+            }
+            TimeUnit.MILLISECONDS.sleep(20);
+        }
+        throw new AssertionError("Timed out waiting for the child process tree");
+    }
+
+    private static boolean awaitGone(ProcessHandle handle, Duration timeout) throws InterruptedException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (System.nanoTime() < deadline) {
+            if (!handle.isAlive()) {
+                return true;
+            }
+            TimeUnit.MILLISECONDS.sleep(20);
+        }
+        return !handle.isAlive();
     }
 }

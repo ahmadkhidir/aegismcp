@@ -101,7 +101,7 @@ class LintCommandTest {
     }
 
     @Test
-    @DisplayName("FEAT-003: Missing policy file fails with exit code 1")
+    @DisplayName("FEAT-003: Missing policy file is an unreadable input path and exits 2")
     void testMissingFileFails() {
         Path missing = tempDir.resolve("does-not-exist.yaml");
 
@@ -114,7 +114,7 @@ class LintCommandTest {
             CommandLine cmd = new CommandLine(new LintCommand());
             int exitCode = cmd.execute(missing.toString());
 
-            assertEquals(1, exitCode);
+            assertEquals(ExitCode.USAGE, exitCode);
             assertTrue(errContent.toString().contains("Policy file not found"));
         } finally {
             System.setErr(origErr);
