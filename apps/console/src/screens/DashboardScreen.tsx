@@ -144,7 +144,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
           <button
             onClick={onOpenKillSwitch}
             data-testid="emergency-killswitch-trigger"
-            className="px-space-lg py-space-sm bg-error-500 hover:bg-error-400 text-grey-900 font-bold text-xs rounded-radius-md transition-colors shadow-md flex items-center gap-2 flex-shrink-0"
+            className="px-space-lg py-space-sm bg-error-500 hover:bg-error-700 text-grey-900 font-bold text-xs rounded-radius-md transition-colors shadow-md flex items-center gap-2 flex-shrink-0"
           >
             <AlertOctagon className="w-4 h-4" />
             <span>Emergency Kill-Switch</span>
@@ -203,7 +203,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
               {metrics?.blockedViolations24h ?? 0}
             </div>
           )}
-          <span className="text-[11px] text-error-400 font-mono mt-1 inline-block">
+          <span className="text-[11px] text-error-700 font-mono mt-1 inline-block">
             0% false negative rate
           </span>
         </div>

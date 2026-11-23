@@ -236,12 +236,12 @@ export const AuditExplorerScreen: React.FC = () => {
           className="p-space-md rounded-radius-lg bg-error-100 border border-error-300 text-error-900 flex items-start justify-between gap-space-md shadow-sm"
         >
           <div className="flex items-center gap-space-md">
-            <div className="p-2.5 rounded-radius-md bg-error-200 text-error-900 border border-error-400">
-              <AlertTriangle className="w-6 h-6 text-error-600" />
+            <div className="p-2.5 rounded-radius-md bg-error-500/10 text-error-900 border border-error-300">
+              <AlertTriangle className="w-6 h-6 text-error-700" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="text-xs font-mono font-bold text-error-600 uppercase">
+                <span className="text-xs font-mono font-bold text-error-700 uppercase">
                   Cryptographic Integrity Alert (409 Conflict)
                 </span>
               </div>

@@ -291,7 +291,7 @@ export const ApprovalsQueueScreen: React.FC = () => {
                 onClick={() =>
                   handleDecision(rejectingTicket.id, 'REJECT', rejectReason)
                 }
-                className="px-space-md py-space-sm rounded-radius-md text-xs font-bold bg-error-500 hover:bg-error-400 text-grey-900 transition-colors disabled:opacity-50"
+                className="px-space-md py-space-sm rounded-radius-md text-xs font-bold bg-error-500 hover:bg-error-700 text-grey-900 transition-colors disabled:opacity-50"
               >
                 Confirm Rejection
               </button>
