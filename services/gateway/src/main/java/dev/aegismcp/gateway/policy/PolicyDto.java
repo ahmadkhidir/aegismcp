@@ -65,6 +65,17 @@ public final class PolicyDto {
     }
 
     /**
+     * Request payload for C-018 (PUT /api/v1/policies/active).
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record ActivatePolicyRequest(
+            @JsonProperty(value = "version", required = true) String version,
+            @JsonProperty(value = "baseVersionId", required = true) String baseVersionId,
+            @JsonProperty(value = "rawYaml", required = true) String rawYaml
+    ) {
+    }
+
+    /**
      * Request payload for C-012 (POST /api/v1/policies/simulate).
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)

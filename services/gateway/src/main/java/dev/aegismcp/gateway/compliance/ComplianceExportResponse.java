@@ -11,6 +11,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 public record ComplianceExportResponse(
         @JsonProperty("reportId") String reportId,
         @JsonProperty("framework") String framework,
+        @JsonProperty("format") String format,
         @JsonProperty("status") String status,
         @JsonProperty("generatedAt") String generatedAt,
         @JsonProperty("recordCount") int recordCount,

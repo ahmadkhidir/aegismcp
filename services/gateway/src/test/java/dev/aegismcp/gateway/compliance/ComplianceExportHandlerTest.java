@@ -44,7 +44,19 @@ class ComplianceExportHandlerTest {
             ledger.appendSync(AuditRecord.create("agent-auditor", "read_metric", "allow", 0, 1.0, "p=" + i));
         }
         engine = new ComplianceReportEngine(ledger);
-        handler = new ComplianceExportHandler(engine);
+        handler = new ComplianceExportHandler(engine, mapper,
+                bearerToken -> {
+                    if (bearerToken == null || bearerToken.isBlank()) {
+                        return ComplianceExportHandler.ComplianceAuthorizer.AuthResult
+                                .unauthenticated("Missing authentication credentials");
+                    }
+                    if (bearerToken.contains("viewer") || bearerToken.contains("readonly")) {
+                        return ComplianceExportHandler.ComplianceAuthorizer.AuthResult
+                                .forbidden("Insufficient permissions for this operation");
+                    }
+                    return ComplianceExportHandler.ComplianceAuthorizer.AuthResult.allow();
+                },
+                Runnable::run);
         channel = new EmbeddedChannel(handler);
     }
 
@@ -82,7 +94,9 @@ class ComplianceExportHandlerTest {
                 {
                   "framework": "EU_AI_ACT",
                   "format": "JSON",
-                  "agentId": "agent-auditor"
+                  "agentId": "agent-auditor",
+                  "from": "2020-01-01T00:00:00Z",
+                  "to": "2030-01-01T00:00:00Z"
                 }
                 """;
 
@@ -94,6 +108,7 @@ class ComplianceExportHandlerTest {
         JsonNode node = mapper.readTree(json);
 
         assertEquals("EU_AI_ACT", node.get("framework").asText());
+        assertEquals("JSON", node.get("format").asText());
         assertEquals("COMPLETED", node.get("status").asText());
         assertEquals(3, node.get("recordCount").asInt());
         assertNotNull(node.get("reportId").asText());
@@ -163,7 +178,8 @@ class ComplianceExportHandlerTest {
         );
         ledger.tamperWithBlock(1L, tampered);
 
-        String body = "{\"framework\": \"EU_AI_ACT\", \"format\": \"JSON\"}";
+        String body = "{\"framework\": \"EU_AI_ACT\", \"format\": \"JSON\", "
+                + "\"from\": \"2020-01-01T00:00:00Z\", \"to\": \"2030-01-01T00:00:00Z\"}";
         FullHttpResponse response = sendPost("/api/v1/compliance/export", "Bearer admin-token", body);
 
         assertNotNull(response);

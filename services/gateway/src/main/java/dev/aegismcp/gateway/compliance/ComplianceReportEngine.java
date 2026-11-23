@@ -294,6 +294,7 @@ public class ComplianceReportEngine {
         return new ComplianceExportResponse(
                 reportId,
                 framework.name(),
+                format.name(),
                 "COMPLETED",
                 generatedAt,
                 recordCount,

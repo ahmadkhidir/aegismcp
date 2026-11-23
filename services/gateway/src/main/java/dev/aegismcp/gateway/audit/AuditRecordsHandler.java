@@ -21,15 +21,26 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.Executor;
 
 /**
- * Netty HTTP handler serving audit records query API conforming to contract C-013.
- * Serves GET /api/v1/audit/records?agentId=string&minSeverity=string&decision=string&limit=number&offset=number.
- * Anchors: C-013, FEAT-011, schema.md#AuditBlock.
+ * Netty HTTP handler serving the audit record query contract C-013.
+ *
+ * <p>Every request is authenticated through the injected authorizer built from the verified OIDC
+ * token; a missing or invalid token is {@code 401} and a verified principal without the
+ * {@code admin} or {@code auditor} role is {@code 403}. Query validation precedes the ledger scan,
+ * the scan runs on a worker rather than the event-loop thread, and the arguments themselves are
+ * never returned: each record carries only their digest.
+ *
+ * <p>Anchors: FEAT-007, FEAT-008, FEAT-011, C-013, NFR-029.
  */
 @ChannelHandler.Sharable
 public class AuditRecordsHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
@@ -38,10 +49,14 @@ public class AuditRecordsHandler extends SimpleChannelInboundHandler<FullHttpReq
     public static final String RECORDS_PATH = "/api/v1/audit/records";
     public static final String BEARER_PREFIX = "Bearer ";
     public static final int DEFAULT_LIMIT = 50;
+    public static final int MAX_LIMIT = 500;
+
+    private static final Set<String> DECISIONS = Set.of("allow", "block", "require_approval");
 
     private final AuditLedger ledger;
     private final ObjectMapper jsonMapper;
     private final AuditAuthorizer authorizer;
+    private final Executor worker;
 
     @FunctionalInterface
     public interface AuditAuthorizer {
@@ -60,27 +75,17 @@ public class AuditRecordsHandler extends SimpleChannelInboundHandler<FullHttpReq
         }
     }
 
-    public AuditRecordsHandler(AuditLedger ledger) {
-        this(ledger, new ObjectMapper(), defaultAuthorizer());
+    public AuditRecordsHandler(AuditLedger ledger, ObjectMapper jsonMapper, AuditAuthorizer authorizer) {
+        this(ledger, jsonMapper, authorizer, runnable -> Thread.startVirtualThread(runnable));
     }
 
-    public AuditRecordsHandler(AuditLedger ledger, ObjectMapper jsonMapper, AuditAuthorizer authorizer) {
+    public AuditRecordsHandler(AuditLedger ledger, ObjectMapper jsonMapper, AuditAuthorizer authorizer,
+                               Executor worker) {
         super(false); // Manual retain/release control for pipeline pass-through
         this.ledger = Objects.requireNonNull(ledger, "ledger must not be null");
         this.jsonMapper = Objects.requireNonNull(jsonMapper, "jsonMapper must not be null");
         this.authorizer = Objects.requireNonNull(authorizer, "authorizer must not be null");
-    }
-
-    public static AuditAuthorizer defaultAuthorizer() {
-        return bearerToken -> {
-            if (bearerToken == null || bearerToken.isBlank()) {
-                return AuditAuthorizer.AuthResult.unauthenticated("Missing authentication credentials");
-            }
-            if (bearerToken.contains("viewer") || bearerToken.contains("readonly") || bearerToken.contains("unauthorized")) {
-                return AuditAuthorizer.AuthResult.forbidden("Insufficient permissions: auditor or admin role required");
-            }
-            return AuditAuthorizer.AuthResult.allow();
-        };
+        this.worker = Objects.requireNonNull(worker, "worker must not be null");
     }
 
     @Override
@@ -97,20 +102,14 @@ public class AuditRecordsHandler extends SimpleChannelInboundHandler<FullHttpReq
         boolean keepAlive = HttpUtil.isKeepAlive(request);
 
         try {
-            if (!HttpMethod.GET.equals(request.method())) {
-                sendJson(ctx, HttpResponseStatus.METHOD_NOT_ALLOWED,
-                        Map.of("error", "Method Not Allowed: only GET supported"), keepAlive);
-                return;
+            String bearerToken = bearerToken(request);
+            AuditAuthorizer.AuthResult authResult;
+            try {
+                authResult = authorizer.check(bearerToken);
+            } catch (RuntimeException e) {
+                logger.warn("Audit records authorization failed closed: {}", e.getMessage());
+                authResult = AuditAuthorizer.AuthResult.unauthenticated("Invalid or missing credentials");
             }
-
-            // Extract Authorization Bearer header
-            String authHeader = request.headers().get(HttpHeaderNames.AUTHORIZATION);
-            String bearerToken = null;
-            if (authHeader != null && authHeader.regionMatches(true, 0, BEARER_PREFIX, 0, BEARER_PREFIX.length())) {
-                bearerToken = authHeader.substring(BEARER_PREFIX.length()).trim();
-            }
-
-            AuditAuthorizer.AuthResult authResult = authorizer.check(bearerToken);
             if (!authResult.authorized()) {
                 if (authResult.forbidden()) {
                     sendJson(ctx, HttpResponseStatus.FORBIDDEN,
@@ -122,84 +121,88 @@ public class AuditRecordsHandler extends SimpleChannelInboundHandler<FullHttpReq
                 return;
             }
 
-            // Extract query parameters
-            Map<String, List<String>> parameters = queryDecoder.parameters();
-            String agentIdFilter = getFirstParam(parameters, "agentId");
-            String minSeverityFilter = getFirstParam(parameters, "minSeverity");
-            String decisionFilter = getFirstParam(parameters, "decision");
-            int limit = parseIntParam(getFirstParam(parameters, "limit"), DEFAULT_LIMIT);
-            int offset = parseIntParam(getFirstParam(parameters, "offset"), 0);
-
-            if (limit <= 0) {
-                limit = DEFAULT_LIMIT;
-            }
-            if (offset < 0) {
-                offset = 0;
+            if (!HttpMethod.GET.equals(request.method())) {
+                sendJson(ctx, HttpResponseStatus.METHOD_NOT_ALLOWED,
+                        Map.of("error", "Method Not Allowed: only GET supported"), keepAlive);
+                return;
             }
 
-            // Query matching records
-            List<AuditRecordDto> matching = queryRecords(agentIdFilter, minSeverityFilter, decisionFilter);
-            int total = matching.size();
+            RecordQuery query;
+            try {
+                query = RecordQuery.parse(queryDecoder.parameters());
+            } catch (IllegalArgumentException e) {
+                sendJson(ctx, HttpResponseStatus.BAD_REQUEST, Map.of("error", e.getMessage()), keepAlive);
+                return;
+            }
 
-            int fromIndex = Math.min(offset, total);
-            int toIndex = Math.min(offset + limit, total);
-            List<AuditRecordDto> pagedRecords = matching.subList(fromIndex, toIndex);
-
-            AuditRecordsResponse response = new AuditRecordsResponse(pagedRecords, total);
-            sendJson(ctx, HttpResponseStatus.OK, response, keepAlive);
+            worker.execute(() -> serveRecords(ctx, query, keepAlive));
 
         } catch (Exception e) {
-            logger.error("Error processing audit records query", e);
+            logger.error("Error processing an audit records query", e);
             sendJson(ctx, HttpResponseStatus.INTERNAL_SERVER_ERROR,
-                    Map.of("error", "Internal server error: " + e.getMessage()), keepAlive);
+                    Map.of("error", "Internal server error"), keepAlive);
         } finally {
             request.release();
         }
     }
 
-    private List<AuditRecordDto> queryRecords(String agentIdFilter, String minSeverityFilter, String decisionFilter) {
+    private void serveRecords(ChannelHandlerContext ctx, RecordQuery query, boolean keepAlive) {
+        List<AuditRecordDto> matching;
+        try {
+            matching = queryRecords(query);
+        } catch (RuntimeException e) {
+            logger.error("Ledger records could not be read", e);
+            ctx.executor().execute(() -> sendJson(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE,
+                    Map.of("error", "The ledger store is unreachable"), keepAlive));
+            return;
+        }
+
+        int total = matching.size();
+        int fromIndex = Math.min(query.offset(), total);
+        int toIndex = Math.min(fromIndex + query.limit(), total);
+        AuditRecordsResponse response = new AuditRecordsResponse(
+                List.copyOf(matching.subList(fromIndex, toIndex)), total);
+        ctx.executor().execute(() -> sendJson(ctx, HttpResponseStatus.OK, response, keepAlive));
+    }
+
+    /**
+     * Collects matching tool-interaction records in block-index descending order. Administrative
+     * entries are skipped: they occupy an index in the same chain but are not tool interactions.
+     */
+    private List<AuditRecordDto> queryRecords(RecordQuery query) {
         List<AuditRecordDto> result = new ArrayList<>();
         long latestIndex = ledger.getLatestBlockIndex();
 
-        for (long i = 0; i <= latestIndex; i++) {
+        for (long i = latestIndex; i >= 0; i--) {
             AuditBlock block = ledger.getBlock(i);
-            if (block == null) {
+            if (block == null || block.getBlockIndex() == 0) {
                 continue;
             }
 
             List<AuditRecord> records = block.getRecords();
             if (records.isEmpty()) {
-                // Genesis block or empty block
-                String blockAgentId = block.getAgentId();
-                String blockDecision = block.getDecision();
-                if (matchesFilter(blockAgentId, blockDecision, agentIdFilter, decisionFilter, minSeverityFilter)) {
+                continue;
+            }
+
+            for (AuditRecord record : records) {
+                String decision = normalizeDecision(record.getDecision());
+                if (decision == null) {
+                    continue;
+                }
+                if (matches(query, block, record, decision)) {
                     result.add(new AuditRecordDto(
                             block.getBlockIndex(),
                             block.getBlockHash(),
                             block.getParentHash(),
-                            blockAgentId,
-                            block.getToolName(),
-                            blockDecision,
-                            block.getRedactionCount(),
-                            block.getLatencyMs(),
-                            block.getTimestamp()
+                            record.getAgentId(),
+                            record.getToolName(),
+                            sha256Hex(record.getPayloadSummary()),
+                            decision,
+                            record.getRedactionCount(),
+                            record.getLatencyMs(),
+                            record.getTimestamp(),
+                            null
                     ));
-                }
-            } else {
-                for (AuditRecord r : records) {
-                    if (matchesFilter(r.getAgentId(), r.getDecision(), agentIdFilter, decisionFilter, minSeverityFilter)) {
-                        result.add(new AuditRecordDto(
-                                block.getBlockIndex(),
-                                block.getBlockHash(),
-                                block.getParentHash(),
-                                r.getAgentId(),
-                                r.getToolName(),
-                                r.getDecision(),
-                                r.getRedactionCount(),
-                                r.getLatencyMs(),
-                                r.getTimestamp()
-                        ));
-                    }
                 }
             }
         }
@@ -207,69 +210,156 @@ public class AuditRecordsHandler extends SimpleChannelInboundHandler<FullHttpReq
         return result;
     }
 
-    private boolean matchesFilter(String recordAgentId, String recordDecision,
-                                  String agentIdFilter, String decisionFilter, String minSeverityFilter) {
-        if (agentIdFilter != null && !agentIdFilter.isBlank()) {
-            if (!agentIdFilter.trim().equalsIgnoreCase(recordAgentId)) {
-                return false;
-            }
+    private boolean matches(RecordQuery query, AuditBlock block, AuditRecord record, String decision) {
+        if (query.agentId() != null && !query.agentId().equals(record.getAgentId())) {
+            return false;
+        }
+        if (query.toolName() != null && !query.toolName().equals(record.getToolName())) {
+            return false;
+        }
+        if (query.decision() != null && !query.decision().equals(decision)) {
+            return false;
+        }
+        if (query.blockHash() != null
+                && !query.blockHash().equalsIgnoreCase(block.getBlockHash())) {
+            return false;
         }
 
-        if (decisionFilter != null && !decisionFilter.isBlank()) {
-            if (!decisionFilter.trim().equalsIgnoreCase(recordDecision)) {
-                return false;
-            }
+        Instant timestamp;
+        try {
+            timestamp = Instant.parse(record.getTimestamp());
+        } catch (DateTimeParseException e) {
+            return false;
         }
-
-        if (minSeverityFilter != null && !minSeverityFilter.isBlank()) {
-            int requiredLevel = parseSeverityLevel(minSeverityFilter);
-            int recordLevel = getDecisionSeverityLevel(recordDecision);
-            if (recordLevel < requiredLevel) {
-                return false;
-            }
+        if (query.from() != null && timestamp.isBefore(query.from())) {
+            return false;
         }
-
-        return true;
+        return query.to() == null || !timestamp.isAfter(query.to());
     }
 
-    private int parseSeverityLevel(String severity) {
-        if (severity == null) return 0;
-        return switch (severity.trim().toLowerCase()) {
-            case "critical" -> 4;
-            case "high" -> 3;
-            case "medium" -> 2;
-            case "low" -> 1;
-            default -> 0;
-        };
-    }
-
-    private int getDecisionSeverityLevel(String decision) {
-        if (decision == null) return 1;
-        String dec = decision.trim().toLowerCase();
-        if (dec.contains("block") || dec.contains("quarantine") || dec.contains("violation") || dec.contains("deny")) {
-            return 3; // High
-        } else if (dec.contains("require_approval") || dec.contains("pending")) {
-            return 2; // Medium
+    /** Maps the ledger's stored decision names onto the contract vocabulary. */
+    private static String normalizeDecision(String decision) {
+        if (decision == null) {
+            return null;
         }
-        return 1; // Low
+        String normalized = decision.trim().toLowerCase(Locale.ROOT);
+        if (normalized.startsWith("block") || normalized.equals("deny") || normalized.startsWith("denied")) {
+            return "block";
+        }
+        if (normalized.startsWith("require") || normalized.equals("pending")) {
+            return "require_approval";
+        }
+        if (normalized.startsWith("allow") || normalized.equals("permitted")) {
+            return "allow";
+        }
+        // Administrative action entries are sealed in the same chain but are not tool
+        // interactions; the query excludes them (C-013).
+        return null;
     }
 
-    private String getFirstParam(Map<String, List<String>> params, String key) {
-        List<String> values = params.get(key);
-        if (values != null && !values.isEmpty()) {
-            return values.get(0);
+    private static String sha256Hex(String value) {
+        return HashUtils.sha256Hex(value != null ? value : "");
+    }
+
+    private static String bearerToken(FullHttpRequest request) {
+        String authHeader = request.headers().get(HttpHeaderNames.AUTHORIZATION);
+        if (authHeader != null
+                && authHeader.regionMatches(true, 0, BEARER_PREFIX, 0, BEARER_PREFIX.length())) {
+            return authHeader.substring(BEARER_PREFIX.length()).trim();
         }
         return null;
     }
 
-    private int parseIntParam(String val, int defaultVal) {
-        if (val == null || val.isBlank()) {
-            return defaultVal;
+    /** A validated C-013 query; every rejected parameter is a 400 rather than a silent default. */
+    private record RecordQuery(
+            String agentId,
+            String toolName,
+            String decision,
+            String blockHash,
+            Instant from,
+            Instant to,
+            int limit,
+            int offset
+    ) {
+        static RecordQuery parse(Map<String, List<String>> parameters) {
+            String decision = first(parameters, "decision");
+            if (decision != null) {
+                decision = decision.trim().toLowerCase(Locale.ROOT);
+                if (!DECISIONS.contains(decision)) {
+                    throw new IllegalArgumentException(
+                            "Invalid query parameter 'decision': expected one of allow, block, require_approval");
+                }
+            }
+
+            int limit = parseLimit(parameters.get("limit"));
+            int offset = parseOffset(parameters.get("offset"));
+
+            return new RecordQuery(
+                    blankToNull(first(parameters, "agentId")),
+                    blankToNull(first(parameters, "toolName")),
+                    decision,
+                    blankToNull(first(parameters, "blockHash")),
+                    parseInstant(parameters, "from"),
+                    parseInstant(parameters, "to"),
+                    limit,
+                    offset
+            );
         }
-        try {
-            return Integer.parseInt(val.trim());
-        } catch (NumberFormatException e) {
-            return defaultVal;
+
+        private static String first(Map<String, List<String>> parameters, String name) {
+            List<String> values = parameters.get(name);
+            return values != null && !values.isEmpty() ? values.get(0) : null;
+        }
+
+        private static String blankToNull(String value) {
+            return value != null && !value.isBlank() ? value.trim() : null;
+        }
+
+        private static int parseLimit(List<String> values) {
+            if (values == null || values.isEmpty() || values.get(0) == null || values.get(0).isBlank()) {
+                return DEFAULT_LIMIT;
+            }
+            try {
+                int value = Integer.parseInt(values.get(0).trim());
+                if (value < 1 || value > MAX_LIMIT) {
+                    throw new IllegalArgumentException(
+                            "Invalid query parameter 'limit': expected an integer from 1 to " + MAX_LIMIT);
+                }
+                return value;
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                        "Invalid query parameter 'limit': expected an integer from 1 to " + MAX_LIMIT);
+            }
+        }
+
+        private static int parseOffset(List<String> values) {
+            if (values == null || values.isEmpty() || values.get(0) == null || values.get(0).isBlank()) {
+                return 0;
+            }
+            try {
+                int value = Integer.parseInt(values.get(0).trim());
+                if (value < 0) {
+                    throw new IllegalArgumentException(
+                            "Invalid query parameter 'offset': expected an integer of zero or greater");
+                }
+                return value;
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                        "Invalid query parameter 'offset': expected an integer of zero or greater");
+            }
+        }
+
+        private static Instant parseInstant(Map<String, List<String>> parameters, String name) {
+            String value = first(parameters, name);
+            if (value == null || value.isBlank()) {
+                return null;
+            }
+            try {
+                return Instant.parse(value.trim());
+            } catch (DateTimeParseException e) {
+                throw new IllegalArgumentException(
+                        "Invalid query parameter '" + name + "': expected an ISO-8601 date-time");
+            }
         }
     }
 

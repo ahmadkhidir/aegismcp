@@ -39,7 +39,22 @@ class AuditVerificationHandlerTest {
         for (int i = 1; i <= 5; i++) {
             ledger.appendSync(AuditRecord.create("agent-" + i, "tool_" + i, "allow", 0, 1.0, "arg=" + i));
         }
-        handler = new AuditVerificationHandler(ledger);
+        handler = new AuditVerificationHandler(
+                ledger,
+                AuditVerificationEngine.getInstance(),
+                mapper,
+                bearerToken -> {
+                    if (bearerToken == null || bearerToken.isBlank()) {
+                        return AuditVerificationHandler.AuditAuthorizer.AuthResult
+                                .unauthenticated("Missing authentication credentials");
+                    }
+                    if (bearerToken.contains("viewer") || bearerToken.contains("readonly")) {
+                        return AuditVerificationHandler.AuditAuthorizer.AuthResult
+                                .forbidden("Insufficient permissions for this operation");
+                    }
+                    return AuditVerificationHandler.AuditAuthorizer.AuthResult.allow();
+                },
+                Runnable::run);
         channel = new EmbeddedChannel(handler);
     }
 
@@ -212,5 +227,32 @@ class AuditVerificationHandlerTest {
 
         assertNotNull(response);
         assertEquals(HttpResponseStatus.METHOD_NOT_ALLOWED, response.status());
+    }
+
+    @Test
+    @DisplayName("C-015: GET /api/v1/audit/integrity reports the most recent completed verification")
+    void testIntegrityReportsLatestVerification() throws Exception {
+        FullHttpResponse response = sendRequest(HttpMethod.GET, "/api/v1/audit/integrity",
+                "Bearer auditor-token-123");
+
+        assertNotNull(response);
+        assertEquals(HttpResponseStatus.OK, response.status());
+        JsonNode body = parseBody(response);
+        assertTrue(body.get("valid").asBoolean());
+        assertEquals(6, body.get("totalVerifiedBlocks").asLong());
+        assertNotNull(body.get("lastVerifiedAt").textValue());
+    }
+
+    @Test
+    @DisplayName("C-015: integrity requires the auditor or admin role")
+    void testIntegrityRequiresAuditorOrAdmin() {
+        FullHttpResponse missing = sendRequest(HttpMethod.GET, "/api/v1/audit/integrity", null);
+        assertEquals(HttpResponseStatus.UNAUTHORIZED, missing.status());
+        missing.release();
+
+        FullHttpResponse forbidden = sendRequest(HttpMethod.GET, "/api/v1/audit/integrity",
+                "Bearer viewer-token-xyz");
+        assertEquals(HttpResponseStatus.FORBIDDEN, forbidden.status());
+        forbidden.release();
     }
 }

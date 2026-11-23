@@ -132,11 +132,9 @@ class Phase3ComplianceReportingE2ETest {
         String ticketId = ticketList.get(0).id();
 
         // Operator reviews and approves ticket 1
-        approvalManager.submitDecision(
+        approvalManager.approve(
                 ticketId,
-                "APPROVE",
-                "compliance.officer@enterprise.corp",
-                "Verified GDPR Article 14 data processing consent"
+                "compliance.officer@enterprise.corp"
         );
 
         // Create second pending approval ticket

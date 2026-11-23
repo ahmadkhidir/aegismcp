@@ -53,7 +53,7 @@ class AegisGatewayServerComplianceIntegrationTest {
     }
 
     @Test
-    @DisplayName("FEAT-011 / C-011 & C-013: Server routes compliance export and audit records endpoints successfully")
+    @DisplayName("FEAT-011 / C-011 & C-013: management routes fail closed with 401 when no verified identity provider is configured")
     void testEndToEndComplianceAndAuditRoutes() throws IOException, InterruptedException {
         int port = server.getPort();
         assertTrue(port > 0, "Server must be bound to active port");
@@ -68,7 +68,9 @@ class AegisGatewayServerComplianceIntegrationTest {
         assertEquals(200, healthResp.statusCode());
         assertEquals("{\"status\":\"UP\"}", healthResp.body());
 
-        // 2. Query GET /api/v1/audit/records
+        // 2. Query GET /api/v1/audit/records. The in-process seam configures no identity
+        // provider, so the verified authorizer cannot accept any token and the endpoint fails
+        // closed rather than trusting the token text.
         HttpRequest auditReq = HttpRequest.newBuilder()
                 .uri(URI.create("http://127.0.0.1:" + port + "/api/v1/audit/records?agentId=agent-e2e"))
                 .header("Authorization", "Bearer auditor-token")
@@ -76,17 +78,16 @@ class AegisGatewayServerComplianceIntegrationTest {
                 .timeout(Duration.ofSeconds(2))
                 .build();
         HttpResponse<String> auditResp = httpClient.send(auditReq, HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, auditResp.statusCode());
-        JsonNode auditNode = mapper.readTree(auditResp.body());
-        assertEquals(1, auditNode.get("total").asInt());
-        assertEquals("agent-e2e", auditNode.get("records").get(0).get("agentId").asText());
+        assertEquals(401, auditResp.statusCode());
 
-        // 3. Export POST /api/v1/compliance/export
+        // 3. Export POST /api/v1/compliance/export is likewise refused without a verified token.
         String exportJson = """
                 {
                   "framework": "EU_AI_ACT",
                   "format": "JSON",
-                  "agentId": "agent-e2e"
+                  "agentId": "agent-e2e",
+                  "from": "2020-01-01T00:00:00Z",
+                  "to": "2030-01-01T00:00:00Z"
                 }
                 """;
         HttpRequest exportReq = HttpRequest.newBuilder()
@@ -97,12 +98,6 @@ class AegisGatewayServerComplianceIntegrationTest {
                 .timeout(Duration.ofSeconds(2))
                 .build();
         HttpResponse<String> exportResp = httpClient.send(exportReq, HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, exportResp.statusCode());
-        JsonNode exportNode = mapper.readTree(exportResp.body());
-        assertEquals("EU_AI_ACT", exportNode.get("framework").asText());
-        assertEquals("COMPLETED", exportNode.get("status").asText());
-        assertEquals(1, exportNode.get("recordCount").asInt());
-        assertNotNull(exportNode.get("signature").asText());
-        assertNotNull(exportNode.get("content").asText());
+        assertEquals(401, exportResp.statusCode());
     }
 }

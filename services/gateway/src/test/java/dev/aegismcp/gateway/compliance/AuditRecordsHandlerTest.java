@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -38,7 +39,7 @@ class AuditRecordsHandlerTest {
     @BeforeEach
     void setUp() {
         ledger = new AuditLedger(1);
-        // Seed 4 records:
+        // Seed 4 tool interactions:
         // 1: agent-A, tool1, allow
         // 2: agent-A, tool2, block
         // 3: agent-B, tool1, allow
@@ -49,7 +50,19 @@ class AuditRecordsHandlerTest {
         ledger.appendSync(AuditRecord.create("agent-B", "tool3", "require_approval", 0, 3.1, "summary4"));
         ledger.flush();
 
-        handler = new AuditRecordsHandler(ledger);
+        handler = new AuditRecordsHandler(ledger, mapper,
+                bearerToken -> {
+                    if (bearerToken == null || bearerToken.isBlank()) {
+                        return AuditRecordsHandler.AuditAuthorizer.AuthResult
+                                .unauthenticated("Missing authentication credentials");
+                    }
+                    if (bearerToken.contains("viewer") || bearerToken.contains("readonly")) {
+                        return AuditRecordsHandler.AuditAuthorizer.AuthResult
+                                .forbidden("Insufficient permissions for this operation");
+                    }
+                    return AuditRecordsHandler.AuditAuthorizer.AuthResult.allow();
+                },
+                Runnable::run);
         channel = new EmbeddedChannel(handler);
     }
 
@@ -77,102 +90,130 @@ class AuditRecordsHandlerTest {
         return channel.readOutbound();
     }
 
+    private JsonNode body(FullHttpResponse response) throws Exception {
+        byte[] bytes = new byte[response.content().readableBytes()];
+        response.content().readBytes(bytes);
+        return mapper.readTree(bytes);
+    }
+
     @Test
-    @DisplayName("C-013: GET /api/v1/audit/records with Bearer token returns 200 OK and record list")
+    @DisplayName("C-013: GET /api/v1/audit/records returns tool-interaction records ordered by blockIndex descending")
     void testQueryRecordsSuccess() throws Exception {
         FullHttpResponse response = sendGet("/api/v1/audit/records", "Bearer auditor-token");
         assertNotNull(response);
         assertEquals(HttpResponseStatus.OK, response.status());
 
-        String json = response.content().toString(StandardCharsets.UTF_8);
-        JsonNode node = mapper.readTree(json);
-
-        assertTrue(node.has("records"));
-        assertTrue(node.has("total"));
-        // Genesis block (agentId=system, decision=allow) + 4 user records = 5 total
-        assertEquals(5, node.get("total").asInt());
-        assertEquals(5, node.get("records").size());
+        JsonNode node = body(response);
+        assertEquals(4, node.get("total").asInt());
+        assertEquals(4, node.get("records").size());
 
         JsonNode first = node.get("records").get(0);
-        assertTrue(first.has("index"));
+        assertEquals(4, first.get("blockIndex").asLong());
         assertTrue(first.has("blockHash"));
         assertTrue(first.has("parentHash"));
         assertTrue(first.has("agentId"));
         assertTrue(first.has("toolName"));
+        assertTrue(first.has("argumentsHash"));
         assertTrue(first.has("decision"));
         assertTrue(first.has("redactionCount"));
         assertTrue(first.has("latencyMs"));
         assertTrue(first.has("timestamp"));
+        assertTrue(first.has("reviewedBy"));
+        assertFalse(first.get("argumentsHash").asText().contains("summary4"),
+                "The arguments themselves must never be returned");
+
+        long previous = Long.MAX_VALUE;
+        for (JsonNode record : node.get("records")) {
+            long blockIndex = record.get("blockIndex").asLong();
+            assertTrue(blockIndex < previous, "Records must be ordered by blockIndex descending");
+            previous = blockIndex;
+        }
 
         response.release();
     }
 
     @Test
-    @DisplayName("C-013: Filters audit records by agentId")
-    void testFilterByAgentId() throws Exception {
-        FullHttpResponse response = sendGet("/api/v1/audit/records?agentId=agent-A", "Bearer admin-token");
-        assertNotNull(response);
+    @DisplayName("C-013: Filters audit records by agentId and toolName")
+    void testFilterByAgentIdAndToolName() throws Exception {
+        FullHttpResponse response = sendGet("/api/v1/audit/records?agentId=agent-A&toolName=tool1",
+                "Bearer admin-token");
         assertEquals(HttpResponseStatus.OK, response.status());
 
-        String json = response.content().toString(StandardCharsets.UTF_8);
-        JsonNode node = mapper.readTree(json);
-
-        assertEquals(2, node.get("total").asInt());
-        assertEquals(2, node.get("records").size());
+        JsonNode node = body(response);
+        assertEquals(1, node.get("total").asInt());
         assertEquals("agent-A", node.get("records").get(0).get("agentId").asText());
-        assertEquals("agent-A", node.get("records").get(1).get("agentId").asText());
+        assertEquals("tool1", node.get("records").get(0).get("toolName").asText());
 
         response.release();
     }
 
     @Test
-    @DisplayName("C-013: Filters audit records by decision and minSeverity")
-    void testFilterByDecisionAndSeverity() throws Exception {
-        // Filter by decision=block
-        FullHttpResponse blockResp = sendGet("/api/v1/audit/records?decision=block", "Bearer admin-token");
-        assertNotNull(blockResp);
-        assertEquals(HttpResponseStatus.OK, blockResp.status());
-        JsonNode blockNode = mapper.readTree(blockResp.content().toString(StandardCharsets.UTF_8));
-        assertEquals(1, blockNode.get("total").asInt());
-        assertEquals("block", blockNode.get("records").get(0).get("decision").asText());
-        blockResp.release();
+    @DisplayName("C-013: Filters audit records by decision")
+    void testFilterByDecision() throws Exception {
+        FullHttpResponse response = sendGet("/api/v1/audit/records?decision=block", "Bearer admin-token");
+        assertEquals(HttpResponseStatus.OK, response.status());
 
-        // Filter by minSeverity=high (matches 'block')
-        FullHttpResponse highResp = sendGet("/api/v1/audit/records?minSeverity=high", "Bearer admin-token");
-        assertNotNull(highResp);
-        assertEquals(HttpResponseStatus.OK, highResp.status());
-        JsonNode highNode = mapper.readTree(highResp.content().toString(StandardCharsets.UTF_8));
-        assertEquals(1, highNode.get("total").asInt());
-        highResp.release();
+        JsonNode node = body(response);
+        assertEquals(1, node.get("total").asInt());
+        assertEquals("block", node.get("records").get(0).get("decision").asText());
 
-        // Filter by minSeverity=medium (matches 'block' and 'require_approval')
-        FullHttpResponse medResp = sendGet("/api/v1/audit/records?minSeverity=medium", "Bearer admin-token");
-        assertNotNull(medResp);
-        assertEquals(HttpResponseStatus.OK, medResp.status());
-        JsonNode medNode = mapper.readTree(medResp.content().toString(StandardCharsets.UTF_8));
-        assertEquals(2, medNode.get("total").asInt());
-        medResp.release();
+        response.release();
+    }
+
+    @Test
+    @DisplayName("C-013: Filters audit records by exact blockHash")
+    void testFilterByBlockHash() throws Exception {
+        String blockHash = ledger.getBlock(2).getBlockHash();
+        FullHttpResponse response = sendGet("/api/v1/audit/records?blockHash=" + blockHash,
+                "Bearer admin-token");
+        assertEquals(HttpResponseStatus.OK, response.status());
+
+        JsonNode node = body(response);
+        assertEquals(1, node.get("total").asInt());
+        assertEquals(blockHash, node.get("records").get(0).get("blockHash").asText());
+
+        response.release();
     }
 
     @Test
     @DisplayName("C-013: Paginates audit records via limit and offset")
     void testPagination() throws Exception {
-        // limit=2, offset=0
         FullHttpResponse p1 = sendGet("/api/v1/audit/records?limit=2&offset=0", "Bearer auditor-token");
-        JsonNode node1 = mapper.readTree(p1.content().toString(StandardCharsets.UTF_8));
-        assertEquals(5, node1.get("total").asInt());
+        JsonNode node1 = body(p1);
+        assertEquals(4, node1.get("total").asInt());
         assertEquals(2, node1.get("records").size());
-        long firstIndex = node1.get("records").get(0).get("index").asLong();
+        long firstIndex = node1.get("records").get(0).get("blockIndex").asLong();
+        assertEquals(4, firstIndex);
         p1.release();
 
-        // limit=2, offset=2
         FullHttpResponse p2 = sendGet("/api/v1/audit/records?limit=2&offset=2", "Bearer auditor-token");
-        JsonNode node2 = mapper.readTree(p2.content().toString(StandardCharsets.UTF_8));
-        assertEquals(5, node2.get("total").asInt());
+        JsonNode node2 = body(p2);
+        assertEquals(4, node2.get("total").asInt());
         assertEquals(2, node2.get("records").size());
-        long secondIndex = node2.get("records").get(0).get("index").asLong();
-        assertTrue(secondIndex > firstIndex);
+        long secondIndex = node2.get("records").get(0).get("blockIndex").asLong();
+        assertTrue(secondIndex < firstIndex, "Pagination continues into older blocks");
         p2.release();
+    }
+
+    @Test
+    @DisplayName("C-013: An out-of-range limit, negative offset, or undeclared decision returns 400")
+    void testInvalidQueryParametersReturn400() {
+        FullHttpResponse badLimit = sendGet("/api/v1/audit/records?limit=501", "Bearer auditor-token");
+        assertEquals(HttpResponseStatus.BAD_REQUEST, badLimit.status());
+        badLimit.release();
+
+        FullHttpResponse badOffset = sendGet("/api/v1/audit/records?offset=-1", "Bearer auditor-token");
+        assertEquals(HttpResponseStatus.BAD_REQUEST, badOffset.status());
+        badOffset.release();
+
+        FullHttpResponse badDecision = sendGet("/api/v1/audit/records?decision=BLOCKED",
+                "Bearer auditor-token");
+        assertEquals(HttpResponseStatus.BAD_REQUEST, badDecision.status());
+        badDecision.release();
+
+        FullHttpResponse badDate = sendGet("/api/v1/audit/records?from=yesterday", "Bearer auditor-token");
+        assertEquals(HttpResponseStatus.BAD_REQUEST, badDate.status());
+        badDate.release();
     }
 
     @Test

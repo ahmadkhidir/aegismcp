@@ -168,10 +168,12 @@ public class AegisGatewayServer {
     }
 
     /**
-     * In-process seam for the probe and management suites. It assembles the management and probe
-     * handlers on the legacy authorizers; it does not attach an agent request path. The shipped
-     * path is {@link #AegisGatewayServer(GatewayConfiguration)}, which {@code main} builds from
-     * validated operator configuration.
+     * In-process seam for the probe suites. It attaches the management and probe handlers, which
+     * authorize through the verified OIDC token like the shipped path; because this seam supplies
+     * no identity provider, every management request fails closed with {@code 401}. It does not
+     * attach an agent request path. The shipped path is
+     * {@link #AegisGatewayServer(GatewayConfiguration)}, which {@code main} builds from validated
+     * operator configuration.
      */
     public AegisGatewayServer(String host, int port) {
         this(GatewayConfiguration.local(host, port),
@@ -227,7 +229,7 @@ public class AegisGatewayServer {
             GatewayMetrics gatewayMetrics,
             ComplianceReportEngine complianceReportEngine,
             boolean assembleRequestPath,
-            boolean strictManagementAuth
+            boolean productionMode
     ) {
         this.configuration = Objects.requireNonNull(configuration, "configuration must not be null");
         this.host = configuration.host();
@@ -250,34 +252,27 @@ public class AegisGatewayServer {
         this.sslContext = configuration.tls().enabled() ? buildSslContext(configuration.tls()) : null;
 
         ObjectMapper jsonMapper = JsonRpcCodec.getInstance().getMapper();
-        VerifiedManagementAuthorizers strict = strictManagementAuth
-                ? new VerifiedManagementAuthorizers(buildOidcValidator(configuration.identity()))
-                : null;
+        // Management endpoints always authorize through the verified OIDC token and the role set
+        // its contract names. When the identity provider is unconfigured the validator is absent
+        // and every management request fails closed with 401 rather than falling back to a
+        // permissive or token-substring check (FEAT-008, NFR-029).
+        VerifiedManagementAuthorizers managementAuthorizers =
+                new VerifiedManagementAuthorizers(buildOidcValidator(configuration.identity()));
 
-        this.auditVerificationHandler = strict == null
-                ? new AuditVerificationHandler(this.auditLedger, AuditVerificationEngine.getInstance(), jsonMapper,
-                        AuditVerificationHandler.defaultAuthorizer())
-                : new AuditVerificationHandler(this.auditLedger, AuditVerificationEngine.getInstance(), jsonMapper,
-                        strict.auditVerification());
-        this.auditRecordsHandler = strict == null
-                ? new AuditRecordsHandler(this.auditLedger, jsonMapper, AuditRecordsHandler.defaultAuthorizer())
-                : new AuditRecordsHandler(this.auditLedger, jsonMapper, strict.auditRecords());
-        this.complianceExportHandler = strict == null
-                ? new ComplianceExportHandler(this.complianceReportEngine, jsonMapper,
-                        ComplianceExportHandler.defaultAuthorizer())
-                : new ComplianceExportHandler(this.complianceReportEngine, jsonMapper, strict.compliance());
-        this.policyManagementHandler = strict == null
-                ? new PolicyManagementHandler(this.policyCache)
-                : new PolicyManagementHandler(this.policyCache, PolicyCompiler.getInstance(), jsonMapper, strict.policy());
-        this.approvalManagementHandler = strict == null
-                ? new ApprovalManagementHandler(this.approvalManager, jsonMapper,
-                        ApprovalManagementHandler.defaultAuthorizer())
-                : new ApprovalManagementHandler(this.approvalManager, jsonMapper, strict.approvals());
-        this.emergencyManagementHandler = strict == null
-                ? new EmergencyManagementHandler(this.killSwitchManager, this.gatewayMetrics, jsonMapper,
-                        EmergencyManagementHandler.defaultAuthorizer())
-                : new EmergencyManagementHandler(this.killSwitchManager, this.gatewayMetrics, jsonMapper,
-                        strict.emergency());
+        this.auditVerificationHandler = new AuditVerificationHandler(
+                this.auditLedger, AuditVerificationEngine.getInstance(), jsonMapper,
+                managementAuthorizers.auditVerification());
+        this.auditRecordsHandler = new AuditRecordsHandler(
+                this.auditLedger, jsonMapper, managementAuthorizers.auditRecords());
+        this.complianceExportHandler = new ComplianceExportHandler(
+                this.complianceReportEngine, jsonMapper, managementAuthorizers.compliance());
+        this.policyManagementHandler = new PolicyManagementHandler(
+                this.policyCache, PolicyCompiler.getInstance(), jsonMapper, managementAuthorizers.policy());
+        this.approvalManagementHandler = new ApprovalManagementHandler(
+                this.approvalManager, jsonMapper, managementAuthorizers.approvals());
+        this.emergencyManagementHandler = new EmergencyManagementHandler(
+                this.killSwitchManager, this.gatewayMetrics, this.auditLedger, jsonMapper,
+                managementAuthorizers.emergency());
 
         this.healthHandler = new HealthHandler(this.readiness);
 
@@ -302,7 +297,7 @@ public class AegisGatewayServer {
             this.mcpProxyHandler = null;
         }
 
-        if (strictManagementAuth && !configuration.rpcConfigured()) {
+        if (productionMode && !configuration.rpcConfigured()) {
             logger.warn("Gateway started without a complete serving configuration; missing: {}. "
                             + "Probes answer but readiness reports CONFIGURATION_INVALID and agent calls fail closed.",
                     configuration.missingOptionalSettings());

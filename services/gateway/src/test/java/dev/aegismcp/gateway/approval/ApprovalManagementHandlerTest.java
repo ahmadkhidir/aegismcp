@@ -2,7 +2,7 @@ package dev.aegismcp.gateway.approval;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import dev.aegismcp.gateway.codec.JsonRpcCodec;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
@@ -19,16 +19,28 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Unit tests for Netty HTTP handler implementing contracts C-003 and C-004.
- * Anchors: C-003, C-004, FEAT-006.
+ * Unit tests verifying the approval management contracts C-003, C-004, C-014, and C-019 against the
+ * Netty handler. Authentication is delegated to a test double that models the verified-token
+ * outcome; role enforcement itself is owned by the composition root's verified authorizers.
+ *
+ * <p>Anchors: FEAT-006, FEAT-008, C-003, C-004, C-014, C-019.
  */
 class ApprovalManagementHandlerTest {
 
-    private final ObjectMapper mapper = new ObjectMapper();
+    private static final String OPERATOR_TOKEN = "Bearer operator-token";
+    private static final String FORBIDDEN_TOKEN = "Bearer viewer-token";
+    private static final String REVIEWER_SUBJECT = "operator@example.com";
+
+    private final ObjectMapper mapper = JsonRpcCodec.getInstance().getMapper();
     private ApprovalManager approvalManager;
     private ApprovalManagementHandler handler;
     private EmbeddedChannel channel;
@@ -36,289 +48,243 @@ class ApprovalManagementHandlerTest {
     @BeforeEach
     void setUp() {
         approvalManager = new ApprovalManager(Duration.ofMinutes(5));
-        handler = new ApprovalManagementHandler(approvalManager);
+
+        ApprovalManagementHandler.ApprovalAuthorizer authorizer = (path, method, bearerToken) -> {
+            if (bearerToken == null || bearerToken.isBlank()) {
+                return ApprovalManagementHandler.ApprovalAuthorizer.AuthResult
+                        .unauthenticated("Missing authentication credentials");
+            }
+            if (bearerToken.contains("viewer") || bearerToken.contains("readonly")) {
+                return ApprovalManagementHandler.ApprovalAuthorizer.AuthResult
+                        .forbidden("Insufficient permissions for this operation");
+            }
+            return ApprovalManagementHandler.ApprovalAuthorizer.AuthResult.verified(REVIEWER_SUBJECT);
+        };
+
+        handler = new ApprovalManagementHandler(approvalManager, mapper, authorizer);
         channel = new EmbeddedChannel(handler);
     }
 
     @AfterEach
     void tearDown() {
-        if (approvalManager != null) {
-            approvalManager.close();
-        }
         if (channel != null) {
             channel.close();
         }
+        if (approvalManager != null) {
+            approvalManager.close();
+        }
     }
 
-    private FullHttpResponse sendRequest(HttpMethod method, String uri, String payload, String authHeader) {
-        ByteBuf content = (payload != null)
+    private FullHttpResponse send(HttpMethod method, String uri, String payload, String authHeader) {
+        ByteBuf content = payload != null
                 ? Unpooled.wrappedBuffer(payload.getBytes(StandardCharsets.UTF_8))
                 : Unpooled.EMPTY_BUFFER;
-
-        DefaultFullHttpRequest request = new DefaultFullHttpRequest(
-                HttpVersion.HTTP_1_1,
-                method,
-                uri,
-                content
-        );
+        DefaultFullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, method, uri, content);
         request.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");
         request.headers().set(HttpHeaderNames.CONTENT_LENGTH, content.readableBytes());
         if (authHeader != null) {
             request.headers().set(HttpHeaderNames.AUTHORIZATION, authHeader);
         }
-
         channel.writeInbound(request);
         return channel.readOutbound();
     }
 
-    private JsonNode parseBody(FullHttpResponse response) throws Exception {
+    private JsonNode body(FullHttpResponse response) throws Exception {
         byte[] bytes = new byte[response.content().readableBytes()];
         response.content().readBytes(bytes);
         return mapper.readTree(bytes);
     }
 
-    @Test
-    @DisplayName("C-003: GET /api/v1/approvals without Bearer token returns 401 Unauthorized")
-    void testGetApprovalsUnauthorized() throws Exception {
-        FullHttpResponse response = sendRequest(HttpMethod.GET, "/api/v1/approvals", null, null);
+    private String createTicket(String toolName) {
+        approvalManager.createAndSuspendTicket(
+                "agent-7", toolName, mapper.createObjectNode().put("secret", "value"),
+                80.0, "pol_critical", Duration.ofMinutes(5));
+        return approvalManager.getTickets("pending").stream()
+                .filter(ticket -> ticket.toolName().equals(toolName))
+                .findFirst()
+                .orElseThrow()
+                .id();
+    }
 
-        assertNotNull(response);
+    @Test
+    @DisplayName("C-003: GET /api/v1/approvals/pending without a token returns 401")
+    void pendingWithoutTokenReturns401() {
+        FullHttpResponse response = send(HttpMethod.GET, ApprovalManagementHandler.PENDING_PATH, null, null);
         assertEquals(HttpResponseStatus.UNAUTHORIZED, response.status());
-        JsonNode body = parseBody(response);
-        assertTrue(body.has("error"));
+        response.release();
     }
 
     @Test
-    @DisplayName("C-003: GET /api/v1/approvals with Bearer token returns 200 OK and tickets array")
-    void testGetApprovalsSuccess() throws Exception {
-        ObjectNode args = mapper.createObjectNode();
-        args.put("table", "audit_log");
-        approvalManager.createAndSuspendTicket("agent-sec", "truncate_table", args, 90.0, "pol_audit", Duration.ofMinutes(5));
-
-        FullHttpResponse response = sendRequest(HttpMethod.GET, "/api/v1/approvals", null, "Bearer operator-token-123");
-
-        assertNotNull(response);
-        assertEquals(HttpResponseStatus.OK, response.status());
-
-        JsonNode body = parseBody(response);
-        assertTrue(body.has("tickets"));
-        JsonNode tickets = body.get("tickets");
-        assertTrue(tickets.isArray());
-        assertEquals(1, tickets.size());
-
-        JsonNode t = tickets.get(0);
-        assertEquals("agent-sec", t.get("agentId").asText());
-        assertEquals("truncate_table", t.get("toolName").asText());
-        assertEquals("pending", t.get("status").asText());
-        assertEquals(90.0, t.get("riskScore").asDouble());
-        assertTrue(t.has("requestedAt"));
-        assertTrue(t.has("expiresAt"));
-        assertTrue(t.has("arguments"));
-    }
-
-    @Test
-    @DisplayName("C-003: GET /api/v1/approvals?status=pending filters tickets accurately")
-    void testGetApprovalsWithStatusFilter() throws Exception {
-        approvalManager.createAndSuspendTicket("agent-1", "tool_a", mapper.createObjectNode(), 50.0, "pol", Duration.ofMinutes(5));
-        approvalManager.createAndSuspendTicket("agent-2", "tool_b", mapper.createObjectNode(), 60.0, "pol", Duration.ofMinutes(5));
-
-        String ticket1Id = approvalManager.getTickets("pending").get(0).id();
-        approvalManager.submitDecision(ticket1Id, "APPROVE", "admin", "ok");
-
-        FullHttpResponse pendingResp = sendRequest(HttpMethod.GET, "/api/v1/approvals?status=pending", null, "Bearer admin-token");
-        assertEquals(HttpResponseStatus.OK, pendingResp.status());
-        JsonNode pendingBody = parseBody(pendingResp);
-        assertEquals(1, pendingBody.get("tickets").size());
-        assertEquals("pending", pendingBody.get("tickets").get(0).get("status").asText());
-
-        FullHttpResponse approvedResp = sendRequest(HttpMethod.GET, "/api/v1/approvals?status=approved", null, "Bearer admin-token");
-        assertEquals(HttpResponseStatus.OK, approvedResp.status());
-        JsonNode approvedBody = parseBody(approvedResp);
-        assertEquals(1, approvedBody.get("tickets").size());
-        assertEquals("approved", approvedBody.get("tickets").get(0).get("status").asText());
-    }
-
-    @Test
-    @DisplayName("C-004: POST /api/v1/approvals/{id}/decision without Bearer token returns 401 Unauthorized")
-    void testPostDecisionUnauthorized() throws Exception {
-        FullHttpResponse response = sendRequest(
-                HttpMethod.POST,
-                "/api/v1/approvals/appr_123/decision",
-                "{\"decision\":\"APPROVE\",\"reviewer\":\"test\",\"reason\":\"ok\"}",
-                null
-        );
-
-        assertNotNull(response);
-        assertEquals(HttpResponseStatus.UNAUTHORIZED, response.status());
-    }
-
-    @Test
-    @DisplayName("C-004: POST /api/v1/approvals/{id}/decision with readonly/viewer token returns 403 Forbidden")
-    void testPostDecisionForbidden() throws Exception {
-        FullHttpResponse response = sendRequest(
-                HttpMethod.POST,
-                "/api/v1/approvals/appr_123/decision",
-                "{\"decision\":\"APPROVE\",\"reviewer\":\"test\",\"reason\":\"ok\"}",
-                "Bearer viewer-token-999"
-        );
-
-        assertNotNull(response);
+    @DisplayName("C-003: a verified principal without the contract role returns 403")
+    void pendingWithForbiddenRoleReturns403() {
+        FullHttpResponse response = send(HttpMethod.GET, ApprovalManagementHandler.PENDING_PATH, null,
+                FORBIDDEN_TOKEN);
         assertEquals(HttpResponseStatus.FORBIDDEN, response.status());
+        response.release();
     }
 
     @Test
-    @DisplayName("C-004: POST /api/v1/approvals/{id}/decision with APPROVE returns 200 OK and updates ticket")
-    void testPostDecisionApproveSuccess() throws Exception {
-        approvalManager.createAndSuspendTicket("agent-ops", "restart_db", mapper.createObjectNode(), 70.0, "pol", Duration.ofMinutes(5));
-        String ticketId = approvalManager.getTickets("pending").get(0).id();
+    @DisplayName("C-003: pending tickets are ordered by expiry ascending")
+    void pendingTicketsAreOrderedByExpiry() throws Exception {
+        approvalManager.createAndSuspendTicket("agent-a", "tool_slow", mapper.createObjectNode(),
+                50.0, "pol", Duration.ofMinutes(4));
+        approvalManager.createAndSuspendTicket("agent-b", "tool_fast", mapper.createObjectNode(),
+                50.0, "pol", Duration.ofMinutes(1));
 
-        String payload = """
-                {
-                  "decision": "APPROVE",
-                  "reviewer": "elena_rostova",
-                  "reason": "Authorized scheduled maintenance"
-                }
-                """;
-
-        FullHttpResponse response = sendRequest(
-                HttpMethod.POST,
-                "/api/v1/approvals/" + ticketId + "/decision",
-                payload,
-                "Bearer operator-token"
-        );
-
-        assertNotNull(response);
+        FullHttpResponse response = send(HttpMethod.GET, ApprovalManagementHandler.PENDING_PATH, null,
+                OPERATOR_TOKEN);
         assertEquals(HttpResponseStatus.OK, response.status());
 
-        JsonNode body = parseBody(response);
-        assertEquals(ticketId, body.get("ticketId").asText());
-        assertEquals("APPROVE", body.get("status").asText());
-        assertTrue(body.has("processedAt"));
-
-        ApprovalTicket updated = approvalManager.getTicket(ticketId).orElseThrow();
-        assertEquals("approved", updated.status());
-        assertEquals("elena_rostova", updated.reviewer());
+        JsonNode json = body(response);
+        assertTrue(json.has("tickets"));
+        JsonNode tickets = json.get("tickets");
+        assertEquals(2, tickets.size());
+        assertTrue(tickets.get(0).get("expiresAt").asText()
+                .compareTo(tickets.get(1).get("expiresAt").asText()) < 0);
+        assertEquals("pending", tickets.get(0).get("status").asText());
+        assertTrue(tickets.get(0).has("argumentsPayload"));
+        assertFalse(tickets.get(0).get("argumentsPayload").asText().contains("secret"));
+        response.release();
     }
 
     @Test
-    @DisplayName("C-004: POST /api/v1/approvals/{id}/decision with REJECT returns 200 OK and updates ticket")
-    void testPostDecisionRejectSuccess() throws Exception {
-        approvalManager.createAndSuspendTicket("agent-ops", "delete_backup", mapper.createObjectNode(), 95.0, "pol", Duration.ofMinutes(5));
-        String ticketId = approvalManager.getTickets("pending").get(0).id();
-
-        String payload = """
-                {
-                  "decision": "REJECT",
-                  "reviewer": "secops_lead",
-                  "reason": "Backups cannot be deleted manually"
-                }
-                """;
-
-        FullHttpResponse response = sendRequest(
-                HttpMethod.POST,
-                "/api/v1/approvals/" + ticketId + "/decision",
-                payload,
-                "Bearer operator-token"
-        );
-
-        assertNotNull(response);
-        assertEquals(HttpResponseStatus.OK, response.status());
-
-        JsonNode body = parseBody(response);
-        assertEquals(ticketId, body.get("ticketId").asText());
-        assertEquals("REJECT", body.get("status").asText());
-
-        ApprovalTicket updated = approvalManager.getTicket(ticketId).orElseThrow();
-        assertEquals("rejected", updated.status());
-        assertEquals("secops_lead", updated.reviewer());
-        assertEquals("Backups cannot be deleted manually", updated.decisionReason());
-    }
-
-    @Test
-    @DisplayName("C-004: POST /api/v1/approvals/{id}/decision with non-existent ID returns 404 Not Found")
-    void testPostDecisionNotFound() throws Exception {
-        String payload = "{\"decision\":\"APPROVE\",\"reviewer\":\"admin\",\"reason\":\"ok\"}";
-        FullHttpResponse response = sendRequest(
-                HttpMethod.POST,
-                "/api/v1/approvals/non_existent_id/decision",
-                payload,
-                "Bearer admin-token"
-        );
-
-        assertNotNull(response);
-        assertEquals(HttpResponseStatus.NOT_FOUND, response.status());
-        JsonNode body = parseBody(response);
-        assertTrue(body.has("error"));
-    }
-
-    @Test
-    @DisplayName("C-004: POST /api/v1/approvals/{id}/decision on already resolved ticket returns 400 Bad Request")
-    void testPostDecisionAlreadyResolvedReturns400() throws Exception {
-        approvalManager.createAndSuspendTicket("agent-ops", "flush_cache", mapper.createObjectNode(), 40.0, "pol", Duration.ofMinutes(5));
-        String ticketId = approvalManager.getTickets("pending").get(0).id();
-
-        String payload = "{\"decision\":\"APPROVE\",\"reviewer\":\"admin\",\"reason\":\"first approval\"}";
-        FullHttpResponse firstResp = sendRequest(
-                HttpMethod.POST,
-                "/api/v1/approvals/" + ticketId + "/decision",
-                payload,
-                "Bearer admin-token"
-        );
-        assertEquals(HttpResponseStatus.OK, firstResp.status());
-
-        // Second attempt
-        FullHttpResponse secondResp = sendRequest(
-                HttpMethod.POST,
-                "/api/v1/approvals/" + ticketId + "/decision",
-                payload,
-                "Bearer admin-token"
-        );
-        assertEquals(HttpResponseStatus.BAD_REQUEST, secondResp.status());
-        JsonNode body = parseBody(secondResp);
-        assertTrue(body.has("error"));
-        assertTrue(body.get("error").asText().contains("already been resolved"));
-    }
-
-    @Test
-    @DisplayName("C-004: POST /api/v1/approvals/{id}/decision with invalid decision payload returns 400 Bad Request")
-    void testPostDecisionInvalidDecisionPayload() throws Exception {
-        approvalManager.createAndSuspendTicket("agent-ops", "action", mapper.createObjectNode(), 40.0, "pol", Duration.ofMinutes(5));
-        String ticketId = approvalManager.getTickets("pending").get(0).id();
-
-        // Unknown decision value
-        String payload = "{\"decision\":\"MAYBE\",\"reviewer\":\"admin\",\"reason\":\"not sure\"}";
-        FullHttpResponse response = sendRequest(
-                HttpMethod.POST,
-                "/api/v1/approvals/" + ticketId + "/decision",
-                payload,
-                "Bearer admin-token"
-        );
+    @DisplayName("C-003: an out-of-range limit is answered 400")
+    void pendingLimitOutOfRangeReturns400() {
+        FullHttpResponse response = send(HttpMethod.GET,
+                ApprovalManagementHandler.PENDING_PATH + "?limit=101", null, OPERATOR_TOKEN);
         assertEquals(HttpResponseStatus.BAD_REQUEST, response.status());
-
-        // Empty body
-        FullHttpResponse emptyResp = sendRequest(
-                HttpMethod.POST,
-                "/api/v1/approvals/" + ticketId + "/decision",
-                "",
-                "Bearer admin-token"
-        );
-        assertEquals(HttpResponseStatus.BAD_REQUEST, emptyResp.status());
+        response.release();
     }
 
     @Test
-    @DisplayName("FEAT-006: Non-approval endpoints pass through to downstream handlers in pipeline")
-    void testNonApprovalPathPassThrough() {
-        DefaultFullHttpRequest request = new DefaultFullHttpRequest(
-                HttpVersion.HTTP_1_1,
-                HttpMethod.GET,
-                "/health"
-        );
-        channel.writeInbound(request);
+    @DisplayName("C-004: approve resolves the ticket with the verified reviewer subject")
+    void approveUsesVerifiedSubject() throws Exception {
+        String ticketId = createTicket("wire_transfer");
 
-        // Request passes through to channel inbound buffer
-        DefaultFullHttpRequest forwarded = channel.readInbound();
-        assertNotNull(forwarded);
-        assertEquals("/health", forwarded.uri());
-        forwarded.release();
+        FullHttpResponse response = send(HttpMethod.POST,
+                "/api/v1/approvals/" + ticketId + "/approve", null, OPERATOR_TOKEN);
+        assertEquals(HttpResponseStatus.OK, response.status());
+
+        JsonNode json = body(response);
+        assertEquals(ticketId, json.get("ticketId").asText());
+        assertEquals("approved", json.get("status").asText());
+        assertEquals(REVIEWER_SUBJECT, json.get("reviewedBy").asText());
+        assertNotNull(json.get("processedAt").asText());
+        response.release();
+    }
+
+    @Test
+    @DisplayName("C-004: approve on an unknown ticket returns 404 and on a resolved ticket 409")
+    void approveUnknownAndResolvedTickets() {
+        FullHttpResponse unknown = send(HttpMethod.POST, "/api/v1/approvals/appr_missing/approve", null,
+                OPERATOR_TOKEN);
+        assertEquals(HttpResponseStatus.NOT_FOUND, unknown.status());
+        unknown.release();
+
+        String ticketId = createTicket("delete_all_data");
+        FullHttpResponse first = send(HttpMethod.POST, "/api/v1/approvals/" + ticketId + "/approve", null,
+                OPERATOR_TOKEN);
+        assertEquals(HttpResponseStatus.OK, first.status());
+        first.release();
+
+        FullHttpResponse second = send(HttpMethod.POST, "/api/v1/approvals/" + ticketId + "/approve", null,
+                OPERATOR_TOKEN);
+        assertEquals(HttpResponseStatus.CONFLICT, second.status());
+        second.release();
+    }
+
+    @Test
+    @DisplayName("C-014: reject without a reason returns 400 and with one records the reason")
+    void rejectRequiresReason() throws Exception {
+        String ticketId = createTicket("execute_sql");
+
+        FullHttpResponse empty = send(HttpMethod.POST, "/api/v1/approvals/" + ticketId + "/reject",
+                "{\"reason\":\"   \"}", OPERATOR_TOKEN);
+        assertEquals(HttpResponseStatus.BAD_REQUEST, empty.status());
+        empty.release();
+
+        FullHttpResponse rejected = send(HttpMethod.POST, "/api/v1/approvals/" + ticketId + "/reject",
+                "{\"reason\":\"Prohibited on production\"}", OPERATOR_TOKEN);
+        assertEquals(HttpResponseStatus.OK, rejected.status());
+
+        JsonNode json = body(rejected);
+        assertEquals("rejected", json.get("status").asText());
+        assertEquals(REVIEWER_SUBJECT, json.get("reviewedBy").asText());
+        assertEquals("Prohibited on production", json.get("rejectionReason").asText());
+        rejected.release();
+    }
+
+    @Test
+    @DisplayName("C-019: history requires a status and reports the matching total")
+    void historyRequiresStatusAndCounts() throws Exception {
+        FullHttpResponse missing = send(HttpMethod.GET, ApprovalManagementHandler.APPROVALS_BASE_PATH,
+                null, OPERATOR_TOKEN);
+        assertEquals(HttpResponseStatus.BAD_REQUEST, missing.status());
+        missing.release();
+
+        String approvedId = createTicket("tool_ok");
+        approvalManager.approve(approvedId, REVIEWER_SUBJECT);
+        String rejectedId = createTicket("tool_denied");
+        approvalManager.reject(rejectedId, REVIEWER_SUBJECT, "not permitted");
+
+        FullHttpResponse response = send(HttpMethod.GET,
+                ApprovalManagementHandler.APPROVALS_BASE_PATH + "?status=rejected&limit=5&offset=0",
+                null, OPERATOR_TOKEN);
+        assertEquals(HttpResponseStatus.OK, response.status());
+
+        JsonNode json = body(response);
+        assertEquals(1, json.get("total").asInt());
+        JsonNode ticket = json.get("tickets").get(0);
+        assertEquals("rejected", ticket.get("status").asText());
+        assertEquals(REVIEWER_SUBJECT, ticket.get("reviewedBy").asText());
+        assertEquals("not permitted", ticket.get("rejectionReason").asText());
+        response.release();
+    }
+
+    @Test
+    @DisplayName("C-019: an undeclared status value is answered 400")
+    void historyRejectsUnknownStatus() {
+        FullHttpResponse response = send(HttpMethod.GET,
+                ApprovalManagementHandler.APPROVALS_BASE_PATH + "?status=pending", null, OPERATOR_TOKEN);
+        assertEquals(HttpResponseStatus.BAD_REQUEST, response.status());
+        response.release();
+    }
+
+    @Test
+    @DisplayName("C-004: an expired ticket decision is answered 410 Gone")
+    void expiredTicketReturns410() throws Exception {
+        approvalManager.createAndSuspendTicket("agent-exp", "tool_exp", mapper.createObjectNode(),
+                50.0, "pol", Duration.ofMillis(50));
+        String ticketId = approvalManager.getTickets("pending").get(0).id();
+        Thread.sleep(150);
+
+        FullHttpResponse response = send(HttpMethod.POST,
+                "/api/v1/approvals/" + ticketId + "/approve", null, OPERATOR_TOKEN);
+        assertEquals(HttpResponseStatus.GONE, response.status());
+        response.release();
+    }
+
+    @Test
+    @DisplayName("C-003: a non-GET pending request is answered 405")
+    void pendingWrongMethodReturns405() {
+        FullHttpResponse response = send(HttpMethod.POST, ApprovalManagementHandler.PENDING_PATH, "{}",
+                OPERATOR_TOKEN);
+        assertEquals(HttpResponseStatus.METHOD_NOT_ALLOWED, response.status());
+        response.release();
+    }
+
+    @Test
+    @DisplayName("C-019: an unknown sub-path under approvals is answered 404")
+    void unknownSubPathReturns404() {
+        FullHttpResponse response = send(HttpMethod.GET, "/api/v1/approvals/unknown", null, OPERATOR_TOKEN);
+        assertEquals(HttpResponseStatus.NOT_FOUND, response.status());
+        response.release();
+    }
+
+    @Test
+    @DisplayName("The handler passes a non-approval path down the pipeline")
+    void nonApprovalPathIsForwarded() {
+        FullHttpResponse response = send(HttpMethod.GET, "/api/v1/policies", null, OPERATOR_TOKEN);
+        assertNull(response);
     }
 }

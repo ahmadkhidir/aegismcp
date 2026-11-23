@@ -45,23 +45,25 @@ public record ComplianceExportRequest(
         Instant fromInstant = null;
         Instant toInstant = null;
 
-        if (from != null && !from.isBlank()) {
-            try {
-                fromInstant = Instant.parse(from);
-            } catch (DateTimeParseException e) {
-                throw new IllegalArgumentException("Invalid 'from' timestamp: must be valid ISO-8601 format (" + from + ")");
-            }
+        if (from == null || from.isBlank()) {
+            throw new IllegalArgumentException("Missing required property 'from'");
+        }
+        try {
+            fromInstant = Instant.parse(from);
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException("Invalid 'from' timestamp: must be valid ISO-8601 format (" + from + ")");
         }
 
-        if (to != null && !to.isBlank()) {
-            try {
-                toInstant = Instant.parse(to);
-            } catch (DateTimeParseException e) {
-                throw new IllegalArgumentException("Invalid 'to' timestamp: must be valid ISO-8601 format (" + to + ")");
-            }
+        if (to == null || to.isBlank()) {
+            throw new IllegalArgumentException("Missing required property 'to'");
+        }
+        try {
+            toInstant = Instant.parse(to);
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException("Invalid 'to' timestamp: must be valid ISO-8601 format (" + to + ")");
         }
 
-        if (fromInstant != null && toInstant != null && fromInstant.isAfter(toInstant)) {
+        if (fromInstant.isAfter(toInstant)) {
             throw new IllegalArgumentException("Invalid date range: 'from' (" + from + ") cannot be after 'to' (" + to + ")");
         }
     }
