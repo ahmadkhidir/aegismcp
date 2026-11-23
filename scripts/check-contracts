@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# check-contracts - validate the interface contract set in contracts/.
+#
+# Checks:
+#   * no CONTRACTS.md remains anywhere in the working tree
+#   * every contract file is named C-###.md and its heading declares the same identifier
+#   * identifiers are unique
+#   * every contract declares Status, Owner, Auth, Request, at least one Response, Errors and
+#     Conformance test
+#   * every status is one of Draft, Frozen, Implemented
+#   * contracts/README.md indexes every contract exactly once with the same owner, status and
+#     conformance test, and links to the matching file
+#
+# Usage: scripts/check-contracts
+# Exit status: 0 when the contract set is valid, 1 otherwise.
+
+set -uo pipefail
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$script_dir/.." && pwd)
+contracts_dir="$repo_root/contracts"
+index="$contracts_dir/README.md"
+
+failures=0
+
+fail() {
+    printf 'check-contracts: %s\n' "$1" >&2
+    failures=$((failures + 1))
+}
+
+trim_into() {
+    local value=$1
+    value=${value#"${value%%[![:space:]]*}"}
+    TRIMMED=${value%"${value##*[![:space:]]}"}
+}
+
+valid_status() {
+    case " Draft Frozen Implemented " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_identifier() {
+    case $1 in
+        C-[0-9][0-9][0-9]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+index_rows=""
+index_ids=" "
+indexed_count=0
+
+if [ ! -f "$index" ]; then
+    fail "contracts/README.md is missing"
+else
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=${line%$'\r'}
+        case $line in
+            '|'*) ;;
+            *) continue ;;
+        esac
+
+        IFS='|' read -r _ link _title owner status conformance _rest <<< "$line"
+        trim_into "$link"; link=$TRIMMED
+        trim_into "$owner"; owner=$TRIMMED
+        trim_into "$status"; status=$TRIMMED
+        trim_into "$conformance"; conformance=$TRIMMED
+
+        case $link in
+            '[C-'[0-9][0-9][0-9]']('*')') ;;
+            *) continue ;;
+        esac
+
+        id=${link#*[}
+        id=${id%%]*}
+        target=${link#*(}
+        target=${target%)}
+        indexed_count=$((indexed_count + 1))
+
+        if [ -z "$owner" ] || [ -z "$status" ] || [ -z "$conformance" ]; then
+            fail "contracts/README.md row for $id is missing an owner, status, or conformance test"
+            continue
+        fi
+        if ! valid_status "$status"; then
+            fail "contracts/README.md row for $id has invalid status '$status'"
+        fi
+        case $index_ids in
+            *" $id "*)
+                fail "contract identifier $id is indexed more than once"
+                continue
+                ;;
+        esac
+        index_ids="$index_ids$id "
+
+        index_rows="$index_rows$id"$'\t'"$target"$'\t'"$owner"$'\t'"$status"$'\t'"$conformance"$'\n'
+    done < "$index"
+fi
+
+heading_records=""
+seen_headings=" "
+contract_count=0
+
+for file in "$contracts_dir"/C-*.md; do
+    [ -e "$file" ] || continue
+    base=${file##*/}
+
+    case $base in
+        C-[0-9][0-9][0-9].md) ;;
+        *)
+            fail "contract file contracts/$base is not named C-###.md"
+            continue
+            ;;
+    esac
+
+    id=${base%.md}
+    contract_count=$((contract_count + 1))
+
+    heading=""
+    status=""
+    owner=""
+    auth=""
+    request=""
+    conformance=""
+    errors_present=0
+    response_present=0
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=${line%$'\r'}
+        if [ -z "$heading" ]; then
+            heading=$line
+            continue
+        fi
+        case $line in
+            '**Status:**'*) status=${line#'**Status:**'} ;;
+            '**Owner:**'*) owner=${line#'**Owner:**'} ;;
+            '**Auth:**'*) auth=${line#'**Auth:**'} ;;
+            '**Request:**'*) request=${line#'**Request:**'} ;;
+            '**Errors:**'*) errors_present=1 ;;
+            '**Conformance test:**'*) conformance=${line#'**Conformance test:**'} ;;
+            '**Response'*) response_present=1 ;;
+        esac
+    done < "$file"
+
+    trim_into "$status"; status=$TRIMMED
+    trim_into "$owner"; owner=$TRIMMED
+    trim_into "$auth"; auth=$TRIMMED
+    trim_into "$request"; request=$TRIMMED
+    trim_into "$conformance"; conformance=$TRIMMED
+
+    heading_id=""
+    case $heading in
+        '# C-'[0-9][0-9][0-9]': '*)
+            heading_id=${heading#'# '}
+            heading_id=${heading_id%%:*}
+            ;;
+    esac
+    if ! is_identifier "$heading_id"; then
+        heading_id=""
+        fail "contracts/$base heading is not '# C-###: Title'"
+    elif [ "$heading_id" != "$id" ]; then
+        fail "$base heading declares $heading_id but the file is named $id.md"
+    fi
+    case $seen_headings in
+        *" ${heading_id:-$id} "*)
+            fail "contract identifier ${heading_id:-$id} is declared by more than one file"
+            ;;
+        *) seen_headings="$seen_headings${heading_id:-$id} " ;;
+    esac
+
+    [ -n "$status" ] || fail "contracts/$base has no Status value"
+    [ -n "$owner" ] || fail "contracts/$base has no Owner value"
+    [ -n "$auth" ] || fail "contracts/$base has no Auth value"
+    [ -n "$request" ] || fail "contracts/$base has no Request value"
+    [ -n "$conformance" ] || fail "contracts/$base has no Conformance test value"
+    [ "$errors_present" -eq 1 ] || fail "contracts/$base has no Errors field"
+    [ "$response_present" -eq 1 ] || fail "contracts/$base has no Response field"
+
+    if [ -n "$status" ] && ! valid_status "$status"; then
+        fail "contracts/$base has invalid status '$status'"
+    fi
+
+    indexed=0
+    while IFS=$'\t' read -r row_id row_target row_owner row_status row_conformance; do
+        [ -n "$row_id" ] || continue
+        [ "$row_id" = "$id" ] || continue
+        indexed=1
+
+        if [ "$row_owner" != "$owner" ]; then
+            fail "$id owner is '$owner' in contracts/$base but '$row_owner' in the index"
+        fi
+        if [ "$row_status" != "$status" ]; then
+            fail "$id status is '$status' in contracts/$base but '$row_status' in the index"
+        fi
+        conformance_simple=${conformance##*.}
+        if [ "$row_conformance" != "$conformance" ] && [ "$row_conformance" != "$conformance_simple" ]; then
+            fail "$id conformance test is '$conformance' in contracts/$base but '$row_conformance' in the index"
+        fi
+        break
+    done <<< "$index_rows"
+
+    if [ "$indexed" -eq 0 ]; then
+        fail "$id is not indexed in contracts/README.md"
+    fi
+done
+
+while IFS=$'\t' read -r row_id target _owner _status _conformance; do
+    [ -n "$row_id" ] || continue
+    if [ ! -f "$contracts_dir/$row_id.md" ]; then
+        fail "contracts/README.md indexes $row_id but contracts/$row_id.md does not exist"
+    elif [ "$target" != "$row_id.md" ]; then
+        fail "contracts/README.md links $row_id to $target instead of $row_id.md"
+    fi
+done <<< "$index_rows"
+
+while IFS= read -r stale; do
+    fail "CONTRACTS.md still exists: ${stale#"$repo_root"/}"
+done < <(find "$repo_root" \
+    \( -name .git -o -name .gradle -o -name build -o -name node_modules -o -path "$repo_root/docs" \) -prune -o \
+    -name CONTRACTS.md -print 2>/dev/null)
+
+if [ "$failures" -ne 0 ]; then
+    printf 'check-contracts: %d problem(s) found\n' "$failures" >&2
+    exit 1
+fi
+
+printf 'check-contracts: %s contracts valid (%s indexed)\n' "$contract_count" "$indexed_count"

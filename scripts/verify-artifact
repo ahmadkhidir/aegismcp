@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# verify-artifact - build the packaged gateway, boot it on an ephemeral port, and assert /health.
+#
+# The script builds the gateway distribution with the Gradle wrapper, starts the installed
+# launcher with AEGIS_GATEWAY_PORT=0 so the operating system assigns a free port, waits for the
+# server to announce the bound port, and requires GET /health to answer 200 with "status":"UP".
+# The process is stopped and its temporary files are removed on exit, success or failure.
+#
+# Usage: scripts/verify-artifact
+# Exit status: 0 when the packaged artifact boots and answers the health check, 1 otherwise.
+
+set -uo pipefail
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$script_dir/.." && pwd)
+
+work_dir=$(mktemp -d 2>/dev/null) || {
+    printf 'verify-artifact: cannot create a temporary directory\n' >&2
+    exit 1
+}
+log="$work_dir/gateway.log"
+body="$work_dir/health.json"
+server_pid=""
+
+cleanup() {
+    if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
+        kill "$server_pid" 2>/dev/null
+        for _ in $(seq 1 50); do
+            kill -0 "$server_pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill -9 "$server_pid" 2>/dev/null
+        wait "$server_pid" 2>/dev/null
+    fi
+    rm -rf "$work_dir"
+}
+trap cleanup EXIT
+
+show_log() {
+    if [ -s "$log" ]; then
+        printf -- '--- gateway log (tail) ---\n' >&2
+        tail -n 40 "$log" >&2
+        printf -- '--------------------------\n' >&2
+    fi
+}
+
+printf 'verify-artifact: building the gateway distribution\n'
+if ! "$repo_root/gradlew" :services:gateway:installDist --console=plain; then
+    printf 'verify-artifact: the gateway distribution failed to build\n' >&2
+    exit 1
+fi
+
+launcher="$repo_root/services/gateway/build/install/gateway/bin/gateway"
+if [ ! -f "$launcher" ]; then
+    printf 'verify-artifact: the installed launcher %s is missing\n' "${launcher#"$repo_root"/}" >&2
+    exit 1
+fi
+
+printf 'verify-artifact: booting the packaged gateway on an ephemeral port\n'
+AEGIS_GATEWAY_HOST=127.0.0.1 AEGIS_GATEWAY_PORT=0 \
+    bash "$launcher" > "$log" 2>&1 &
+server_pid=$!
+
+port=""
+SECONDS=0
+while [ "$SECONDS" -lt 30 ]; do
+    port=$(sed -n 's/.*started successfully on .*:\([0-9][0-9]*\).*/\1/p' "$log" | tail -n 1)
+    [ -n "$port" ] && break
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+        printf 'verify-artifact: the gateway exited before reporting a bound port\n' >&2
+        show_log
+        exit 1
+    fi
+    sleep 0.1
+done
+
+if [ -z "$port" ]; then
+    printf 'verify-artifact: the gateway did not report a bound port within 30 seconds\n' >&2
+    show_log
+    exit 1
+fi
+
+health_url="http://127.0.0.1:$port/health"
+health_ok=0
+SECONDS=0
+while [ "$SECONDS" -lt 30 ]; do
+    if curl --silent --show-error --fail --max-time 2 --output "$body" "$health_url" 2>"$work_dir/curl.err"; then
+        health_ok=1
+        break
+    fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+        printf 'verify-artifact: the gateway exited before answering %s\n' "$health_url" >&2
+        show_log
+        exit 1
+    fi
+    sleep 0.2
+done
+
+if [ "$health_ok" -ne 1 ]; then
+    printf 'verify-artifact: %s did not answer HTTP 200 within 30 seconds\n' "$health_url" >&2
+    [ -s "$work_dir/curl.err" ] && sed 's/^/verify-artifact: curl: /' "$work_dir/curl.err" >&2
+    show_log
+    exit 1
+fi
+
+if ! grep -q '"status"[[:space:]]*:[[:space:]]*"UP"' "$body"; then
+    printf 'verify-artifact: %s did not report status UP\n' "$health_url" >&2
+    printf 'verify-artifact: response body: %s\n' "$(cat "$body")" >&2
+    show_log
+    exit 1
+fi
+
+printf 'verify-artifact: packaged gateway booted on 127.0.0.1:%s and /health reported status UP\n' "$port"
