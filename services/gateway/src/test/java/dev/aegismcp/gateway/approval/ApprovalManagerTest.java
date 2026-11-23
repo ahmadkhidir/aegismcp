@@ -20,8 +20,15 @@ import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -35,12 +42,14 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class ApprovalManagerTest {
 
+    private static final String PROVIDER_KEY = TestCredentials.providerKey();
+
     private final ObjectMapper mapper = new ObjectMapper();
     private ApprovalManager approvalManager;
 
     @BeforeEach
     void setUp() {
-        approvalManager = new ApprovalManager(Duration.ofSeconds(2));
+        approvalManager = new ApprovalManager(Duration.ofSeconds(2), ApprovalNotificationConfig.none());
     }
 
     @AfterEach
@@ -120,8 +129,8 @@ class ApprovalManagerTest {
     }
 
     @Test
-    @DisplayName("FEAT-006 / C-004: Operator REJECT decision resumes future with Policy Violation (-32001 -> HTTP 403)")
-    void testOperatorRejectionFailsWithPolicyViolation() throws ExecutionException, InterruptedException, TimeoutException {
+    @DisplayName("FEAT-006 / C-001: Operator REJECT decision fails the call with -32002 APPROVAL_DENIED (HTTP 403)")
+    void testOperatorRejectionFailsWithApprovalDenied() throws ExecutionException, InterruptedException, TimeoutException {
         ObjectNode args = mapper.createObjectNode();
         args.put("query", "DROP DATABASE users;");
 
@@ -148,7 +157,8 @@ class ApprovalManagerTest {
         assertInstanceOf(InterceptionVerdict.Block.class, verdict);
         InterceptionVerdict.Block block = (InterceptionVerdict.Block) verdict;
 
-        assertEquals(JsonRpcError.POLICY_VIOLATION, block.error().code());
+        assertEquals(JsonRpcError.APPROVAL_TIMED_OUT, block.error().code());
+        assertEquals(JsonRpcError.MACHINE_APPROVAL_DENIED, block.error().machineCode());
         assertTrue(block.error().message().contains("Prohibited operation on production cluster"));
         assertEquals(io.netty.handler.codec.http.HttpResponseStatus.FORBIDDEN, block.error().toHttpStatus());
 
@@ -162,7 +172,7 @@ class ApprovalManagerTest {
     @DisplayName("FEAT-006: Timeout auto-rejection completes future with Approval Timed Out (-32002 -> HTTP 408)")
     void testTimeoutAutoRejection() throws ExecutionException, InterruptedException, TimeoutException {
         // Short TTL for deterministic test execution
-        ApprovalManager quickTimeoutManager = new ApprovalManager(Duration.ofMillis(200));
+        ApprovalManager quickTimeoutManager = new ApprovalManager(Duration.ofMillis(200), ApprovalNotificationConfig.none());
         try {
             CompletableFuture<InterceptionVerdict> future = quickTimeoutManager.createAndSuspendTicket(
                     "agent-cron",
@@ -304,5 +314,96 @@ class ApprovalManagerTest {
 
         InterceptionVerdict verdict = future.get(1, TimeUnit.SECONDS);
         assertInstanceOf(InterceptionVerdict.Allow.class, verdict);
+    }
+
+    @Test
+    @DisplayName("FEAT-006: a ticket token is appr_ followed by 26 base32 characters and never repeats")
+    void ticketTokenMatchesTheSpecifiedShape() {
+        Set<String> issued = new HashSet<>();
+        for (int i = 0; i < 50; i++) {
+            String token = ApprovalManager.newTicketId();
+            assertTrue(token.matches("^appr_[A-Z2-7]{26}$"), "Unexpected token shape: " + token);
+            assertTrue(issued.add(token), "Ticket tokens must not repeat");
+        }
+    }
+
+    @Test
+    @DisplayName("FEAT-006: two simultaneous decisions apply exactly one and the loser reports the recorded outcome")
+    void concurrentDecisionsApplyOnce() throws Exception {
+        approvalManager.createAndSuspendTicket("agent-race", "delete_everything",
+                mapper.createObjectNode(), 99.0, "pol_db", Duration.ofMinutes(5));
+        String ticketId = approvalManager.getTickets("pending").get(0).id();
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            CountDownLatch start = new CountDownLatch(1);
+            List<Future<String>> results = new ArrayList<>();
+            for (String reviewer : List.of("reviewer-a", "reviewer-b")) {
+                results.add(pool.submit(() -> {
+                    start.await();
+                    try {
+                        approvalManager.approve(ticketId, reviewer);
+                        return "won:" + reviewer;
+                    } catch (ApprovalException.TicketAlreadyResolvedException e) {
+                        return "lost:" + reviewer;
+                    }
+                }));
+            }
+            start.countDown();
+
+            List<String> outcomes = new ArrayList<>();
+            for (Future<String> result : results) {
+                outcomes.add(result.get(5, TimeUnit.SECONDS));
+            }
+
+            assertEquals(1, outcomes.stream().filter(outcome -> outcome.startsWith("won:")).count());
+            assertEquals(1, outcomes.stream().filter(outcome -> outcome.startsWith("lost:")).count());
+
+            String winner = outcomes.stream().filter(outcome -> outcome.startsWith("won:"))
+                    .findFirst().orElseThrow().substring(4);
+            ApprovalTicket resolved = approvalManager.getTicket(ticketId).orElseThrow();
+            assertEquals("approved", resolved.status());
+            assertEquals(winner, resolved.reviewer());
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    @DisplayName("FEAT-006: suspending a call dispatches one masked notification and keeps the ticket pending")
+    void suspendingCallDispatchesMaskedNotification() {
+        List<ApprovalNotification> delivered = new ArrayList<>();
+        ApprovalNotificationChannel recording = new ApprovalNotificationChannel() {
+            @Override
+            public String name() {
+                return "recorder";
+            }
+
+            @Override
+            public void deliver(ApprovalNotification notification) {
+                delivered.add(notification);
+            }
+        };
+        ApprovalNotificationDispatcher dispatcher = new ApprovalNotificationDispatcher(
+                List.of(recording), 1, Duration.ZERO, Runnable::run, false, duration -> {
+                });
+
+        try (ApprovalManager manager = new ApprovalManager(
+                Duration.ofMinutes(5), ApprovalNotificationConfig.none(), dispatcher)) {
+            ObjectNode args = mapper.createObjectNode();
+            args.put("secret", PROVIDER_KEY);
+
+            manager.createAndSuspendTicket("agent-pay", "charge_card", args, 80.0, "pol_pay",
+                    "Refund the disputed charge", Duration.ofMinutes(5));
+
+            assertEquals(1, delivered.size());
+            ApprovalNotification notification = delivered.get(0);
+            assertFalse(notification.argumentsPayload().contains(PROVIDER_KEY),
+                    "Notification arguments must be DLP-masked");
+            assertEquals("Refund the disputed charge", notification.agentIntent());
+            assertEquals("pending", manager.getTicket(notification.ticketId()).orElseThrow().status());
+            assertTrue(dispatcher.recordFor(notification.ticketId(), "recorder").orElseThrow().delivered(),
+                    "The delivery outcome must be recorded");
+        }
     }
 }
