@@ -4,10 +4,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
 import { PolicyManagerScreen } from '../screens/PolicyManagerScreen';
 import { AegisApi, ApiError } from '../services/api';
-import { PolicyRecord } from '../types/contracts';
+import { PolicyRecord, PolicySimulateResponse } from '../types/contracts';
 
 const RAW_YAML = `apiVersion: security.aegis.io/v1alpha1
 kind: SecurityPolicy
@@ -199,5 +199,90 @@ describe('PolicyManagerScreen', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('error-state')).not.toBeInTheDocument();
     });
+  });
+
+  it('keeps an auditor to the read-only policy surface', async () => {
+    render(<PolicyManagerScreen canManagePolicy={false} canSimulatePolicy={false} />);
+
+    expect(await screen.findByTestId('policy-readonly-notice')).toHaveTextContent(
+      /admin role/i
+    );
+    expect(screen.getByTestId('save-draft-button')).toBeDisabled();
+    expect(screen.getByTestId('deploy-policy-button')).toBeDisabled();
+    expect(screen.getByTestId('simulate-test-button')).toBeDisabled();
+    expect(screen.getByTestId('policy-yaml-editor')).toHaveValue(RAW_YAML);
+  });
+
+  it('lets an operator simulate without publishing or activating', async () => {
+    render(<PolicyManagerScreen canManagePolicy={false} canSimulatePolicy />);
+
+    expect(await screen.findByTestId('policy-readonly-notice')).toBeInTheDocument();
+    expect(screen.getByTestId('save-draft-button')).toBeDisabled();
+    expect(screen.getByTestId('deploy-policy-button')).toBeDisabled();
+    expect(screen.getByTestId('simulate-test-button')).not.toBeDisabled();
+  });
+
+  it('disables the deployment controls while activation is in flight', async () => {
+    let resolveActivation: (value: PolicyRecord) => void = () => {};
+    vi.mocked(AegisApi.activatePolicy).mockReturnValue(
+      new Promise((resolve) => {
+        resolveActivation = resolve;
+      })
+    );
+
+    render(<PolicyManagerScreen />);
+    fireEvent.change(await screen.findByTestId('policy-yaml-editor'), {
+      target: { value: `${RAW_YAML}# edited\n` },
+    });
+
+    const deploy = screen.getByTestId('deploy-policy-button');
+    fireEvent.click(deploy);
+
+    await waitFor(() => expect(deploy).toBeDisabled());
+    expect(screen.getByTestId('save-draft-button')).toBeDisabled();
+
+    resolveActivation({ ...ACTIVE_POLICY, version: '2.5.0', rawYaml: `${RAW_YAML}# edited\n` });
+    await act(async () => {});
+    expect(screen.getByTestId('policy-action-message')).toHaveTextContent('Activated');
+  });
+
+  it('switches from synced to unsaved when the document changes', async () => {
+    render(<PolicyManagerScreen />);
+
+    await screen.findByTestId('policy-yaml-editor');
+    expect(screen.getByText('Synced')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId('policy-yaml-editor'), {
+      target: { value: `${RAW_YAML}# edited\n` },
+    });
+
+    expect(screen.getByText('Draft unsaved')).toBeInTheDocument();
+  });
+
+  it('disables the simulator while an evaluation is in flight', async () => {
+    let resolveSimulation: (value: PolicySimulateResponse) => void = () => {};
+    vi.mocked(AegisApi.simulatePolicy).mockReturnValue(
+      new Promise((resolve) => {
+        resolveSimulation = resolve;
+      })
+    );
+
+    render(<PolicyManagerScreen />);
+    fireEvent.change(await screen.findByLabelText('Target Tool'), {
+      target: { value: 'bash_run_command' },
+    });
+    fireEvent.change(screen.getByLabelText('Agent Workload Identity'), {
+      target: { value: 'spiffe://example.org/ns/dev/sa/codegen-assistant' },
+    });
+
+    const simulate = screen.getByTestId('simulate-test-button');
+    fireEvent.click(simulate);
+
+    await waitFor(() => expect(simulate).toBeDisabled());
+    expect(simulate).toHaveTextContent('Evaluating Rules...');
+
+    resolveSimulation({ verdict: 'ALLOWED', ruleMatched: null, violations: [] });
+    await act(async () => {});
+    expect(simulate).not.toBeDisabled();
   });
 });

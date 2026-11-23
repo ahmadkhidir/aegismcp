@@ -35,7 +35,20 @@ import {
 } from '../types/contracts';
 import { oidcService } from './oidc';
 
-const API_BASE = '/api/v1';
+const DEFAULT_API_BASE = '/api/v1';
+
+/**
+ * Gateway API base from configuration. The default reaches the Vite dev-server
+ * proxy in development and the same origin when the console is served by the
+ * gateway. A deployment that serves the console from another origin sets
+ * `VITE_API_BASE_URL` to the gateway's absolute base.
+ */
+export function readApiBase(env: Pick<ImportMetaEnv, 'VITE_API_BASE_URL'>): string {
+  const configured = (env.VITE_API_BASE_URL ?? '').trim().replace(/\/+$/, '');
+  return configured || DEFAULT_API_BASE;
+}
+
+const API_BASE = readApiBase(import.meta.env);
 
 export class ApiError extends Error {
   readonly status: number;
@@ -206,6 +219,11 @@ export function subscribeToTrafficStream(handlers: TrafficStreamHandlers): () =>
         // Keep the status-bearing message.
       }
       handlers.onError?.(message);
+      if (response.status === 401 || response.status === 403) {
+        // A missing session or a role refusal does not heal by retrying.
+        handlers.onStatus?.('disconnected');
+        return;
+      }
       scheduleRetry();
       return;
     }
@@ -230,7 +248,7 @@ export function subscribeToTrafficStream(handlers: TrafficStreamHandlers): () =>
       while (!disposed) {
         const { value, done } = await reader.read();
         if (done) break;
-        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+        buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, '\n');
 
         let boundary = buffer.indexOf('\n\n');
         while (boundary !== -1) {

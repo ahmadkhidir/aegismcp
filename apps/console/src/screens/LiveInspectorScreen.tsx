@@ -32,6 +32,8 @@ interface LiveInspectorScreenProps {
   onApprovalEvent?: () => void;
 }
 
+const MAX_BUFFERED_EVENTS = 1000;
+
 export const LiveInspectorScreen: React.FC<LiveInspectorScreenProps> = ({
   onReconnected,
   onSystemEvent,
@@ -39,6 +41,7 @@ export const LiveInspectorScreen: React.FC<LiveInspectorScreenProps> = ({
 }) => {
   const [events, setEvents] = useState<InspectorEvent[]>([]);
   const [isPaused, setIsPaused] = useState(false);
+  const [pausedBufferCount, setPausedBufferCount] = useState(0);
   const [autoScroll, setAutoScroll] = useState(true);
   const [selectedEvent, setSelectedEvent] = useState<InspectorEvent | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<StreamStatus>('connecting');
@@ -49,14 +52,24 @@ export const LiveInspectorScreen: React.FC<LiveInspectorScreenProps> = ({
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
 
   const pausedRef = useRef(isPaused);
+  const pausedEventsRef = useRef<InspectorEvent[]>([]);
   const tableBottomRef = useRef<HTMLDivElement>(null);
   pausedRef.current = isPaused;
 
   useEffect(() => {
     const unsubscribe = AegisApi.subscribeToTrafficStream({
       onEvent: (newEvent) => {
-        if (pausedRef.current) return;
-        setEvents((previous) => [newEvent, ...previous].slice(0, 500));
+        if (pausedRef.current) {
+          // A paused inspector keeps receiving frames; they are counted in the
+          // background and shown when the operator resumes (screens/02).
+          pausedEventsRef.current = [newEvent, ...pausedEventsRef.current].slice(
+            0,
+            MAX_BUFFERED_EVENTS
+          );
+          setPausedBufferCount(pausedEventsRef.current.length);
+          return;
+        }
+        setEvents((previous) => [newEvent, ...previous].slice(0, MAX_BUFFERED_EVENTS));
       },
       onStatus: (status) => {
         setConnectionStatus(status);
@@ -78,8 +91,22 @@ export const LiveInspectorScreen: React.FC<LiveInspectorScreenProps> = ({
   }, [events, autoScroll]);
 
   const handleClearBuffer = () => {
+    pausedEventsRef.current = [];
+    setPausedBufferCount(0);
     setEvents([]);
     setSelectedEvent(null);
+  };
+
+  const togglePause = () => {
+    if (isPaused) {
+      const buffered = pausedEventsRef.current;
+      pausedEventsRef.current = [];
+      setPausedBufferCount(0);
+      if (buffered.length > 0) {
+        setEvents((previous) => [...buffered, ...previous].slice(0, MAX_BUFFERED_EVENTS));
+      }
+    }
+    setIsPaused((previous) => !previous);
   };
 
   const filteredEvents = events.filter((event) => {
@@ -101,13 +128,13 @@ export const LiveInspectorScreen: React.FC<LiveInspectorScreenProps> = ({
       {connectionStatus === 'reconnecting' && (
         <div
           data-testid="reconnecting-banner"
-          className="bg-warning-500/20 border-b border-warning-500 text-warning-900 px-space-md py-1.5 flex items-center justify-between text-xs font-mono"
+          className="bg-warning-500/20 border-b border-warning-500 text-warning-900 px-space-md py-1.5 flex items-center justify-between text-caption font-mono"
         >
           <div className="flex items-center gap-2">
             <RotateCw className="w-3.5 h-3.5 animate-spin text-warning-500" />
             <span>Reconnecting to the live traffic stream…</span>
           </div>
-          <span className="text-[11px] text-grey-500">Automatic retry is active</span>
+          <span className="text-caption text-grey-500">Automatic retry is active</span>
         </div>
       )}
 
@@ -115,7 +142,7 @@ export const LiveInspectorScreen: React.FC<LiveInspectorScreenProps> = ({
         <div
           data-testid="stream-error-banner"
           role="alert"
-          className="bg-error-100 border-b border-error-300 text-error-900 px-space-md py-2 flex flex-wrap items-center justify-between gap-2 text-xs"
+          className="bg-error-100 border-b border-error-300 text-error-900 px-space-md py-2 flex flex-wrap items-center justify-between gap-2 text-caption"
         >
           <div className="flex items-center gap-2">
             <WifiOff className="w-4 h-4 text-error-500" />
@@ -137,9 +164,9 @@ export const LiveInspectorScreen: React.FC<LiveInspectorScreenProps> = ({
       <div className="p-space-md bg-grey-100 border-b border-grey-300 flex flex-wrap items-center justify-between gap-space-md">
         <div className="flex items-center gap-space-sm">
           <button
-            onClick={() => setIsPaused(!isPaused)}
+            onClick={togglePause}
             data-testid="stream-pause-toggle"
-            className={`inline-flex items-center gap-1.5 px-space-md py-1.5 rounded-radius-md text-xs font-bold transition-colors ${
+            className={`inline-flex items-center gap-1.5 px-space-md py-1.5 rounded-radius-md text-caption font-bold transition-colors ${
               isPaused
                 ? 'bg-primary-500 hover:bg-primary-600 text-grey-900'
                 : 'bg-grey-200 hover:bg-grey-300 text-grey-800'
@@ -152,14 +179,14 @@ export const LiveInspectorScreen: React.FC<LiveInspectorScreenProps> = ({
           <button
             onClick={() => setAutoScroll(!autoScroll)}
             data-testid="autoscroll-toggle"
-            className={`px-space-sm py-1.5 rounded-radius-md text-xs font-mono font-medium transition-colors ${
+            className={`px-space-sm py-1.5 rounded-radius-md text-caption font-mono font-medium transition-colors ${
               autoScroll ? 'bg-grey-200 text-primary-500' : 'bg-grey-200 text-grey-500'
             }`}
           >
             Auto-scroll: {autoScroll ? 'ON' : 'OFF'}
           </button>
 
-          <div className="flex items-center gap-2 px-space-sm py-1 bg-grey-200 border border-grey-300 rounded-radius-md text-xs font-mono">
+          <div className="flex items-center gap-2 px-space-sm py-1 bg-grey-200 border border-grey-300 rounded-radius-md text-caption font-mono">
             <span
               className={`w-2 h-2 rounded-radius-full ${
                 isPaused
@@ -172,6 +199,14 @@ export const LiveInspectorScreen: React.FC<LiveInspectorScreenProps> = ({
             <span className="text-grey-700">
               {isPaused ? 'PAUSED' : connectionStatus.toUpperCase()}
             </span>
+            {isPaused && pausedBufferCount > 0 && (
+              <span
+                data-testid="paused-buffer-count"
+                className="text-warning-500 pl-1 border-l border-grey-300"
+              >
+                +{pausedBufferCount} buffered
+              </span>
+            )}
             <span className="text-grey-500 pl-1 border-l border-grey-300">
               {events.length} frames
             </span>
@@ -195,11 +230,11 @@ export const LiveInspectorScreen: React.FC<LiveInspectorScreenProps> = ({
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
               placeholder="Filter tool, agent, or event ID..."
-              className="pl-8 pr-space-md py-1.5 bg-grey-200 border border-grey-300 rounded-radius-md text-xs text-grey-900 placeholder:text-grey-500 focus:border-primary-500 outline-none w-64"
+              className="pl-8 pr-space-md py-1.5 bg-grey-200 border border-grey-300 rounded-radius-md text-caption text-grey-900 placeholder:text-grey-500 focus:border-primary-500 outline-none w-64"
             />
           </div>
 
-          <div className="flex items-center gap-1.5 bg-grey-200 border border-grey-300 rounded-radius-md px-2 py-1 text-xs">
+          <div className="flex items-center gap-1.5 bg-grey-200 border border-grey-300 rounded-radius-md px-2 py-1 text-caption">
             <Filter className="w-3.5 h-3.5 text-grey-500" />
             <select
               value={statusFilter}
@@ -259,7 +294,7 @@ export const LiveInspectorScreen: React.FC<LiveInspectorScreenProps> = ({
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[500px] text-left text-xs font-mono">
+              <table className="w-full min-w-[500px] text-left text-caption font-mono">
                 <thead className="bg-grey-100 border-b border-grey-300 text-grey-500 sticky top-0 z-10">
                   <tr>
                     <th className="py-2.5 px-space-md font-medium">Time (UTC)</th>
@@ -329,12 +364,12 @@ export const LiveInspectorScreen: React.FC<LiveInspectorScreenProps> = ({
                   </button>
                   <div>
                     <div className="flex items-center gap-2">
-                      <span className="font-mono text-xs font-bold text-grey-900">
+                      <span className="font-mono text-caption font-bold text-grey-900">
                         {selectedEvent.eventId}
                       </span>
                       <StatusPill verdict={selectedEvent.decision} />
                     </div>
-                    <p className="text-[11px] font-mono text-grey-500 mt-0.5">
+                    <p className="text-caption font-mono text-grey-500 mt-0.5">
                       {new Date(selectedEvent.timestamp).toISOString()}
                     </p>
                   </div>
@@ -348,7 +383,7 @@ export const LiveInspectorScreen: React.FC<LiveInspectorScreenProps> = ({
                 </button>
               </div>
 
-              <div className="p-space-sm bg-grey-200 border border-grey-300 rounded-radius-md text-xs font-mono space-y-1.5">
+              <div className="p-space-sm bg-grey-200 border border-grey-300 rounded-radius-md text-caption font-mono space-y-1.5">
                 <div>
                   <span className="text-grey-500">Agent SPIFFE ID: </span>
                   <span className="text-accent-500 break-all">{selectedEvent.agentId}</span>
@@ -376,7 +411,7 @@ export const LiveInspectorScreen: React.FC<LiveInspectorScreenProps> = ({
               />
             </div>
           ) : (
-            <div className="h-full flex flex-col items-center justify-center p-space-lg text-center text-grey-500 text-xs">
+            <div className="h-full flex flex-col items-center justify-center p-space-lg text-center text-grey-500 text-caption">
               <ExternalLink className="w-8 h-8 mb-2 opacity-50" />
               <span>
                 Select an event row to inspect the intercepted arguments and the security

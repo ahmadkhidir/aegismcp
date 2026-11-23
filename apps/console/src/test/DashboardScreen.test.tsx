@@ -86,11 +86,21 @@ describe('DashboardScreen', () => {
       />
     );
 
-    expect(await screen.findByTestId('threat-level-badge')).toHaveTextContent('NORMAL');
-    expect(await screen.findByTestId('metric-active-agents')).toHaveTextContent('17');
-    expect(await screen.findByTestId('metric-tool-calls')).toHaveTextContent('1,800');
-    expect(await screen.findByTestId('metric-blocked-violations')).toHaveTextContent('12');
-    expect(await screen.findByTestId('metric-pending-approvals')).toHaveTextContent('1');
+    await waitFor(() =>
+      expect(screen.getByTestId('threat-level-badge')).toHaveTextContent('NORMAL')
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId('metric-active-agents')).toHaveTextContent('17')
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId('metric-tool-calls')).toHaveTextContent('1,800')
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId('metric-blocked-violations')).toHaveTextContent('12')
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId('metric-pending-approvals')).toHaveTextContent('1')
+    );
 
     expect(await screen.findByText('Recent Security Violations')).toBeInTheDocument();
     expect(screen.getByText('prompt injection')).toBeInTheDocument();
@@ -125,8 +135,54 @@ describe('DashboardScreen', () => {
       <DashboardScreen onNavigateTo={vi.fn()} onOpenKillSwitch={vi.fn()} threatLevel={null} />
     );
 
-    expect(await screen.findByTestId('threat-level-badge')).toHaveTextContent('LOCKDOWN');
+    await waitFor(() =>
+      expect(screen.getByTestId('threat-level-badge')).toHaveTextContent('LOCKDOWN')
+    );
     expect(screen.getByText(/Emergency lockdown active/i)).toBeInTheDocument();
+  });
+
+  it('surfaces elevated posture and the filtered inspector entry', async () => {
+    vi.spyOn(AegisApi, 'getSystemStatus').mockResolvedValue({ ...STATUS, status: 'ELEVATED' });
+
+    render(
+      <DashboardScreen onNavigateTo={vi.fn()} onOpenKillSwitch={vi.fn()} threatLevel={null} />
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId('threat-level-badge')).toHaveTextContent('ELEVATED')
+    );
+    expect(screen.getByText(/Elevated threat detection/i)).toBeInTheDocument();
+  });
+
+  it('renders skeletons while the gateway is still answering', async () => {
+    vi.mocked(AegisApi.getSystemStatus).mockReturnValue(new Promise<SystemStatusResponse>(() => {}));
+
+    render(
+      <DashboardScreen onNavigateTo={vi.fn()} onOpenKillSwitch={vi.fn()} threatLevel={null} />
+    );
+
+    expect(await screen.findAllByRole('status')).not.toHaveLength(0);
+  });
+
+  it('does not read or offer the approval queue to a role C-003 refuses', async () => {
+    const approvals = vi.mocked(AegisApi.getPendingApprovals);
+
+    render(
+      <DashboardScreen
+        onNavigateTo={vi.fn()}
+        onOpenKillSwitch={vi.fn()}
+        threatLevel={null}
+        canReadApprovals={false}
+        canOperateEmergency={false}
+      />
+    );
+
+    expect(await screen.findByTestId('approvals-restricted')).toBeInTheDocument();
+    expect(approvals).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('emergency-killswitch-trigger')).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByTestId('metric-active-agents')).toHaveTextContent('17')
+    );
   });
 
   it('shows a true empty state when the violation feed has no records', async () => {

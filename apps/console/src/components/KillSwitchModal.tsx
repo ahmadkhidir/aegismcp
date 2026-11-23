@@ -67,10 +67,10 @@ export const KillSwitchModal: React.FC<KillSwitchModalProps> = ({
               <AlertOctagon className="w-5 h-5" />
             </div>
             <div>
-              <h3 id="kill-switch-title" className="font-bold text-base text-error-900">
+              <h3 id="kill-switch-title" className="font-bold text-body text-error-900">
                 Emergency Cluster Kill-Switch
               </h3>
-              <p className="text-xs text-error-700">Immediate traffic severance & agent quarantine</p>
+              <p className="text-caption text-error-700">Immediate traffic severance & agent quarantine</p>
             </div>
           </div>
           <button
@@ -84,13 +84,13 @@ export const KillSwitchModal: React.FC<KillSwitchModalProps> = ({
 
         <form onSubmit={handleSubmit} className="p-space-lg space-y-space-md">
           {error && (
-            <div role="alert" className="p-space-sm bg-error-100 border border-error-300 text-error-900 rounded-radius-md text-xs">
+            <div role="alert" className="p-space-sm bg-error-100 border border-error-300 text-error-900 rounded-radius-md text-caption">
               {error}
             </div>
           )}
 
           <div>
-            <label className="block text-xs font-semibold text-grey-700 mb-1">
+            <label className="block text-caption font-semibold text-grey-700 mb-1">
               Target Scope
             </label>
             <select
@@ -99,7 +99,7 @@ export const KillSwitchModal: React.FC<KillSwitchModalProps> = ({
                 setTargetType(e.target.value as EmergencyKillRequest['targetType']);
                 setTargetId('');
               }}
-              className="w-full bg-grey-200 border border-grey-300 rounded-radius-md px-space-sm py-2 text-xs text-grey-900 focus:border-primary-500 outline-none"
+              className="w-full bg-grey-200 border border-grey-300 rounded-radius-md px-space-sm py-2 text-caption text-grey-900 focus:border-primary-500 outline-none"
             >
               <option value="global">Global (Sever every agent session cluster-wide)</option>
               <option value="agent">Agent (Quarantine a specific SPIFFE identity)</option>
@@ -109,7 +109,7 @@ export const KillSwitchModal: React.FC<KillSwitchModalProps> = ({
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-grey-700 mb-1">
+            <label className="block text-caption font-semibold text-grey-700 mb-1">
               Target Identifier
             </label>
             <input
@@ -118,7 +118,7 @@ export const KillSwitchModal: React.FC<KillSwitchModalProps> = ({
               onChange={(e) => setTargetId(e.target.value)}
               required={targetType !== 'global'}
               disabled={targetType === 'global'}
-              className="w-full bg-grey-200 border border-grey-300 rounded-radius-md px-space-sm py-2 text-xs font-mono text-grey-900 focus:border-primary-500 outline-none disabled:opacity-50"
+              className="w-full bg-grey-200 border border-grey-300 rounded-radius-md px-space-sm py-2 text-caption font-mono text-grey-900 focus:border-primary-500 outline-none disabled:opacity-50"
               placeholder={
                 targetType === 'global'
                   ? 'Cluster-wide scope'
@@ -132,7 +132,7 @@ export const KillSwitchModal: React.FC<KillSwitchModalProps> = ({
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-grey-700 mb-1">
+            <label className="block text-caption font-semibold text-grey-700 mb-1">
               Security Justification (Required for Tamper-Evident Ledger)
             </label>
             <textarea
@@ -140,12 +140,12 @@ export const KillSwitchModal: React.FC<KillSwitchModalProps> = ({
               onChange={(e) => setReason(e.target.value)}
               required
               rows={2}
-              className="w-full bg-grey-200 border border-grey-300 rounded-radius-md px-space-sm py-2 text-xs text-grey-900 focus:border-primary-500 outline-none resize-none"
+              className="w-full bg-grey-200 border border-grey-300 rounded-radius-md px-space-sm py-2 text-caption text-grey-900 focus:border-primary-500 outline-none resize-none"
               placeholder="e.g. Active prompt injection chain detected across billing cluster..."
             />
           </div>
 
-          <div className="p-space-sm bg-grey-200 border border-grey-300 rounded-radius-md text-xs">
+          <div className="p-space-sm bg-grey-200 border border-grey-300 rounded-radius-md text-caption">
             <p className="text-grey-600 mb-2">
               Type <span className="font-bold font-mono text-error-500">LOCKDOWN</span> below to confirm:
             </p>
@@ -154,7 +154,7 @@ export const KillSwitchModal: React.FC<KillSwitchModalProps> = ({
               data-testid="lockdown-confirm-input"
               value={confirmedTyped}
               onChange={(e) => setConfirmedTyped(e.target.value)}
-              className="w-full bg-grey-100 border border-grey-300 rounded-radius-md px-space-sm py-1.5 text-xs font-mono font-bold text-error-500 focus:border-error-500 outline-none uppercase"
+              className="w-full bg-grey-100 border border-grey-300 rounded-radius-md px-space-sm py-1.5 text-caption font-mono font-bold text-error-500 focus:border-error-500 outline-none uppercase"
               placeholder="LOCKDOWN"
             />
           </div>
@@ -164,7 +164,7 @@ export const KillSwitchModal: React.FC<KillSwitchModalProps> = ({
               type="button"
               onClick={onClose}
               disabled={isSubmitting}
-              className="px-space-md py-space-sm rounded-radius-md text-xs font-medium text-grey-600 hover:text-grey-900 hover:bg-grey-200 transition-colors"
+              className="px-space-md py-space-sm rounded-radius-md text-caption font-medium text-grey-600 hover:text-grey-900 hover:bg-grey-200 transition-colors"
             >
               Cancel
             </button>
@@ -172,7 +172,7 @@ export const KillSwitchModal: React.FC<KillSwitchModalProps> = ({
               type="submit"
               data-testid="trip-killswitch-button"
               disabled={isSubmitting || confirmedTyped !== 'LOCKDOWN'}
-              className="inline-flex items-center gap-1.5 px-space-md py-space-sm rounded-radius-md text-xs font-bold bg-error-500 hover:bg-error-700 text-grey-900 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
+              className="inline-flex items-center gap-1.5 px-space-md py-space-sm rounded-radius-md text-caption font-bold bg-error-500 hover:bg-error-700 text-grey-900 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
             >
               {isSubmitting ? (
                 <>

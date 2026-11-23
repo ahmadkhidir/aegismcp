@@ -33,12 +33,12 @@ export const LoginScreen: React.FC = () => {
             </svg>
           </div>
           <div className="flex items-center gap-1.5 mb-1">
-            <h1 className="font-bold text-2xl tracking-tight text-grey-900">Aegis</h1>
-            <span className="font-mono text-sm font-semibold px-2 py-0.5 rounded-radius-sm bg-grey-200 text-primary-800 border border-grey-300">
+            <h1 className="font-bold text-h1 tracking-tight text-grey-900">Aegis</h1>
+            <span className="font-mono text-body-small font-semibold px-2 py-0.5 rounded-radius-sm bg-grey-200 text-primary-800 border border-grey-300">
               MCP
             </span>
           </div>
-          <p className="text-xs text-grey-500 font-medium">
+          <p className="text-caption text-grey-500 font-medium">
             Zero-Trust Reverse Proxy & Security Firewall for Model Context Protocol
           </p>
         </div>
@@ -47,7 +47,7 @@ export const LoginScreen: React.FC = () => {
           <div
             role="alert"
             data-testid="login-configuration-error"
-            className="mb-space-md p-space-md rounded-radius-md bg-warning-100 border border-warning-300 text-warning-900 text-xs space-y-1.5"
+            className="mb-space-md p-space-md rounded-radius-md bg-warning-100 border border-warning-300 text-warning-900 text-caption space-y-1.5"
           >
             <div className="flex items-center gap-1.5 font-semibold">
               <AlertCircle className="w-4 h-4 text-warning-500" />
@@ -71,7 +71,7 @@ export const LoginScreen: React.FC = () => {
           <div
             role="alert"
             data-testid="login-auth-error"
-            className={`mb-space-md p-space-md rounded-radius-md border text-xs space-y-1.5 ${
+            className={`mb-space-md p-space-md rounded-radius-md border text-caption space-y-1.5 ${
               isAccessDenied
                 ? 'bg-warning-100 border-warning-300 text-warning-900'
                 : 'bg-error-100 border-error-300 text-error-900'
@@ -98,11 +98,11 @@ export const LoginScreen: React.FC = () => {
 
         <div className="space-y-space-md mb-space-lg">
           <div className="p-space-md rounded-radius-md bg-grey-200 border border-grey-300 text-left">
-            <div className="flex items-center gap-2 text-xs font-semibold text-grey-700 mb-1">
+            <div className="flex items-center gap-2 text-caption font-semibold text-grey-700 mb-1">
               <KeyRound className="w-4 h-4 text-primary-500" />
               <span>Enterprise Single Sign-On (OIDC / SAML)</span>
             </div>
-            <p className="text-xs text-grey-500 mb-space-md">
+            <p className="text-caption text-grey-500 mb-space-md">
               {isConfigured
                 ? 'Your organization signs you in with multi-factor authentication. Console roles come from your directory groups.'
                 : 'An identity provider must be configured before console sign-in can start.'}
@@ -112,7 +112,7 @@ export const LoginScreen: React.FC = () => {
               onClick={() => login()}
               disabled={isLoading || isAuthenticating || !isConfigured}
               data-testid="sso-primary-login-button"
-              className="w-full py-2.5 px-space-md rounded-radius-md bg-primary-600 hover:bg-primary-500 text-grey-900 font-bold text-xs shadow-sm transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-full py-2.5 px-space-md rounded-radius-md bg-primary-600 hover:bg-primary-500 text-grey-900 font-bold text-caption shadow-sm transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isAuthenticating ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -130,7 +130,7 @@ export const LoginScreen: React.FC = () => {
         </div>
 
         <div className="mt-space-lg pt-space-md border-t border-grey-300 text-center">
-          <p className="text-[10px] text-grey-500 font-mono flex items-center justify-center gap-1">
+          <p className="text-caption text-grey-500 font-mono flex items-center justify-center gap-1">
             <UserCheck className="w-3 h-3 text-success-500" />
             <span>Multi-factor sign-in · role-based access · automatic idle lock</span>
           </p>

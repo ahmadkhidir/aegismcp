@@ -368,6 +368,49 @@ describe('LoginScreen', () => {
 
     expect(service.startAuthorizationRedirect).toHaveBeenCalledTimes(1);
   });
+
+  it('reports the in-flight redirect while the provider handshake is pending', async () => {
+    const service = fakeService(null);
+    vi.mocked(service.startAuthorizationRedirect).mockReturnValue(new Promise<void>(() => {}));
+
+    render(
+      <AuthProvider service={service}>
+        <LoginScreen />
+      </AuthProvider>
+    );
+
+    const button = await screen.findByTestId('sso-primary-login-button');
+    await waitFor(() => expect(button).not.toBeDisabled());
+    act(() => {
+      fireEvent.click(button);
+    });
+
+    await waitFor(() =>
+      expect(button).toHaveTextContent(/Redirecting to your identity provider/)
+    );
+    expect(button).toBeDisabled();
+  });
+
+  it('shows the access-denied state for a verified identity without a console role', async () => {
+    const service = fakeService(null);
+    vi.mocked(service.handleCallback).mockRejectedValue(
+      new OidcError('ACCESS_DENIED', 'Your account does not hold a console role.')
+    );
+    window.history.replaceState({}, '', '/?code=abc&state=state-1');
+
+    try {
+      render(
+        <AuthProvider service={service}>
+          <LoginScreen />
+        </AuthProvider>
+      );
+
+      expect(await screen.findByTestId('login-auth-error')).toHaveTextContent('Access denied');
+      expect(screen.getByText(/does not hold a console role/i)).toBeInTheDocument();
+    } finally {
+      window.history.replaceState({}, '', '/');
+    }
+  });
 });
 
 describe('UserProfileMenu', () => {

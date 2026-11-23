@@ -85,9 +85,10 @@ describe('LiveInspectorScreen', () => {
     expect(await screen.findByTestId('event-row-evt-allow-1')).toBeInTheDocument();
     expect(screen.getByTestId('event-row-evt-block-1')).toBeInTheDocument();
     expect(screen.getByText('2 frames')).toBeInTheDocument();
+    expect(screen.getByText('CONNECTED')).toBeInTheDocument();
   });
 
-  it('pauses the display while the stream remains subscribed', async () => {
+  it('pauses presentation while still buffering incoming frames', async () => {
     const stream = mockStream();
     render(<LiveInspectorScreen />);
 
@@ -104,7 +105,46 @@ describe('LiveInspectorScreen', () => {
     });
 
     expect(screen.queryByTestId('event-row-evt-block-1')).not.toBeInTheDocument();
+    expect(screen.getByTestId('paused-buffer-count')).toHaveTextContent('+1 buffered');
     expect(stream.subscribe).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTestId('stream-pause-toggle'));
+    expect(await screen.findByTestId('event-row-evt-block-1')).toBeInTheDocument();
+    expect(screen.queryByTestId('paused-buffer-count')).not.toBeInTheDocument();
+  });
+
+  it('re-syncs the pending approval queue once the stream reconnects', async () => {
+    const stream = mockStream();
+    const onReconnected = vi.fn();
+    render(<LiveInspectorScreen onReconnected={onReconnected} />);
+
+    expect(onReconnected).not.toHaveBeenCalled();
+    act(() => {
+      stream.handlers.onStatus?.('reconnecting');
+      stream.handlers.onStatus?.('connected');
+      stream.handlers.onReconnected?.();
+    });
+
+    expect(onReconnected).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the filtered-empty state when filters exclude every frame', async () => {
+    const stream = mockStream();
+    render(<LiveInspectorScreen />);
+
+    act(() => {
+      stream.handlers.onStatus?.('connected');
+      stream.handlers.onEvent(ALLOWED_EVENT);
+    });
+    await screen.findByTestId('event-row-evt-allow-1');
+
+    fireEvent.change(screen.getByPlaceholderText(/Filter tool, agent, or event ID/i), {
+      target: { value: 'no-such-tool' },
+    });
+
+    expect(screen.getByText('No matching events found')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Reset Filters'));
+    expect(await screen.findByTestId('event-row-evt-allow-1')).toBeInTheDocument();
   });
 
   it('clears the buffer back to a true empty state', async () => {

@@ -7,12 +7,16 @@ import {
   ScrollText,
   X,
 } from 'lucide-react';
+import { UserRole } from '../types/auth';
+import { canAccessScreen, ScreenId } from '../context/access';
 
-export type ScreenId = 'dashboard' | 'inspector' | 'approvals' | 'policies' | 'audit';
+export type { ScreenId };
 
 interface SidebarProps {
   currentScreen: ScreenId;
   onNavigate: (screen: ScreenId) => void;
+  /** Verified directory roles; entries outside them are not offered (C-002..C-019). */
+  roles: readonly UserRole[];
   pendingApprovalsCount?: number;
   isOpen?: boolean;
   onClose?: () => void;
@@ -21,6 +25,7 @@ interface SidebarProps {
 export const Sidebar: React.FC<SidebarProps> = ({
   currentScreen,
   onNavigate,
+  roles,
   pendingApprovalsCount = 0,
   isOpen = false,
   onClose,
@@ -59,7 +64,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
   ];
 
+  const visibleItems = navItems.filter((item) => canAccessScreen(roles, item.id));
+
   const handleItemClick = (screen: ScreenId) => {
+    if (!canAccessScreen(roles, screen)) return;
     onNavigate(screen);
     if (onClose) onClose();
   };
@@ -67,7 +75,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const navContent = (
     <>
       <nav className="space-y-1">
-        <div className="flex items-center justify-between px-space-sm pb-space-xs text-[11px] font-semibold uppercase tracking-wider text-grey-500">
+        <div className="flex items-center justify-between px-space-sm pb-space-xs text-caption font-semibold uppercase tracking-wider text-grey-500">
           <span>Navigation</span>
           {onClose && (
             <button
@@ -79,7 +87,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </button>
           )}
         </div>
-        {navItems.map((item) => {
+        {visibleItems.map((item) => {
           const Icon = item.icon;
           const isActive = currentScreen === item.id;
           return (
@@ -87,7 +95,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               key={item.id}
               onClick={() => handleItemClick(item.id)}
               data-testid={`nav-item-${item.id}`}
-              className={`w-full flex items-center justify-between px-space-md py-2.5 rounded-radius-md text-xs font-medium transition-colors ${
+              className={`w-full flex items-center justify-between px-space-md py-2.5 rounded-radius-md text-caption font-medium transition-colors ${
                 isActive
                   ? 'bg-primary-500/10 text-primary-800 border-l-2 border-primary-500 font-semibold'
                   : 'text-grey-600 hover:text-grey-900 hover:bg-grey-200'
@@ -100,7 +108,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               {item.badge !== null && (
                 <span
                   data-testid={`nav-badge-${item.id}`}
-                  className={`text-[10px] font-mono px-1.5 py-0.5 rounded-radius-full font-bold ${
+                  className={`text-caption font-mono px-1.5 py-0.5 rounded-radius-full font-bold ${
                     item.badgeColor === 'warning'
                       ? 'bg-warning-100 text-warning-900 border border-warning-300'
                       : 'bg-success-100 text-success-900 border border-success-300'
@@ -115,7 +123,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </nav>
 
       {/* Footer system info */}
-      <div className="p-space-sm bg-grey-200 border border-grey-300 rounded-radius-md text-[11px] text-grey-500 font-mono space-y-1 mt-auto">
+      <div className="p-space-sm bg-grey-200 border border-grey-300 rounded-radius-md text-caption text-grey-500 font-mono space-y-1 mt-auto">
         <div className="flex justify-between">
           <span>Protocol:</span>
           <span className="text-grey-700">JSON-RPC 2.0</span>

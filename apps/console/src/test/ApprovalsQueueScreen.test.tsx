@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { ApprovalsQueueScreen } from '../screens/ApprovalsQueueScreen';
 import { AegisApi } from '../services/api';
 import { ApprovalHistoryTicket, ApprovalTicket } from '../types/contracts';
@@ -144,6 +144,84 @@ describe('ApprovalsQueueScreen', () => {
     render(<ApprovalsQueueScreen />);
 
     expect(await screen.findByText('No agent actions are waiting for approval')).toBeInTheDocument();
+  });
+
+  it('renders skeleton cards while the pending queue is loading', async () => {
+    vi.mocked(AegisApi.getPendingApprovals).mockReturnValue(
+      new Promise<{ tickets: ApprovalTicket[] }>(() => {})
+    );
+    render(<ApprovalsQueueScreen />);
+
+    expect(await screen.findAllByRole('status')).not.toHaveLength(0);
+  });
+
+  it('opens resolved history for a role the pending queue refuses', async () => {
+    const history = vi.mocked(AegisApi.getApprovalHistory);
+    const pending = vi.mocked(AegisApi.getPendingApprovals);
+
+    render(<ApprovalsQueueScreen canReviewPending={false} />);
+
+    expect(await screen.findByText('operator@example.com')).toBeInTheDocument();
+    expect(history).toHaveBeenCalledWith('approved', 100, 0);
+    expect(pending).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('tab-pending')).not.toBeInTheDocument();
+  });
+
+  it('removes a ticket whose TTL expires while it is on screen', async () => {
+    vi.mocked(AegisApi.getPendingApprovals).mockResolvedValue({
+      tickets: [
+        {
+          ...PENDING[0],
+          id: 'appr-expired',
+          expiresAt: new Date(Date.now() - 1000).toISOString(),
+        },
+      ],
+    });
+
+    render(<ApprovalsQueueScreen />);
+
+    expect(await screen.findByTestId('expired-tickets-notice')).toHaveTextContent(
+      '1 request expired before a decision'
+    );
+    expect(screen.queryByTestId('approval-ticket-appr-expired')).not.toBeInTheDocument();
+    expect(screen.queryByText('No agent actions are waiting for approval')).not.toBeInTheDocument();
+  });
+
+  it('names the active tab in an empty resolved history', async () => {
+    vi.mocked(AegisApi.getApprovalHistory).mockResolvedValue({ tickets: [], total: 0 });
+    render(<ApprovalsQueueScreen />);
+
+    fireEvent.click(await screen.findByTestId('tab-approved'));
+
+    expect(await screen.findByText('No approved requests yet')).toBeInTheDocument();
+  });
+
+  it('disables a decision while its request is in flight', async () => {
+    let resolveApprove: (value: {
+      ticketId: string;
+      status: 'approved';
+      reviewedBy: string;
+      processedAt: string;
+    }) => void = () => {};
+    vi.mocked(AegisApi.approveTicket).mockReturnValue(
+      new Promise((resolve) => {
+        resolveApprove = resolve;
+      })
+    );
+
+    render(<ApprovalsQueueScreen />);
+    const approve = await screen.findByTestId('approve-button-appr-401');
+    fireEvent.click(approve);
+
+    await waitFor(() => expect(approve).toBeDisabled());
+
+    resolveApprove({
+      ticketId: 'appr-401',
+      status: 'approved',
+      reviewedBy: 'operator@example.com',
+      processedAt: new Date().toISOString(),
+    });
+    await act(async () => {});
   });
 
   it('shows the screen error state when the queue cannot be read', async () => {

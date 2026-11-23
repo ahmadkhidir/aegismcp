@@ -35,6 +35,10 @@ interface DashboardScreenProps {
   onNavigateTo: (screen: 'inspector' | 'approvals' | 'policies' | 'audit') => void;
   onOpenKillSwitch: () => void;
   threatLevel: ThreatLevel | null;
+  /** C-003 admits admin and operator; other roles see the widget restricted. */
+  canReadApprovals?: boolean;
+  /** C-008 and C-021 admit admin and operator. */
+  canOperateEmergency?: boolean;
 }
 
 const SEVERITY_CLASS: Record<ViolationSeverity, string> = {
@@ -57,6 +61,8 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
   onNavigateTo,
   onOpenKillSwitch,
   threatLevel,
+  canReadApprovals = true,
+  canOperateEmergency = true,
 }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -70,12 +76,19 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
     setLoading(true);
     setError(null);
     try {
+      // C-003 is scoped to admin and operator. A role without it still reads
+      // the fleet from C-009, C-010, C-016, and C-020 instead of failing the
+      // whole dashboard on a refusal.
+      const approvalsRequest = canReadApprovals
+        ? AegisApi.getPendingApprovals(3)
+        : Promise.resolve({ tickets: [] as ApprovalTicket[] });
+
       const [statusRes, metricsRes, seriesRes, violationsRes, approvalsRes] = await Promise.all([
         AegisApi.getSystemStatus(),
         AegisApi.getMetricsSummary(),
         AegisApi.getMetricsTimeseries(),
         AegisApi.getViolations({ limit: 10 }),
-        AegisApi.getPendingApprovals(3),
+        approvalsRequest,
       ]);
       setSystemStatus(statusRes);
       setMetrics(metricsRes);
@@ -87,7 +100,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
       setLoading(false);
       setError(err instanceof Error ? err.message : 'Failed to retrieve dashboard metrics');
     }
-  }, []);
+  }, [canReadApprovals]);
 
   useEffect(() => {
     loadDashboardData();
@@ -142,12 +155,12 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="text-xs font-mono uppercase tracking-wider text-grey-500">
+                <span className="text-caption font-mono uppercase tracking-wider text-grey-500">
                   Global Threat Posture
                 </span>
                 <span
                   data-testid="threat-level-badge"
-                  className={`text-xs font-mono font-bold px-2 py-0.5 rounded-radius-full ${
+                  className={`text-caption font-mono font-bold px-2 py-0.5 rounded-radius-full ${
                     activeThreat === 'LOCKDOWN'
                       ? 'bg-error-500 text-grey-900'
                       : activeThreat === 'ELEVATED'
@@ -158,7 +171,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                   {activeThreat ?? 'CHECKING'}
                 </span>
               </div>
-              <h2 className="text-xl font-bold text-grey-900 mt-1">
+              <h2 className="text-h2 font-bold text-grey-900 mt-1">
                 {activeThreat === 'LOCKDOWN'
                   ? 'Emergency lockdown active — autonomous sessions severed'
                   : activeThreat === 'ELEVATED'
@@ -167,7 +180,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                   ? 'Zero-trust defense active — all systems normal'
                   : 'Reading fleet posture from the gateway'}
               </h2>
-              <p className="text-xs text-grey-500 mt-0.5">
+              <p className="text-caption text-grey-500 mt-0.5">
                 {activeThreat === 'LOCKDOWN'
                   ? 'The security firewall is quarantining incoming agent tool calls'
                   : 'SPIFFE identity verification and declarative AST guardrails are enforced on every call'}
@@ -175,14 +188,16 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             </div>
           </div>
 
-          <button
-            onClick={onOpenKillSwitch}
-            data-testid="emergency-killswitch-trigger"
-            className="px-space-lg py-space-sm bg-error-500 hover:bg-error-700 text-grey-900 font-bold text-xs rounded-radius-md transition-colors shadow-md flex items-center gap-2 flex-shrink-0"
-          >
-            <AlertOctagon className="w-4 h-4" />
-            <span>Emergency Kill-Switch</span>
-          </button>
+          {canOperateEmergency && (
+            <button
+              onClick={onOpenKillSwitch}
+              data-testid="emergency-killswitch-trigger"
+              className="px-space-lg py-space-sm bg-error-500 hover:bg-error-700 text-grey-900 font-bold text-caption rounded-radius-md transition-colors shadow-md flex items-center gap-2 flex-shrink-0"
+            >
+              <AlertOctagon className="w-4 h-4" />
+              <span>Emergency Kill-Switch</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -192,17 +207,17 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
           className="p-space-md bg-grey-100 border border-grey-300 rounded-radius-md"
         >
           <div className="flex items-center justify-between text-grey-500 mb-2">
-            <span className="text-xs font-medium">Active Agents (SPIFFE)</span>
+            <span className="text-caption font-medium">Active Agents (SPIFFE)</span>
             <Users className="w-4 h-4 text-accent-500" />
           </div>
           {loading ? (
             <Skeleton className="h-8 w-24" />
           ) : (
-            <div className="text-2xl font-bold font-mono text-grey-900">
+            <div className="text-h1 font-bold font-mono text-grey-900">
               {metrics?.activeAgents ?? 0}
             </div>
           )}
-          <span className="text-[11px] text-grey-500 font-mono mt-1 inline-block">
+          <span className="text-caption text-grey-500 font-mono mt-1 inline-block">
             {systemStatus ? `${systemStatus.activeConnections} open sessions` : 'Awaiting fleet status'}
           </span>
         </div>
@@ -212,17 +227,17 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
           className="p-space-md bg-grey-100 border border-grey-300 rounded-radius-md"
         >
           <div className="flex items-center justify-between text-grey-500 mb-2">
-            <span className="text-xs font-medium">24h Tool Invocations</span>
+            <span className="text-caption font-medium">24h Tool Invocations</span>
             <Activity className="w-4 h-4 text-primary-500" />
           </div>
           {loading ? (
             <Skeleton className="h-8 w-28" />
           ) : (
-            <div className="text-2xl font-bold font-mono text-grey-900">
+            <div className="text-h1 font-bold font-mono text-grey-900">
               {(metrics?.toolCalls24h ?? 0).toLocaleString()}
             </div>
           )}
-          <span className="text-[11px] text-grey-500 font-mono mt-1 inline-block">
+          <span className="text-caption text-grey-500 font-mono mt-1 inline-block">
             {metrics ? `Gateway uptime ${formatDuration(metrics.uptimeSeconds)}` : 'Awaiting metrics'}
           </span>
         </div>
@@ -232,39 +247,47 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
           className="p-space-md bg-grey-100 border border-grey-300 rounded-radius-md"
         >
           <div className="flex items-center justify-between text-grey-500 mb-2">
-            <span className="text-xs font-medium">Blocked Violations (24h)</span>
+            <span className="text-caption font-medium">Blocked Violations (24h)</span>
             <Ban className="w-4 h-4 text-error-500" />
           </div>
           {loading ? (
             <Skeleton className="h-8 w-20" />
           ) : (
-            <div className="text-2xl font-bold font-mono text-error-500">
+            <div className="text-h1 font-bold font-mono text-error-500">
               {metrics?.blockedViolations24h ?? 0}
             </div>
           )}
-          <span className="text-[11px] text-grey-500 font-mono mt-1 inline-block">
+          <span className="text-caption text-grey-500 font-mono mt-1 inline-block">
             {blockedPercent}% of intercepted calls
           </span>
         </div>
 
         <div
           data-testid="metric-pending-approvals"
-          onClick={() => onNavigateTo('approvals')}
-          className="p-space-md bg-grey-100 border border-grey-300 rounded-radius-md cursor-pointer hover:border-warning-500 transition-colors"
+          onClick={canReadApprovals ? () => onNavigateTo('approvals') : undefined}
+          className={`p-space-md bg-grey-100 border border-grey-300 rounded-radius-md ${
+            canReadApprovals ? 'cursor-pointer hover:border-warning-500 transition-colors' : ''
+          }`}
         >
           <div className="flex items-center justify-between text-grey-500 mb-2">
-            <span className="text-xs font-medium">Pending Approvals</span>
+            <span className="text-caption font-medium">Pending Approvals</span>
             <Clock className="w-4 h-4 text-warning-500" />
           </div>
           {loading ? (
             <Skeleton className="h-8 w-16" />
           ) : (
-            <div className="text-2xl font-bold font-mono text-warning-500">
-              {urgentApprovals.length}
+            <div className="text-h1 font-bold font-mono text-warning-500">
+              {canReadApprovals ? urgentApprovals.length : '-'}
             </div>
           )}
-          <span className="text-[11px] text-warning-500 font-mono mt-1 inline-flex items-center gap-1">
-            Action required <ArrowRight className="w-3 h-3" />
+          <span className="text-caption text-warning-500 font-mono mt-1 inline-flex items-center gap-1">
+            {canReadApprovals ? (
+              <>
+                Action required <ArrowRight className="w-3 h-3" />
+              </>
+            ) : (
+              'Operator access required'
+            )}
           </span>
         </div>
       </div>
@@ -275,15 +298,15 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <div className="flex items-center justify-between mb-space-md">
               <div className="flex items-center gap-2">
                 <TrendingUp className="w-4 h-4 text-primary-500" />
-                <h3 className="text-sm font-semibold text-grey-900">Invocations vs. Blocked Violations</h3>
+                <h3 className="text-body-small font-semibold text-grey-900">Invocations vs. Blocked Violations</h3>
               </div>
-              <span className="text-xs font-mono text-grey-500">Last 24 Hours</span>
+              <span className="text-caption font-mono text-grey-500">Last 24 Hours</span>
             </div>
 
             {loading ? (
               <Skeleton className="h-44 w-full" />
             ) : buckets.length === 0 ? (
-              <div className="h-44 flex items-center justify-center text-xs text-grey-500">
+              <div className="h-44 flex items-center justify-center text-caption text-grey-500">
                 No telemetry for the last 24 hours.
               </div>
             ) : (
@@ -309,7 +332,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                 ))}
               </div>
             )}
-            <div className="flex items-center justify-between pt-space-xs text-[11px] font-mono text-grey-500">
+            <div className="flex items-center justify-between pt-space-xs text-caption font-mono text-grey-500">
               <span>{buckets[0] ? new Date(buckets[0].bucketStart).toLocaleTimeString() : '—'}</span>
               <span>{buckets.length > 0 ? 'Hourly buckets' : '—'}</span>
               <span>
@@ -324,11 +347,11 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <div className="flex items-center justify-between mb-space-md">
               <div className="flex items-center gap-2">
                 <ShieldAlert className="w-4 h-4 text-error-500" />
-                <h3 className="text-sm font-semibold text-grey-900">Recent Security Violations</h3>
+                <h3 className="text-body-small font-semibold text-grey-900">Recent Security Violations</h3>
               </div>
               <button
                 onClick={() => onNavigateTo('inspector')}
-                className="text-xs text-primary-500 hover:text-primary-400 font-medium inline-flex items-center gap-1"
+                className="text-caption text-primary-500 hover:text-primary-400 font-medium inline-flex items-center gap-1"
               >
                 Inspect live stream <ArrowRight className="w-3 h-3" />
               </button>
@@ -348,7 +371,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
               />
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs font-mono">
+                <table className="w-full text-left text-caption font-mono">
                   <thead>
                     <tr className="border-b border-grey-300 text-grey-500">
                       <th className="pb-2 font-medium">Time</th>
@@ -372,13 +395,13 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                         </td>
                         <td className="py-2.5 text-error-700">
                           <span className="block">{violation.violationType.replace(/_/g, ' ')}</span>
-                          <span className="block text-[11px] text-grey-500 font-sans">
+                          <span className="block text-caption text-grey-500 font-sans">
                             {violation.details}
                           </span>
                         </td>
                         <td className="py-2.5">
                           <span
-                            className={`inline-flex px-1.5 py-0.5 rounded-radius-sm text-[10px] font-bold uppercase ${SEVERITY_CLASS[violation.severity]}`}
+                            className={`inline-flex px-1.5 py-0.5 rounded-radius-sm text-caption font-bold uppercase ${SEVERITY_CLASS[violation.severity]}`}
                           >
                             {violation.severity}
                           </span>
@@ -403,9 +426,9 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <div className="flex items-center justify-between mb-space-md">
               <div className="flex items-center gap-2">
                 <Clock className="w-4 h-4 text-warning-500" />
-                <h3 className="text-sm font-semibold text-grey-900">Urgent HITL Approvals</h3>
+                <h3 className="text-body-small font-semibold text-grey-900">Urgent HITL Approvals</h3>
               </div>
-              <span className="text-xs font-mono font-bold text-warning-500">
+              <span className="text-caption font-mono font-bold text-warning-500">
                 {urgentApprovals.length} pending
               </span>
             </div>
@@ -415,8 +438,15 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                 <Skeleton className="h-20 w-full" />
                 <Skeleton className="h-20 w-full" />
               </div>
+            ) : !canReadApprovals ? (
+              <div
+                data-testid="approvals-restricted"
+                className="py-space-lg text-center text-caption text-grey-500"
+              >
+                The pending approval queue is visible to operators and administrators.
+              </div>
             ) : urgentApprovals.length === 0 ? (
-              <div className="py-space-lg text-center text-xs text-grey-500">
+              <div className="py-space-lg text-center text-caption text-grey-500">
                 No agent calls are waiting for a human decision.
               </div>
             ) : (
@@ -427,20 +457,20 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                     onClick={() => onNavigateTo('approvals')}
                     className="p-space-sm bg-grey-200 border border-grey-300 rounded-radius-md cursor-pointer hover:border-warning-500 transition-colors"
                   >
-                    <div className="flex items-center justify-between text-[11px] font-mono text-grey-500 mb-1">
+                    <div className="flex items-center justify-between text-caption font-mono text-grey-500 mb-1">
                       <span className="text-warning-500 font-semibold">{ticket.toolName}</span>
                       <span className="text-grey-500 truncate max-w-[10rem]">
                         {ticket.triggerPolicyId}
                       </span>
                     </div>
-                    <p className="text-xs text-grey-800 line-clamp-2">
+                    <p className="text-caption text-grey-800 line-clamp-2">
                       {ticket.agentIntent || 'No intent supplied by the requesting agent.'}
                     </p>
                   </div>
                 ))}
                 <button
                   onClick={() => onNavigateTo('approvals')}
-                  className="w-full mt-2 py-2 bg-grey-200 hover:bg-grey-300 text-primary-500 font-medium text-xs rounded-radius-md transition-colors"
+                  className="w-full mt-2 py-2 bg-grey-200 hover:bg-grey-300 text-primary-500 font-medium text-caption rounded-radius-md transition-colors"
                 >
                   Open Approvals Queue →
                 </button>
@@ -448,8 +478,8 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             )}
           </div>
 
-          <div className="p-space-md bg-grey-100 border border-grey-300 rounded-radius-md text-xs space-y-space-sm">
-            <h3 className="text-sm font-semibold text-grey-900 flex items-center gap-2">
+          <div className="p-space-md bg-grey-100 border border-grey-300 rounded-radius-md text-caption space-y-space-sm">
+            <h3 className="text-body-small font-semibold text-grey-900 flex items-center gap-2">
               <Server className="w-4 h-4 text-primary-500" />
               Fleet Status
             </h3>

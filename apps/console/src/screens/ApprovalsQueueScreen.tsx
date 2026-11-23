@@ -60,8 +60,15 @@ function parseArguments(payload: string): unknown {
   }
 }
 
-export const ApprovalsQueueScreen: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<Tab>('pending');
+interface ApprovalsQueueScreenProps {
+  /** C-003, C-004, and C-014 admit admin and operator; auditors read history only. */
+  canReviewPending?: boolean;
+}
+
+export const ApprovalsQueueScreen: React.FC<ApprovalsQueueScreenProps> = ({
+  canReviewPending = true,
+}) => {
+  const [activeTab, setActiveTab] = useState<Tab>(canReviewPending ? 'pending' : 'approved');
   const [tickets, setTickets] = useState<DisplayTicket[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -152,28 +159,41 @@ export const ApprovalsQueueScreen: React.FC = () => {
           description: 'Rejected approvals will be recorded here with the rejection reason.',
         };
 
+  // A pending ticket whose TTL reaches zero fails closed at the gateway, so it
+  // leaves this queue as soon as its countdown expires (screens/03).
+  const expiredCount =
+    activeTab === 'pending'
+      ? tickets.filter((ticket) => new Date(ticket.expiresAt).getTime() <= now).length
+      : 0;
+  const displayedTickets =
+    activeTab === 'pending'
+      ? tickets.filter((ticket) => new Date(ticket.expiresAt).getTime() > now)
+      : tickets;
+
   return (
     <div className="p-space-lg max-w-5xl mx-auto space-y-space-md animate-in fade-in duration-150">
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-space-md border-b border-grey-300 gap-space-sm">
         <div>
-          <h2 className="text-xl font-bold text-grey-900">Human-in-the-Loop Approvals</h2>
-          <p className="text-xs text-grey-500">
+          <h2 className="text-h2 font-bold text-grey-900">Human-in-the-Loop Approvals</h2>
+          <p className="text-caption text-grey-500">
             Authorize or reject high-risk autonomous agent tool invocations before execution
           </p>
         </div>
 
-        <div className="flex items-center gap-1 bg-grey-100 p-1 rounded-radius-md border border-grey-300 text-xs">
-          <button
-            onClick={() => setActiveTab('pending')}
-            data-testid="tab-pending"
-            className={`px-space-md py-1 rounded-radius-sm font-semibold transition-colors ${
-              activeTab === 'pending'
-                ? 'bg-primary-500 text-grey-900'
-                : 'text-grey-600 hover:text-grey-900'
-            }`}
-          >
-            Pending
-          </button>
+        <div className="flex items-center gap-1 bg-grey-100 p-1 rounded-radius-md border border-grey-300 text-caption">
+          {canReviewPending && (
+            <button
+              onClick={() => setActiveTab('pending')}
+              data-testid="tab-pending"
+              className={`px-space-md py-1 rounded-radius-sm font-semibold transition-colors ${
+                activeTab === 'pending'
+                  ? 'bg-primary-500 text-grey-900'
+                  : 'text-grey-600 hover:text-grey-900'
+              }`}
+            >
+              Pending
+            </button>
+          )}
           <button
             onClick={() => setActiveTab('approved')}
             data-testid="tab-approved"
@@ -205,9 +225,22 @@ export const ApprovalsQueueScreen: React.FC = () => {
         <div
           role="alert"
           data-testid="approval-action-error"
-          className="p-space-sm bg-error-100 border border-error-300 text-error-900 rounded-radius-md text-xs"
+          className="p-space-sm bg-error-100 border border-error-300 text-error-900 rounded-radius-md text-caption"
         >
           {actionError}
+        </div>
+      )}
+
+      {expiredCount > 0 && (
+        <div
+          data-testid="expired-tickets-notice"
+          role="status"
+          className="p-space-sm bg-warning-100 border border-warning-300 text-warning-900 rounded-radius-md text-caption"
+        >
+          {expiredCount === 1
+            ? '1 request expired before a decision and left this queue.'
+            : `${expiredCount} requests expired before a decision and left this queue.`}{' '}
+          The gateway failed them closed.
         </div>
       )}
 
@@ -216,11 +249,13 @@ export const ApprovalsQueueScreen: React.FC = () => {
           <Skeleton className="h-44 w-full" />
           <Skeleton className="h-44 w-full" />
         </div>
-      ) : tickets.length === 0 ? (
-        <EmptyState icon={Inbox} title={emptyCopy.title} description={emptyCopy.description} />
+      ) : displayedTickets.length === 0 ? (
+        expiredCount > 0 ? null : (
+          <EmptyState icon={Inbox} title={emptyCopy.title} description={emptyCopy.description} />
+        )
       ) : (
         <div className="space-y-space-md">
-          {tickets.map((ticket) => {
+          {displayedTickets.map((ticket) => {
             const isActionLoading = actionLoadingId === ticket.id;
             return (
               <div
@@ -230,22 +265,22 @@ export const ApprovalsQueueScreen: React.FC = () => {
               >
                 <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-space-sm border-b border-grey-300 gap-space-sm">
                   <div className="flex items-center gap-space-sm flex-wrap">
-                    <span className="font-mono text-xs font-bold text-grey-900">{ticket.id}</span>
-                    <span className="font-mono text-xs px-2 py-0.5 rounded-radius-sm bg-accent-100 text-accent-900 border border-accent-300">
+                    <span className="font-mono text-caption font-bold text-grey-900">{ticket.id}</span>
+                    <span className="font-mono text-caption px-2 py-0.5 rounded-radius-sm bg-accent-100 text-accent-900 border border-accent-300">
                       {ticket.agentId.split('/').pop()}
                     </span>
-                    <span className="font-mono text-xs font-semibold text-primary-700">
+                    <span className="font-mono text-caption font-semibold text-primary-700">
                       {ticket.toolName}
                     </span>
                   </div>
 
                   <div className="flex items-center gap-space-sm flex-wrap">
-                    <span className="text-[11px] font-mono text-grey-600 px-2 py-0.5 rounded-radius-sm bg-grey-200 border border-grey-300">
+                    <span className="text-caption font-mono text-grey-600 px-2 py-0.5 rounded-radius-sm bg-grey-200 border border-grey-300">
                       Trigger: {ticket.triggerPolicyId}
                     </span>
 
                     {activeTab === 'pending' && (
-                      <span className="inline-flex items-center gap-1 text-xs font-mono text-warning-500 bg-warning-100/50 px-2 py-0.5 rounded-radius-sm border border-warning-300/40">
+                      <span className="inline-flex items-center gap-1 text-caption font-mono text-warning-500 bg-warning-100/50 px-2 py-0.5 rounded-radius-sm border border-warning-300/40">
                         <Clock className="w-3.5 h-3.5" />
                         <span>{getRemainingTime(ticket.expiresAt)} left</span>
                       </span>
@@ -255,7 +290,7 @@ export const ApprovalsQueueScreen: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="text-xs space-y-1">
+                <div className="text-caption space-y-1">
                   {ticket.agentIntent && (
                     <div className="text-grey-600">
                       <span className="font-semibold text-grey-500">Agent stated intent: </span>
@@ -301,7 +336,7 @@ export const ApprovalsQueueScreen: React.FC = () => {
                       }}
                       disabled={isActionLoading}
                       data-testid={`reject-button-${ticket.id}`}
-                      className="inline-flex items-center gap-1.5 px-space-md py-space-sm rounded-radius-md text-xs font-semibold border border-error-300 text-error-700 hover:bg-error-100 hover:text-error-900 transition-colors disabled:opacity-50"
+                      className="inline-flex items-center gap-1.5 px-space-md py-space-sm rounded-radius-md text-caption font-semibold border border-error-300 text-error-700 hover:bg-error-100 hover:text-error-900 transition-colors disabled:opacity-50"
                     >
                       <X className="w-3.5 h-3.5" />
                       <span>Reject</span>
@@ -311,7 +346,7 @@ export const ApprovalsQueueScreen: React.FC = () => {
                       onClick={() => handleApprove(ticket)}
                       disabled={isActionLoading}
                       data-testid={`approve-button-${ticket.id}`}
-                      className="inline-flex items-center gap-1.5 px-space-lg py-space-sm rounded-radius-md text-xs font-bold bg-success-500 hover:bg-success-700 text-grey-50 transition-colors shadow-sm disabled:opacity-50"
+                      className="inline-flex items-center gap-1.5 px-space-lg py-space-sm rounded-radius-md text-caption font-bold bg-success-500 hover:bg-success-700 text-grey-50 transition-colors shadow-sm disabled:opacity-50"
                     >
                       {isActionLoading ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -337,7 +372,7 @@ export const ApprovalsQueueScreen: React.FC = () => {
         >
           <div className="w-full max-w-md bg-grey-100 border border-error-300 rounded-radius-lg p-space-lg shadow-xl space-y-space-md">
             <div className="flex items-center justify-between pb-space-xs border-b border-grey-300">
-              <h3 id="reject-dialog-title" className="font-bold text-sm text-error-900">
+              <h3 id="reject-dialog-title" className="font-bold text-body-small text-error-900">
                 Reject Approval Ticket
               </h3>
               <button
@@ -349,7 +384,7 @@ export const ApprovalsQueueScreen: React.FC = () => {
               </button>
             </div>
 
-            <p className="text-xs text-grey-600">
+            <p className="text-caption text-grey-600">
               Provide a rejection reason. The gateway records it in the audit ledger and returns it
               to the requesting agent.
             </p>
@@ -360,7 +395,7 @@ export const ApprovalsQueueScreen: React.FC = () => {
               required
               rows={3}
               data-testid="rejection-reason-input"
-              className="w-full bg-grey-200 border border-grey-300 rounded-radius-md px-space-sm py-2 text-xs text-grey-900 focus:border-error-500 outline-none resize-none"
+              className="w-full bg-grey-200 border border-grey-300 rounded-radius-md px-space-sm py-2 text-caption text-grey-900 focus:border-error-500 outline-none resize-none"
               placeholder="Explain why this request is denied..."
             />
 
@@ -368,7 +403,7 @@ export const ApprovalsQueueScreen: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setRejectingTicket(null)}
-                className="px-space-md py-space-sm rounded-radius-md text-xs text-grey-600 hover:text-grey-900"
+                className="px-space-md py-space-sm rounded-radius-md text-caption text-grey-600 hover:text-grey-900"
               >
                 Cancel
               </button>
@@ -377,7 +412,7 @@ export const ApprovalsQueueScreen: React.FC = () => {
                 data-testid="confirm-reject-button"
                 disabled={!rejectReason.trim() || actionLoadingId === rejectingTicket.id}
                 onClick={handleReject}
-                className="px-space-md py-space-sm rounded-radius-md text-xs font-bold bg-error-500 hover:bg-error-700 text-grey-900 transition-colors disabled:opacity-50"
+                className="px-space-md py-space-sm rounded-radius-md text-caption font-bold bg-error-500 hover:bg-error-700 text-grey-900 transition-colors disabled:opacity-50"
               >
                 Confirm Rejection
               </button>
@@ -390,7 +425,7 @@ export const ApprovalsQueueScreen: React.FC = () => {
 };
 
 const StatusLabel: React.FC<{ status: string }> = ({ status }) => (
-  <span className="inline-flex items-center px-2 py-0.5 rounded-radius-full text-[10px] font-mono font-bold uppercase bg-grey-200 text-grey-700 border border-grey-300">
+  <span className="inline-flex items-center px-2 py-0.5 rounded-radius-full text-caption font-mono font-bold uppercase bg-grey-200 text-grey-700 border border-grey-300">
     {status}
   </span>
 );

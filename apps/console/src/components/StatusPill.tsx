@@ -16,7 +16,7 @@ interface StatusPillProps {
 export const StatusPill: React.FC<StatusPillProps> = ({ verdict, size = 'sm' }) => {
   const norm = verdict.toUpperCase();
   const iconSize = size === 'sm' ? 12 : 16;
-  const textSize = size === 'sm' ? 'text-xs' : 'text-sm';
+  const textSize = size === 'sm' ? 'text-caption' : 'text-body-small';
   const padding = size === 'sm' ? 'px-space-xs py-0.5' : 'px-space-sm py-1';
 
   if (norm === 'ALLOWED' || norm === 'ALLOW' || norm === 'PASS' || norm === 'APPROVED') {
