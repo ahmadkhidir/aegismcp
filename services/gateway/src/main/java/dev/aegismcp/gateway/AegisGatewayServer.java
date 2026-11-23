@@ -48,11 +48,11 @@ import dev.aegismcp.gateway.policy.PolicyCompiler;
 import dev.aegismcp.gateway.policy.PolicyEvaluator;
 import dev.aegismcp.gateway.policy.PolicyManagementHandler;
 import dev.aegismcp.gateway.policy.SecurityPolicy;
-import dev.aegismcp.gateway.proxy.HttpUpstreamClient;
 import dev.aegismcp.gateway.proxy.McpProxyHandler;
 import dev.aegismcp.gateway.proxy.McpProxyPipelineConfigurator;
 import dev.aegismcp.gateway.proxy.ToolCallInterceptor;
 import dev.aegismcp.gateway.proxy.UpstreamClient;
+import dev.aegismcp.gateway.proxy.UpstreamClientFactory;
 import dev.aegismcp.gateway.validation.DynamicParameterValidator;
 import dev.aegismcp.gateway.validation.DynamicValidationInterceptor;
 import io.netty.bootstrap.ServerBootstrap;
@@ -159,6 +159,7 @@ public class AegisGatewayServer {
 
     private final IdentityVerificationHandler identityVerificationHandler;
     private final DlpOutboundHandler dlpOutboundHandler;
+    private final UpstreamClient upstreamClient;
     private final McpProxyHandler mcpProxyHandler;
 
     private EventLoopGroup bossGroup;
@@ -314,11 +315,12 @@ public class AegisGatewayServer {
                     buildIdentityResolver(configuration.identity()), this.auditLedger,
                     this.killSwitchManager, this.virtualThreadExecutor);
             this.dlpOutboundHandler = new DlpOutboundHandler(DlpScrubber.getInstance());
+            this.upstreamClient = buildUpstreamClient(configuration);
             this.mcpProxyHandler = new McpProxyHandler(
                     McpProxyHandler.DEFAULT_RPC_PATH,
                     JsonRpcCodec.getInstance(),
                     buildInterceptorChain(configuration),
-                    buildUpstreamClient(configuration),
+                    this.upstreamClient,
                     this.virtualThreadExecutor,
                     true,
                     buildAuditTrail(),
@@ -327,6 +329,7 @@ public class AegisGatewayServer {
         } else {
             this.identityVerificationHandler = null;
             this.dlpOutboundHandler = null;
+            this.upstreamClient = null;
             this.mcpProxyHandler = null;
         }
 
@@ -435,6 +438,14 @@ public class AegisGatewayServer {
             workerGroup.shutdownGracefully(100, 1000, TimeUnit.MILLISECONDS).syncUninterruptibly();
         }
 
+        if (upstreamClient != null) {
+            try {
+                upstreamClient.close();
+            } catch (RuntimeException e) {
+                logger.warn("Error closing the upstream transport during shutdown", e);
+            }
+        }
+
         if (ownsExecutor) {
             virtualThreadExecutor.shutdown();
             try {
@@ -502,7 +513,8 @@ public class AegisGatewayServer {
             logger.warn("No upstream MCP server is configured; every forwarded call fails closed");
             return UpstreamClient.unconfigured();
         }
-        return new HttpUpstreamClient(upstream.url(), upstream.connectTimeout(), upstream.requestTimeout());
+        return UpstreamClientFactory.create(
+                upstream.url(), upstream.transport(), upstream.connectTimeout(), upstream.requestTimeout());
     }
 
     private McpProxyHandler.AuditTrail buildAuditTrail() {

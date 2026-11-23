@@ -45,6 +45,19 @@ class McpProxyHandlerTest {
         directExecutor = Executors.newSingleThreadExecutor();
     }
 
+    /**
+     * Test double: answers every call with a fixed success result. It lives in the test source, not
+     * in the production interface, so no shipped path can select an echo upstream (FEAT-001).
+     */
+    private static UpstreamClient echoUpstream() {
+        return (context, request) -> {
+            ObjectNode result = JsonNodeFactory.instance.objectNode();
+            result.put("status", "executed");
+            result.put("method", request.method());
+            return CompletableFuture.completedFuture(JsonRpcResponse.success(request.id(), result));
+        };
+    }
+
     private EmbeddedChannel createChannel(ToolCallInterceptor interceptor, UpstreamClient upstreamClient, boolean requireAuth) {
         McpProxyHandler handler = new McpProxyHandler(
                 McpProxyHandler.DEFAULT_RPC_PATH,
@@ -179,7 +192,7 @@ class McpProxyHandlerTest {
     @DisplayName("C-001: Unauthenticated request returns HTTP 401 Unauthorized (-32000 Authentication Failed)")
     void testUnauthenticatedReturns401() {
         ToolCallInterceptor interceptor = ToolCallInterceptor.allowAll();
-        UpstreamClient upstream = UpstreamClient.mockEcho();
+        UpstreamClient upstream = echoUpstream();
 
         EmbeddedChannel channel = createChannel(interceptor, upstream, true);
 
@@ -211,7 +224,7 @@ class McpProxyHandlerTest {
             assertEquals("secret-token-12345", context.identity().bearerToken());
             return CompletableFuture.completedFuture(InterceptionVerdict.allow());
         };
-        UpstreamClient upstream = UpstreamClient.mockEcho();
+        UpstreamClient upstream = echoUpstream();
 
         EmbeddedChannel channel = createChannel(interceptor, upstream, true);
 
@@ -237,7 +250,7 @@ class McpProxyHandlerTest {
             assertEquals("spiffe://aegismcp.dev/ns/prod/sa/agent-alpha", context.identity().spiffeId());
             return CompletableFuture.completedFuture(InterceptionVerdict.allow());
         };
-        UpstreamClient upstream = UpstreamClient.mockEcho();
+        UpstreamClient upstream = echoUpstream();
 
         EmbeddedChannel channel = createChannel(interceptor, upstream, true);
 
@@ -263,7 +276,7 @@ class McpProxyHandlerTest {
             future.completeExceptionally(new TimeoutException("Human approval deadline expired"));
             return future;
         };
-        UpstreamClient upstream = UpstreamClient.mockEcho();
+        UpstreamClient upstream = echoUpstream();
 
         EmbeddedChannel channel = createChannel(interceptor, upstream, false);
 
@@ -294,7 +307,7 @@ class McpProxyHandlerTest {
         ToolCallInterceptor interceptor = (context, req) -> CompletableFuture.completedFuture(
                 InterceptionVerdict.block(JsonRpcError.rateLimited("Rate limit of 100 req/min exceeded"))
         );
-        UpstreamClient upstream = UpstreamClient.mockEcho();
+        UpstreamClient upstream = echoUpstream();
 
         EmbeddedChannel channel = createChannel(interceptor, upstream, false);
 
@@ -320,7 +333,7 @@ class McpProxyHandlerTest {
     }
 
     @Test
-    @DisplayName("C-001: Upstream server crash returns HTTP 502 Bad Gateway (-32004 Upstream Unavailable)")
+    @DisplayName("C-001: Upstream server crash returns HTTP 502 Bad Gateway (-32603 UPSTREAM_UNAVAILABLE)")
     void testUpstreamCrashReturns502() {
         ToolCallInterceptor interceptor = ToolCallInterceptor.allowAll();
         UpstreamClient upstream = (context, req) -> {
@@ -349,7 +362,42 @@ class McpProxyHandlerTest {
         JsonRpcResponse rpcResp = codec.decodeResponse(body);
 
         assertTrue(rpcResp.isError());
-        assertEquals(JsonRpcError.UPSTREAM_UNAVAILABLE, rpcResp.error().code());
+        assertEquals(JsonRpcError.INTERNAL_ERROR, rpcResp.error().code());
+        assertEquals(JsonRpcError.MACHINE_UPSTREAM_UNAVAILABLE, rpcResp.error().machineCode());
+    }
+
+    @Test
+    @DisplayName("C-001: an upstream timeout returns HTTP 502 with UPSTREAM_UNAVAILABLE, not 408")
+    void testUpstreamTimeoutReturns502() {
+        ToolCallInterceptor interceptor = ToolCallInterceptor.allowAll();
+        UpstreamClient upstream = (context, req) -> {
+            CompletableFuture<JsonRpcResponse> future = new CompletableFuture<>();
+            future.completeExceptionally(new TimeoutException("upstream did not answer"));
+            return future;
+        };
+
+        EmbeddedChannel channel = createChannel(interceptor, upstream, false);
+
+        String payload = """
+                {
+                  "jsonrpc": "2.0",
+                  "id": "slow-upstream",
+                  "method": "tools/call",
+                  "params": { "name": "ping_tool" }
+                }
+                """;
+
+        FullHttpResponse response = sendRequest(channel, HttpMethod.POST, "/mcp/v1/rpc", payload, null, null);
+        assertNotNull(response);
+        assertEquals(HttpResponseStatus.BAD_GATEWAY, response.status());
+
+        byte[] body = new byte[response.content().readableBytes()];
+        response.content().readBytes(body);
+        JsonRpcResponse rpcResp = codec.decodeResponse(body);
+
+        assertTrue(rpcResp.isError());
+        assertEquals(JsonRpcError.INTERNAL_ERROR, rpcResp.error().code());
+        assertEquals(JsonRpcError.MACHINE_UPSTREAM_UNAVAILABLE, rpcResp.error().machineCode());
     }
 
     @Test

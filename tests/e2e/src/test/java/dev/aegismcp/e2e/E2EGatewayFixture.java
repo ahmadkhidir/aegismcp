@@ -1,6 +1,8 @@
 package dev.aegismcp.e2e;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.aegismcp.gateway.AegisGatewayServer;
 import dev.aegismcp.gateway.anomaly.AnomalyCircuitBreaker;
 import dev.aegismcp.gateway.anomaly.AnomalyRule;
@@ -14,6 +16,7 @@ import dev.aegismcp.gateway.audit.AuditRecord;
 import dev.aegismcp.gateway.audit.AuditVerificationEngine;
 import dev.aegismcp.gateway.audit.AuditVerificationHandler;
 import dev.aegismcp.gateway.codec.JsonRpcCodec;
+import dev.aegismcp.gateway.codec.JsonRpcResponse;
 import dev.aegismcp.gateway.dlp.DlpOutboundHandler;
 import dev.aegismcp.gateway.dlp.DlpPipelineConfigurator;
 import dev.aegismcp.gateway.dlp.DlpScrubber;
@@ -75,16 +78,30 @@ public class E2EGatewayFixture implements AutoCloseable {
 
     public static final int DEFAULT_BURST_THRESHOLD = 100_000;
 
+    /**
+     * Test double for the journeys that only exercise the security chain: answers every call with a
+     * fixed success result. It lives with the harness so the production interface carries no echo
+     * client (FEAT-001).
+     */
+    public static UpstreamClient echoUpstream() {
+        return (context, request) -> {
+            ObjectNode result = JsonNodeFactory.instance.objectNode();
+            result.put("status", "executed");
+            result.put("method", request.method());
+            return CompletableFuture.completedFuture(JsonRpcResponse.success(request.id(), result));
+        };
+    }
+
     public E2EGatewayFixture() throws InterruptedException {
-        this(UpstreamClient.mockEcho(), true, DEFAULT_BURST_THRESHOLD);
+        this(echoUpstream(), true, DEFAULT_BURST_THRESHOLD);
     }
 
     public E2EGatewayFixture(boolean loadDefaultPolicy) throws InterruptedException {
-        this(UpstreamClient.mockEcho(), loadDefaultPolicy, DEFAULT_BURST_THRESHOLD);
+        this(echoUpstream(), loadDefaultPolicy, DEFAULT_BURST_THRESHOLD);
     }
 
     public E2EGatewayFixture(int burstThreshold) throws InterruptedException {
-        this(UpstreamClient.mockEcho(), true, burstThreshold);
+        this(echoUpstream(), true, burstThreshold);
     }
 
     public E2EGatewayFixture(UpstreamClient initialUpstream) throws InterruptedException {
@@ -376,15 +393,15 @@ public class E2EGatewayFixture implements AutoCloseable {
     }
 
     public static E2EGatewayFixture forPhase2(AgentIdentityResolver resolver) throws InterruptedException {
-        return new E2EGatewayFixture(UpstreamClient.mockEcho(), true, DEFAULT_BURST_THRESHOLD, 100_000, resolver, null);
+        return new E2EGatewayFixture(echoUpstream(), true, DEFAULT_BURST_THRESHOLD, 100_000, resolver, null);
     }
 
     public static E2EGatewayFixture forPhase2(AgentIdentityResolver resolver, int velocityThreshold) throws InterruptedException {
-        return new E2EGatewayFixture(UpstreamClient.mockEcho(), true, DEFAULT_BURST_THRESHOLD, velocityThreshold, resolver, null);
+        return new E2EGatewayFixture(echoUpstream(), true, DEFAULT_BURST_THRESHOLD, velocityThreshold, resolver, null);
     }
 
     public static E2EGatewayFixture forMtlsPhase2(AgentIdentityResolver resolver, SslContext sslContext) throws InterruptedException {
-        return new E2EGatewayFixture(UpstreamClient.mockEcho(), true, DEFAULT_BURST_THRESHOLD, 100_000, resolver, sslContext);
+        return new E2EGatewayFixture(echoUpstream(), true, DEFAULT_BURST_THRESHOLD, 100_000, resolver, sslContext);
     }
 
     private static String escapeJson(String s) {
