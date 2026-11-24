@@ -9,6 +9,19 @@ import { KillSwitchModal } from '../components/KillSwitchModal';
 import { App } from '../App';
 import { AegisApi, ApiError } from '../services/api';
 
+/**
+ * The shell test asserts navigation, not the policy editor engine. The real
+ * editor loads as its own chunk and is covered by PolicyCodeEditor.test.tsx;
+ * keeping it out of the shell suite keeps this test about the shell.
+ */
+vi.mock('../components/PolicyCodeEditor', () => ({
+  default: () => <div data-testid="policy-yaml-editor" />,
+}));
+
+// Warm the mocked editor module so the policy route's lazy import resolves
+// without a first-transform cost inside the shell test.
+await import('../components/PolicyCodeEditor');
+
 function base64Url(value: string): string {
   return btoa(value).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
