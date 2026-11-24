@@ -305,7 +305,6 @@ public class EmergencyManagementHandler extends SimpleChannelInboundHandler<Full
             QuarantineResult result;
             try {
                 result = killSwitchManager.quarantine(targetType, targetId, reason);
-                metrics.recordBlockedViolation();
                 recordAdministrativeEntry(authResult.subject(), targetType, targetId, reason,
                         result.status().name());
             } catch (RuntimeException e) {

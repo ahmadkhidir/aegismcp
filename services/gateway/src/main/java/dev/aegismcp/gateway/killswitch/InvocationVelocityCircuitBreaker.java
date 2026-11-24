@@ -20,7 +20,12 @@ import java.util.concurrent.ConcurrentHashMap;
  * Sliding-window rate detector and automated circuit breaker protecting against infinite agent invocation loops.
  * Conforms to FEAT-010 specification (> 100 tool calls within 10 seconds).
  * Automatically trips and quarantines runaway agents in KillSwitchManager.
- * Anchors: FEAT-010, C-001.
+ *
+ * <p>A breach is counted once, by the {@link GatewayMetricsInterceptor} that observes the terminal
+ * verdict of the call; the breaker itself records no metric so the same refusal is never counted
+ * twice.
+ *
+ * <p>Anchors: FEAT-010, C-001.
  */
 public class InvocationVelocityCircuitBreaker implements ToolCallInterceptor {
 
@@ -32,28 +37,21 @@ public class InvocationVelocityCircuitBreaker implements ToolCallInterceptor {
     private final KillSwitchManager killSwitchManager;
     private final int maxCallsThreshold;
     private final Duration windowDuration;
-    private final GatewayMetrics metrics;
 
     // agentId -> sliding window timestamps
     private final ConcurrentHashMap<String, Deque<Instant>> invocationWindows = new ConcurrentHashMap<>();
 
     public InvocationVelocityCircuitBreaker(KillSwitchManager killSwitchManager) {
-        this(killSwitchManager, DEFAULT_MAX_CALLS_THRESHOLD, DEFAULT_WINDOW_DURATION, null);
+        this(killSwitchManager, DEFAULT_MAX_CALLS_THRESHOLD, DEFAULT_WINDOW_DURATION);
     }
 
     public InvocationVelocityCircuitBreaker(KillSwitchManager killSwitchManager, int maxCallsThreshold, Duration windowDuration) {
-        this(killSwitchManager, maxCallsThreshold, windowDuration, null);
-    }
-
-    public InvocationVelocityCircuitBreaker(KillSwitchManager killSwitchManager, int maxCallsThreshold,
-                                           Duration windowDuration, GatewayMetrics metrics) {
         if (maxCallsThreshold <= 0) {
             throw new IllegalArgumentException("maxCallsThreshold must be positive, got: " + maxCallsThreshold);
         }
         this.killSwitchManager = Objects.requireNonNull(killSwitchManager, "killSwitchManager must not be null");
         this.maxCallsThreshold = maxCallsThreshold;
         this.windowDuration = Objects.requireNonNull(windowDuration, "windowDuration must not be null");
-        this.metrics = metrics;
     }
 
     public int getMaxCallsThreshold() {
@@ -96,9 +94,6 @@ public class InvocationVelocityCircuitBreaker implements ToolCallInterceptor {
 
             // Pause the identity without severing the channel that owes this call its C-001 answer.
             killSwitchManager.pauseAgent(agentId, reason);
-            if (metrics != null) {
-                metrics.recordBlockedViolation();
-            }
             return true;
         }
 
@@ -154,9 +149,6 @@ public class InvocationVelocityCircuitBreaker implements ToolCallInterceptor {
 
         // Check if agent is already quarantined
         if (killSwitchManager.isAgentQuarantined(agentId)) {
-            if (metrics != null) {
-                metrics.recordBlockedViolation();
-            }
             String quarantineReason = "Agent '" + agentId + "' is paused by the invocation velocity circuit breaker";
             if (killSwitchManager.isVelocityPaused(agentId)) {
                 return CompletableFuture.completedFuture(InterceptionVerdict.block(

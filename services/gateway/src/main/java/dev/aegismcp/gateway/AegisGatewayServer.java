@@ -39,6 +39,7 @@ import dev.aegismcp.gateway.inspector.TrafficObservations;
 import dev.aegismcp.gateway.inspector.TrafficStreamHandler;
 import dev.aegismcp.gateway.killswitch.EmergencyManagementHandler;
 import dev.aegismcp.gateway.killswitch.GatewayMetrics;
+import dev.aegismcp.gateway.killswitch.GatewayMetricsInterceptor;
 import dev.aegismcp.gateway.killswitch.InvocationVelocityCircuitBreaker;
 import dev.aegismcp.gateway.killswitch.KillSwitchManager;
 import dev.aegismcp.gateway.policy.DeclarativePolicyInterceptor;
@@ -110,13 +111,13 @@ import java.util.concurrent.TimeUnit;
  * by the configured upstream, outbound DLP on the response, and an audit record for every terminal
  * outcome. The same assembly splits the telemetry surface off that path: the chain is observed from
  * the outside so every intercepted tool call reaches the live inspector on
- * {@code GET /api/v1/stream/traffic}, and a dedicated observer turns approval-queue and threat-level
- * changes into stream events. Management and probe endpoints are attached in the same channel
- * initializer, and a request that matches no owned path is answered {@code 404} rather than a
- * fallback success body.
+ * {@code GET /api/v1/stream/traffic}, the same observation feeds the fleet counters C-009 and C-010
+ * report, and a dedicated observer turns approval-queue and threat-level changes into stream events.
+ * Management and probe endpoints are attached in the same channel initializer, and a request that
+ * matches no owned path is answered {@code 404} rather than a fallback success body.
  *
  * <p>Anchors: FEAT-001, FEAT-002, FEAT-004, FEAT-005, FEAT-006, FEAT-007, FEAT-008, FEAT-009,
- * FEAT-012, NFR-001, NFR-005, NFR-021, NFR-027, C-001, C-002.
+ * FEAT-012, NFR-001, NFR-005, NFR-021, NFR-027, C-001, C-002, C-009, C-010.
  */
 public class AegisGatewayServer {
 
@@ -264,6 +265,9 @@ public class AegisGatewayServer {
         this.approvalManager = Objects.requireNonNull(approvalManager, "approvalManager must not be null");
         this.killSwitchManager = Objects.requireNonNull(killSwitchManager, "killSwitchManager must not be null");
         this.gatewayMetrics = Objects.requireNonNull(gatewayMetrics, "gatewayMetrics must not be null");
+        // The session registry is the owner of open agent transport streams, so it feeds the live
+        // active-connection and active-agent counters C-009 and C-010 report (FEAT-010, C-009).
+        this.killSwitchManager.attachMetrics(this.gatewayMetrics);
 
         this.complianceReportEngine = complianceReportEngine != null
                 ? complianceReportEngine
@@ -494,8 +498,7 @@ public class AegisGatewayServer {
         InvocationVelocityCircuitBreaker velocity = new InvocationVelocityCircuitBreaker(
                 killSwitchManager,
                 configuration.velocityThreshold(),
-                configuration.velocityWindow(),
-                gatewayMetrics);
+                configuration.velocityWindow());
         DynamicValidationInterceptor validation =
                 new DynamicValidationInterceptor(parameterValidator, auditLedger);
         DeclarativePolicyInterceptor policy = new DeclarativePolicyInterceptor(
@@ -514,7 +517,12 @@ public class AegisGatewayServer {
 
         // The live inspector observes the whole chain from outside it, so a call refused by any
         // stage is still reported and the verdict reaching the proxy is unchanged (FEAT-008, C-002).
-        return new InspectorTrafficInterceptor(chain, trafficObservations, inspectorEventStream, trafficEvents);
+        ToolCallInterceptor observed =
+                new InspectorTrafficInterceptor(chain, trafficObservations, inspectorEventStream, trafficEvents);
+
+        // The fleet counters wrap the observed chain, so every intercepted tool call is counted once
+        // and every terminal refusal is recorded as one blocked violation (C-009, C-010).
+        return new GatewayMetricsInterceptor(observed, gatewayMetrics);
     }
 
     private UpstreamClient buildUpstreamClient(GatewayConfiguration configuration) {

@@ -20,7 +20,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Thread-safe manager for emergency global lockdown and multi-granularity quarantines.
  * Enforces immediate connection severing and non-blocking tool call rejection.
- * Anchors: FEAT-010, C-001, C-008.
+ *
+ * <p>The manager is also the registry of open agent transport streams: it tracks each verified
+ * channel against the agent identity, session, and upstream server it belongs to, and publishes the
+ * live active-connection and active-agent counts into {@link GatewayMetrics} for C-009 and C-010.
+ *
+ * <p>Anchors: FEAT-010, C-001, C-008, C-009, C-010.
  */
 public class KillSwitchManager {
 
@@ -48,7 +53,46 @@ public class KillSwitchManager {
     private final ConcurrentHashMap<String, Set<Channel>> serverChannels = new ConcurrentHashMap<>();
     private final Set<Channel> allChannels = ConcurrentHashMap.newKeySet();
 
+    /** Serialises the session-count snapshot so the last writer reports the current registry. */
+    private final Object sessionCountLock = new Object();
+
+    /** Fleet counters this registry feeds; {@code null} until the composition root attaches them. */
+    private volatile GatewayMetrics metrics;
+
     public KillSwitchManager() {
+    }
+
+    /**
+     * Attaches the fleet counters C-009 and C-010 report, publishing the current session snapshot
+     * immediately. The registry is the only owner of open agent transport streams, so the active
+     * connection and active agent counts are derived here from real channel registration rather
+     * than seeded by the metrics collector.
+     */
+    public void attachMetrics(GatewayMetrics metrics) {
+        this.metrics = metrics;
+        publishSessionCounts();
+    }
+
+    /**
+     * Publishes the live session counts into the attached metrics collector. Reading the registry
+     * inside the lock means the last publisher always reports the state it just observed, so a
+     * channel closing while another registers cannot leave a stale count behind.
+     */
+    private void publishSessionCounts() {
+        GatewayMetrics current = this.metrics;
+        if (current == null) {
+            return;
+        }
+        synchronized (sessionCountLock) {
+            int agents = 0;
+            for (Set<Channel> channels : agentChannels.values()) {
+                if (!channels.isEmpty()) {
+                    agents++;
+                }
+            }
+            current.setActiveConnections(allChannels.size());
+            current.setActiveAgents(agents);
+        }
     }
 
     /**
@@ -58,15 +102,25 @@ public class KillSwitchManager {
         if (channel == null) {
             return;
         }
-        allChannels.add(channel);
+        boolean newChannel = allChannels.add(channel);
+        boolean newAgent = false;
         if (agentId != null && !agentId.isBlank()) {
-            agentChannels.computeIfAbsent(agentId, k -> ConcurrentHashMap.newKeySet()).add(channel);
+            Set<Channel> channels = agentChannels.computeIfAbsent(agentId, k -> ConcurrentHashMap.newKeySet());
+            newAgent = channels.isEmpty();
+            channels.add(channel);
         }
         if (serverId != null && !serverId.isBlank()) {
             serverChannels.computeIfAbsent(serverId, k -> ConcurrentHashMap.newKeySet()).add(channel);
         }
 
-        channel.closeFuture().addListener(f -> unregisterSession(channel));
+        if (newChannel) {
+            channel.closeFuture().addListener(f -> unregisterSession(channel));
+        }
+        // Server and named-session membership do not change either published count, so only a new
+        // transport stream or a newly seen agent identity republishes the snapshot.
+        if (newChannel || newAgent) {
+            publishSessionCounts();
+        }
     }
 
     /**
@@ -88,10 +142,19 @@ public class KillSwitchManager {
         if (channel == null) {
             return;
         }
-        allChannels.remove(channel);
-        agentChannels.values().forEach(set -> set.remove(channel));
-        sessionChannels.values().forEach(set -> set.remove(channel));
-        serverChannels.values().forEach(set -> set.remove(channel));
+        boolean removed = allChannels.remove(channel);
+        for (Set<Channel> channels : agentChannels.values()) {
+            removed |= channels.remove(channel);
+        }
+        for (Set<Channel> channels : sessionChannels.values()) {
+            removed |= channels.remove(channel);
+        }
+        for (Set<Channel> channels : serverChannels.values()) {
+            removed |= channels.remove(channel);
+        }
+        if (removed) {
+            publishSessionCounts();
+        }
     }
 
     /**
@@ -153,6 +216,7 @@ public class KillSwitchManager {
         allChannels.clear();
         agentChannels.clear();
         serverChannels.clear();
+        publishSessionCounts();
         return closed;
     }
 
@@ -185,6 +249,7 @@ public class KillSwitchManager {
         logger.warn("Agent '{}' quarantined: {}", agentId, reason);
 
         Set<Channel> channels = agentChannels.remove(agentId);
+        publishSessionCounts();
         return channels != null ? closeChannels(channels) : 0;
     }
 
