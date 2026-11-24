@@ -13,7 +13,8 @@
   "dependencies": {
     "lucide-react": "^0.475.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.6.3",

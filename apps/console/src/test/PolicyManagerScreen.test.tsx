@@ -40,6 +40,10 @@ const DRAFT_POLICY: PolicyRecord = {
   createdAt: '2026-11-21T09:00:00Z',
 };
 
+/** A tab used for indentation, which the YAML parser rejects at line 4. */
+const INVALID_YAML =
+  'apiVersion: security.aegis.io/v1alpha1\nkind: SecurityPolicy\nspec:\n\tdefaultAction: BLOCK\n';
+
 describe('PolicyManagerScreen', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -70,9 +74,11 @@ describe('PolicyManagerScreen', () => {
     render(<PolicyManagerScreen />);
 
     expect(await screen.findByText('Declarative Policy Manager')).toBeInTheDocument();
+    // The header renders before the catalogue resolves, so wait for the loaded
+    // document rather than asserting against the loading state.
+    expect(await screen.findByTestId('policy-yaml-editor')).toHaveValue(RAW_YAML);
     expect(screen.getByTestId('policy-name-input')).toHaveValue('Production Gateway Guardrails');
     expect(screen.getByText('Active version')).toBeInTheDocument();
-    expect(screen.getByTestId('policy-yaml-editor')).toHaveValue(RAW_YAML);
     expect(screen.getByTestId('policy-version-input')).toHaveValue('2.4.0');
   });
 
@@ -174,6 +180,59 @@ describe('PolicyManagerScreen', () => {
     expect(await screen.findByTestId('policy-action-message')).toHaveTextContent(
       'Activated Production Gateway Guardrails 2.5.0'
     );
+  });
+
+  it('keeps a parsed document deployable and clears the lint error', async () => {
+    render(<PolicyManagerScreen />);
+    const editor = await screen.findByTestId('policy-yaml-editor');
+
+    fireEvent.change(editor, { target: { value: INVALID_YAML } });
+    expect(await screen.findByTestId('policy-lint-error')).toBeInTheDocument();
+
+    fireEvent.change(editor, { target: { value: `${RAW_YAML}# reviewed\n` } });
+
+    expect(screen.queryByTestId('policy-lint-error')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('policy-lint-line')).not.toBeInTheDocument();
+    expect(screen.getByTestId('deploy-policy-button')).not.toBeDisabled();
+  });
+
+  it('blocks submission and reports the failing line for invalid YAML', async () => {
+    const activate = vi.mocked(AegisApi.activatePolicy);
+    render(<PolicyManagerScreen />);
+
+    fireEvent.change(await screen.findByTestId('policy-yaml-editor'), {
+      target: { value: INVALID_YAML },
+    });
+
+    const lint = await screen.findByTestId('policy-lint-error');
+    expect(lint).toHaveTextContent('Lint Error');
+    expect(lint).toHaveTextContent('line 4');
+    expect(lint).toHaveTextContent('Tabs are not allowed as indentation');
+    expect(screen.getByTestId('policy-lint-line')).toHaveTextContent('4');
+    expect(screen.getByTestId('policy-lint-badge')).toBeInTheDocument();
+    expect(screen.getByTestId('deploy-policy-button')).toBeDisabled();
+    expect(screen.getByTestId('save-draft-button')).toBeDisabled();
+    expect(activate).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a gateway schema rejection in the lint error state', async () => {
+    vi.mocked(AegisApi.publishPolicy).mockRejectedValue(
+      new ApiError(400, 'spec.rules[0].action: must be one of BLOCK, ALLOW, REQUIRE_APPROVAL.')
+    );
+    render(<PolicyManagerScreen />);
+
+    fireEvent.change(await screen.findByTestId('policy-yaml-editor'), {
+      target: { value: `${RAW_YAML}# reviewed\n` },
+    });
+    fireEvent.click(screen.getByTestId('save-draft-button'));
+
+    const lint = await screen.findByTestId('policy-lint-error');
+    expect(lint).toHaveTextContent('Lint Error');
+    expect(lint).toHaveTextContent(
+      'spec.rules[0].action: must be one of BLOCK, ALLOW, REQUIRE_APPROVAL.'
+    );
+    expect(lint).toHaveTextContent(/active policy is unchanged/i);
+    expect(screen.queryByTestId('policy-action-error')).not.toBeInTheDocument();
   });
 
   it('shows the empty catalogue state when no policy version exists', async () => {
