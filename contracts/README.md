@@ -29,6 +29,7 @@ and a PR that updates both sides.
 | [C-021](C-021.md) | Emergency release | services/gateway | Frozen | C021EmergencyReleaseContractTest#releasesQuarantinedTargetAndLiftsLockdown |
 | [C-022](C-022.md) | Health probe | services/gateway | Frozen | C022HealthContractTest#answersLivenessProbeWhileDependenciesAreDown |
 | [C-023](C-023.md) | Readiness probe | services/gateway | Frozen | C023ReadinessContractTest#reportsDependencyHealthAndRefusesTrafficWhenDown |
+| [C-024](C-024.md) | Slack interactive approval callback | services/gateway | Frozen | C024SlackInteractionContractTest#appliesSignedSlackApprovalAndRefusesUnauthenticatedCallbacks |
 
 C-007 was retired in the endpoint reconciliation pass. It duplicated the ledger-integrity resource now
 defined once by C-015. Retired identifiers are not reused.
