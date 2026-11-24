@@ -129,6 +129,35 @@ class C001RpcProxyContractTest extends ArtifactTest {
     }
 
     @Test
+    @DisplayName("C-001: refuses a shell command-chaining token with 403 ARGUMENT_CONSTRAINT_VIOLATED")
+    void refusesCommandInjection() throws Exception {
+        GatewayHarness harness = gateway();
+        String token = harness.agentToken(AGENT);
+
+        // Warm the published-schema read so the upstream count below isolates the denied call
+        // rather than the tools/list lookup FEAT-012 performs before it validates arguments.
+        ContractAssertions.assertStatus(200, harness.postJson("/mcp/v1/rpc", token,
+                GatewayHarness.toolCall("warmup-1", "echo", "{\"message\":\"ordinary text\"}")));
+        int forwardedBefore = harness.upstream().requestCount();
+
+        JsonNode body = ContractAssertions.assertRpcError(
+                harness.postJson("/mcp/v1/rpc", token,
+                        GatewayHarness.toolCall("command-1", "echo", "{\"message\":\"report && whoami\"}")),
+                403, -32001, "ARGUMENT_CONSTRAINT_VIOLATED");
+
+        // C-001 keeps command injection in the declared-constraint row and requires the denial to
+        // name both the detected chaining token and the parameter that carried it. FEAT-012 rejects
+        // the call before it reaches the upstream server.
+        String message = body.path("error").path("message").asText();
+        assertTrue(message.contains("&&"),
+                () -> "C-001 requires the denial to name the detected token: " + message);
+        assertTrue(message.contains("message"),
+                () -> "C-001 requires the denial to name the parameter: " + message);
+        assertEquals(forwardedBefore, harness.upstream().requestCount(),
+                "A command-injection denial must not reach the upstream server");
+    }
+
+    @Test
     @DisplayName("C-001: refuses a path outside the permitted root with 403 PATH_TRAVERSAL")
     void refusesPathTraversal() throws Exception {
         ContractAssertions.assertRpcError(
