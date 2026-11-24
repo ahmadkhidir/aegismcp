@@ -373,11 +373,6 @@ public class AegisGatewayServer {
                         ch.pipeline().addLast("http-codec", new HttpServerCodec());
                         ch.pipeline().addLast("http-aggregator", new HttpObjectAggregator(maxContentLength));
 
-                        // Outbound DLP sits after the HTTP codec so it sees the decoded response
-                        // before the codec turns it into bytes (FEAT-005).
-                        if (dlpOutboundHandler != null) {
-                            ch.pipeline().addLast("dlp-outbound-filter", dlpOutboundHandler);
-                        }
                         if (identityVerificationHandler != null) {
                             ch.pipeline().addLast(IdentityVerificationHandler.HANDLER_NAME, identityVerificationHandler);
                         }
@@ -391,6 +386,14 @@ public class AegisGatewayServer {
                         ch.pipeline().addLast("emergency-management-handler", emergencyManagementHandler);
                         ch.pipeline().addLast("traffic-stream-handler", trafficStreamHandler);
 
+                        // Outbound DLP is a tool-response stage, not a global response filter. It is
+                        // added after every probe, management, and inspector-stream handler, so a
+                        // response those handlers write travels toward the pipeline head without
+                        // ever crossing it; only the proxied upstream response written below it is
+                        // scrubbed (FEAT-005, C-001, C-003, C-004, C-014, C-019, C-024).
+                        if (dlpOutboundHandler != null) {
+                            ch.pipeline().addLast("dlp-outbound-filter", dlpOutboundHandler);
+                        }
                         if (mcpProxyHandler != null) {
                             McpProxyPipelineConfigurator.configure(ch.pipeline(), mcpProxyHandler);
                         }

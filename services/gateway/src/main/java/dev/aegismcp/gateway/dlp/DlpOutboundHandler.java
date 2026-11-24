@@ -27,8 +27,13 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Netty outbound handler that intercepts HTTP and JSON-RPC responses, scanning and redacting
- * sensitive credentials, API keys, private keys, database URLs, and PII before transmission.
+ * Netty outbound handler that scans and redacts sensitive credentials, API keys, private keys,
+ * database URLs, and PII from a proxied tool-response body before transmission.
+ *
+ * <p>It is scoped, not global: the composition root attaches it immediately before the MCP proxy
+ * handler, after every probe, management, and inspector-stream handler. An outbound write travels
+ * toward the pipeline head from the writing handler's context, so those handlers' responses never
+ * cross this filter, while the proxied upstream response does (FEAT-005, C-001).
  *
  * <p>Pattern scanning over a large payload is CPU work, not channel work, so it never runs on the
  * event loop: the payload is copied out, scanned on a worker, and the sanitized response is written
