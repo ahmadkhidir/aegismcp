@@ -26,15 +26,13 @@ import static org.junit.jupiter.api.Assertions.*;
 class InvocationVelocityCircuitBreakerTest {
 
     private KillSwitchManager killSwitchManager;
-    private GatewayMetrics metrics;
     private InvocationVelocityCircuitBreaker circuitBreaker;
 
     @BeforeEach
     void setUp() {
         killSwitchManager = new KillSwitchManager();
-        metrics = new GatewayMetrics();
         // Lower threshold for fast testing: 5 calls in 10 seconds
-        circuitBreaker = new InvocationVelocityCircuitBreaker(killSwitchManager, 5, Duration.ofSeconds(10), metrics);
+        circuitBreaker = new InvocationVelocityCircuitBreaker(killSwitchManager, 5, Duration.ofSeconds(10));
     }
 
     private SecurityContext createSecurityContext(String agentId, Instant timestamp) {
@@ -90,7 +88,6 @@ class InvocationVelocityCircuitBreakerTest {
         // The identity is paused in KillSwitchManager, and the pause is the rate-limit row
         assertTrue(killSwitchManager.isAgentQuarantined("looping-agent"));
         assertTrue(killSwitchManager.isVelocityPaused("looping-agent"));
-        assertEquals(1, metrics.getBlockedViolations24h());
 
         // A later call while paused answers the same rate-limit row, never a policy refusal
         InterceptionVerdict subVerdict = circuitBreaker.intercept(ctx, req).get();

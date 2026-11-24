@@ -198,4 +198,37 @@ class KillSwitchManagerTest {
         InterceptionVerdict verdict = interceptor.intercept(ctx, req).get();
         assertInstanceOf(InterceptionVerdict.Allow.class, verdict);
     }
+
+    @Test
+    @DisplayName("C-009 / C-010: the attached metrics report live session and agent counts")
+    void testAttachedMetricsReportLiveSessionCounts() {
+        GatewayMetrics metrics = new GatewayMetrics();
+        killSwitchManager.attachMetrics(metrics);
+
+        // Nothing has connected yet: the counters are zero rather than seeded.
+        assertEquals(0, metrics.getActiveConnections());
+        assertEquals(0, metrics.getActiveAgents());
+
+        EmbeddedChannel first = new EmbeddedChannel();
+        EmbeddedChannel second = new EmbeddedChannel();
+        EmbeddedChannel third = new EmbeddedChannel();
+        killSwitchManager.registerSession("agent-1", first);
+        killSwitchManager.registerSession("agent-1", second);
+        killSwitchManager.registerSession("agent-2", third);
+
+        assertEquals(3, metrics.getActiveConnections());
+        assertEquals(2, metrics.getActiveAgents());
+
+        second.close();
+        assertEquals(2, metrics.getActiveConnections());
+        assertEquals(2, metrics.getActiveAgents());
+
+        killSwitchManager.quarantineAgent("agent-1", "containment");
+        assertEquals(1, metrics.getActiveConnections());
+        assertEquals(1, metrics.getActiveAgents());
+
+        third.close();
+        assertEquals(0, metrics.getActiveConnections());
+        assertEquals(0, metrics.getActiveAgents());
+    }
 }

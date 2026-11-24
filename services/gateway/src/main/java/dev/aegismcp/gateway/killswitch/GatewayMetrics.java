@@ -11,6 +11,13 @@ import java.util.concurrent.atomic.AtomicLong;
  * In-memory thread-safe metrics collector for system status, summary, and hourly timeseries
  * dashboards.
  *
+ * <p>Every counter is fed by a real event on the shipped request path: the interceptor chain
+ * observer records each intercepted tool call and each blocked violation
+ * ({@link GatewayMetricsInterceptor}), the session registry records open transport streams and
+ * distinct agent identities ({@link KillSwitchManager}), and the live telemetry observer records the
+ * pending approval queue. Nothing is seeded or estimated; a counter that has not been fed reports
+ * zero.
+ *
  * <p>Hourly buckets cover the 24 hours ending at the current hour; a bucket is initialised when the
  * clock reaches its hour and never reports a stale count. Anchors: C-009, C-010, C-020, FEAT-010.
  */
