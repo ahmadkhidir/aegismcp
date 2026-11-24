@@ -14,7 +14,14 @@ This directory and its subdirectories. The issue's `Own` paths are binding; ever
   `Dockerfile` per image, selected with `-f`. The build context is always the repository root, so
   the Gradle wrapper, settings, and module build files resolve exactly as they do in CI.
   - `docker/Dockerfile` — the gateway image. The builder stage produces the gateway distribution;
-    the runtime stage carries only the installed distribution, a JRE, and the entrypoint.
+    the runtime stage carries only the installed distribution, a JRE, the healthcheck, and the
+    entrypoint.
+  - `docker/build-image` (`build-image.ps1` on Windows) — the supported build path. It stamps the
+    OCI revision and version, writes the SPDX SBOM to `docker/build/` with Trivy, and fails the
+    build on a CRITICAL or HIGH vulnerability or any embedded secret before an image is released
+    (NFR-028, NFR-023).
+  - `docker/healthcheck.sh` — the image's liveness probe; it targets `GET /health` (C-022) on the
+    configured port with the scheme the listener actually serves.
 - `compose/` — local and CI multi-container topologies: the gateway plus the upstream tool servers
   it fronts. Compose files reference images built from `docker/`; they never redefine the image,
   introduce build-only environment differences, or substitute a third-party image for a product
@@ -95,7 +102,9 @@ This directory and its subdirectories. The issue's `Own` paths are binding; ever
 ## Checks
 
 - Build the gateway distribution: `./gradlew :services:gateway:installDist`
-- Build the gateway image from the repository root: `docker build -f infra/docker/Dockerfile -t aegismcp-gateway:local .`
+- Build and gate the gateway image from the repository root: `infra/docker/build-image`
+  (`pwsh infra/docker/build-image.ps1` on Windows). It runs `docker build` from the root against
+  `-f infra/docker/Dockerfile`, writes the SBOM, and fails on a policy violation.
 - Boot smoke: `docker run --rm -p 8443:8443 aegismcp-gateway:local`, confirm the startup log line,
   send SIGTERM, and confirm a clean exit.
 - Full build and suite when the image or a shared build input changes: `./gradlew build` and
