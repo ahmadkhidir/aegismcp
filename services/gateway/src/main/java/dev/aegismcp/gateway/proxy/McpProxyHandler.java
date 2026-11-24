@@ -205,11 +205,19 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
 
     private void executeInterceptionPipeline(ChannelHandlerContext ctx, SecurityContext securityContext,
                                             JsonRpcRequest rpcRequest, boolean keepAlive, long startedAt) {
-        if (rpcRequest.isToolCall()) {
-            logger.debug("Intercepting MCP tool call: {} for agent: {}",
-                    rpcRequest.toolName(), securityContext.identity().agentId());
+        if (PolicyBearingMethods.isPolicyBearing(rpcRequest)) {
+            // C-001 makes exactly tools/call and resources/read policy-bearing, and both take the
+            // whole chain: identity at the edge, parameter validation, policy (which may suspend for
+            // approval), sequence anomaly, upstream, DLP on the response, and audit. A resource read
+            // is evaluated through the tools/call projection so the shared stages see its target and
+            // params; the upstream still receives the original resources/read request (FEAT-001,
+            // FEAT-002, FEAT-004, FEAT-012, C-001).
+            JsonRpcRequest chainRequest = PolicyBearingMethods.toChainRequest(rpcRequest);
+            boolean projected = !rpcRequest.isToolCall();
+            logger.debug("Intercepting policy-bearing MCP method: {} for agent: {}",
+                    PolicyBearingMethods.policyTarget(rpcRequest), securityContext.identity().agentId());
 
-            interceptor.intercept(securityContext, rpcRequest)
+            interceptor.intercept(securityContext, chainRequest)
                     // An approval deadline is an interception outcome (C-001 408), not an upstream
                     // failure; any later TimeoutException can only come from the upstream exchange
                     // and maps to UPSTREAM_UNAVAILABLE instead.
@@ -230,16 +238,28 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
                             return CompletableFuture.completedFuture(errorResponse);
                         }
 
-                        JsonRpcRequest targetRequest = (verdict instanceof InterceptionVerdict.Modify modify)
-                                ? modify.modifiedRequest()
-                                : rpcRequest;
+                        if (!(verdict instanceof InterceptionVerdict.Modify modify)) {
+                            // The chain allowed the request: the upstream receives the original
+                            // envelope, never the tools/call projection used to evaluate it.
+                            return upstreamClient.forward(securityContext, rpcRequest);
+                        }
 
-                        return upstreamClient.forward(securityContext, targetRequest);
+                        if (projected) {
+                            // A resource read has no tools/call rewrite surface, so a modification
+                            // cannot be applied to the request the upstream understands. Refusing
+                            // keeps a partially applied decision from executing (NFR-027).
+                            return CompletableFuture.completedFuture(JsonRpcResponse.error(
+                                    rpcRequest.id(),
+                                    JsonRpcError.internalError("The gateway could not complete the request")));
+                        }
+
+                        return upstreamClient.forward(securityContext, modify.modifiedRequest());
                     })
                     .whenComplete((response, throwable) -> handlePipelineResult(
                             ctx, securityContext, rpcRequest, response, throwable, keepAlive, startedAt));
         } else {
-            // Non-tool call (e.g. tools/list, initialize, ping) passes directly to upstream
+            // A method C-001 does not make policy-bearing (initialize, tools/list, ping) passes
+            // directly to the upstream server without a policy decision.
             upstreamClient.forward(securityContext, rpcRequest)
                     .whenComplete((response, throwable) -> handlePipelineResult(
                             ctx, securityContext, rpcRequest, response, throwable, keepAlive, startedAt));
