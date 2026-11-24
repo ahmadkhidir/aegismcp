@@ -10,7 +10,14 @@ import java.util.UUID;
 
 /**
  * Immutable audit record representing an intercepted MCP protocol interaction or gateway event.
- * Anchors: FEAT-007, schema.md#AuditBlock.
+ *
+ * <p>Two fields carry the approval outcome the ledger seals: {@code argumentsHash} is the SHA-256
+ * digest of the canonicalized request arguments, so a recorded invocation can be matched to its
+ * parameters without storing or exporting them, and {@code reviewedBy} is the verified operator
+ * subject that resolved a required approval, or {@code null} when no human decision applied. Both
+ * take part in {@code recordHash}, so neither can be changed after the block is sealed.
+ *
+ * <p>Anchors: FEAT-006, FEAT-007, C-013, schema.md#AuditBlock.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public final class AuditRecord {
@@ -23,6 +30,8 @@ public final class AuditRecord {
     private final int redactionCount;
     private final double latencyMs;
     private final String payloadSummary;
+    private final String argumentsHash;
+    private final String reviewedBy;
     private final String recordHash;
 
     @JsonCreator
@@ -35,6 +44,8 @@ public final class AuditRecord {
             @JsonProperty("redactionCount") int redactionCount,
             @JsonProperty("latencyMs") double latencyMs,
             @JsonProperty("payloadSummary") String payloadSummary,
+            @JsonProperty("argumentsHash") String argumentsHash,
+            @JsonProperty("reviewedBy") String reviewedBy,
             @JsonProperty("recordHash") String recordHash
     ) {
         this.recordId = recordId != null ? recordId : UUID.randomUUID().toString();
@@ -45,24 +56,82 @@ public final class AuditRecord {
         this.redactionCount = Math.max(0, redactionCount);
         this.latencyMs = Math.max(0.0, latencyMs);
         this.payloadSummary = payloadSummary != null ? payloadSummary : "";
+        this.argumentsHash = (argumentsHash != null && !argumentsHash.isBlank())
+                ? argumentsHash
+                : HashUtils.sha256Hex(this.payloadSummary);
+        this.reviewedBy = blankToNull(reviewedBy);
         this.recordHash = (recordHash != null && !recordHash.isBlank())
                 ? recordHash
-                : calculateHash(this.recordId, this.timestamp, this.agentId, this.toolName, this.decision, this.redactionCount, this.latencyMs, this.payloadSummary);
+                : calculateHash(this.recordId, this.timestamp, this.agentId, this.toolName,
+                        this.decision, this.redactionCount, this.latencyMs, this.payloadSummary,
+                        this.argumentsHash, this.reviewedBy);
+    }
+
+    /**
+     * Compatibility constructor for callers that predate the sealed review fields. The arguments
+     * digest is derived from the payload summary, which is the digest the query endpoint returned
+     * before an explicit digest existed.
+     */
+    public AuditRecord(
+            String recordId,
+            String timestamp,
+            String agentId,
+            String toolName,
+            String decision,
+            int redactionCount,
+            double latencyMs,
+            String payloadSummary,
+            String recordHash
+    ) {
+        this(recordId, timestamp, agentId, toolName, decision, redactionCount, latencyMs,
+                payloadSummary, null, null, recordHash);
     }
 
     public static AuditRecord create(String agentId, String toolName, String decision, int redactionCount, double latencyMs, String payloadSummary) {
+        return create(agentId, toolName, decision, redactionCount, latencyMs, payloadSummary, null, null);
+    }
+
+    /**
+     * Seals one interaction with the digest of its canonicalized arguments and, when a human
+     * reviewed it, the verified reviewer subject (FEAT-006, C-013).
+     */
+    public static AuditRecord create(String agentId, String toolName, String decision, int redactionCount, double latencyMs, String payloadSummary, String argumentsHash, String reviewedBy) {
         String recordId = UUID.randomUUID().toString();
         String timestamp = Instant.now().toString();
-        String hash = calculateHash(recordId, timestamp, agentId, toolName, decision, redactionCount, latencyMs, payloadSummary);
-        return new AuditRecord(recordId, timestamp, agentId, toolName, decision, redactionCount, latencyMs, payloadSummary, hash);
+        String sealedArgumentsHash = (argumentsHash != null && !argumentsHash.isBlank())
+                ? argumentsHash
+                : HashUtils.sha256Hex(payloadSummary != null ? payloadSummary : "");
+        String sealedReviewedBy = blankToNull(reviewedBy);
+        String hash = calculateHash(recordId, timestamp, agentId, toolName, decision, redactionCount,
+                latencyMs, payloadSummary, sealedArgumentsHash, sealedReviewedBy);
+        return new AuditRecord(recordId, timestamp, agentId, toolName, decision, redactionCount,
+                latencyMs, payloadSummary, sealedArgumentsHash, sealedReviewedBy, hash);
     }
 
     public static AuditRecord of(String recordId, String timestamp, String agentId, String toolName, String decision, int redactionCount, double latencyMs, String payloadSummary) {
-        String hash = calculateHash(recordId, timestamp, agentId, toolName, decision, redactionCount, latencyMs, payloadSummary);
-        return new AuditRecord(recordId, timestamp, agentId, toolName, decision, redactionCount, latencyMs, payloadSummary, hash);
+        return of(recordId, timestamp, agentId, toolName, decision, redactionCount, latencyMs,
+                payloadSummary, null, null);
+    }
+
+    public static AuditRecord of(String recordId, String timestamp, String agentId, String toolName, String decision, int redactionCount, double latencyMs, String payloadSummary, String argumentsHash, String reviewedBy) {
+        String sealedArgumentsHash = (argumentsHash != null && !argumentsHash.isBlank())
+                ? argumentsHash
+                : HashUtils.sha256Hex(payloadSummary != null ? payloadSummary : "");
+        String sealedReviewedBy = blankToNull(reviewedBy);
+        String hash = calculateHash(recordId, timestamp, agentId, toolName, decision, redactionCount,
+                latencyMs, payloadSummary, sealedArgumentsHash, sealedReviewedBy);
+        return new AuditRecord(recordId, timestamp, agentId, toolName, decision, redactionCount,
+                latencyMs, payloadSummary, sealedArgumentsHash, sealedReviewedBy, hash);
     }
 
     public static String calculateHash(String recordId, String timestamp, String agentId, String toolName, String decision, int redactionCount, double latencyMs, String payloadSummary) {
+        return calculateHash(recordId, timestamp, agentId, toolName, decision, redactionCount, latencyMs,
+                payloadSummary, HashUtils.sha256Hex(payloadSummary != null ? payloadSummary : ""), null);
+    }
+
+    public static String calculateHash(String recordId, String timestamp, String agentId, String toolName, String decision, int redactionCount, double latencyMs, String payloadSummary, String argumentsHash, String reviewedBy) {
+        // Every sealed field participates, so changing the reviewer or the arguments digest after
+        // the block is written breaks the record hash and the Merkle root above it (FEAT-007).
         String canonical = String.join("|",
                 recordId != null ? recordId : "",
                 timestamp != null ? timestamp : "",
@@ -71,9 +140,15 @@ public final class AuditRecord {
                 decision != null ? decision : "",
                 String.valueOf(redactionCount),
                 String.valueOf(latencyMs),
-                payloadSummary != null ? payloadSummary : ""
+                payloadSummary != null ? payloadSummary : "",
+                argumentsHash != null ? argumentsHash : "",
+                reviewedBy != null ? reviewedBy : ""
         );
         return HashUtils.sha256Hex(canonical);
+    }
+
+    private static String blankToNull(String value) {
+        return value != null && !value.isBlank() ? value : null;
     }
 
     public String getRecordId() {
@@ -108,6 +183,16 @@ public final class AuditRecord {
         return payloadSummary;
     }
 
+    /** SHA-256 digest of the canonicalized request arguments; the arguments are never stored. */
+    public String getArgumentsHash() {
+        return argumentsHash;
+    }
+
+    /** Verified reviewer subject that resolved a required approval, or {@code null}. */
+    public String getReviewedBy() {
+        return reviewedBy;
+    }
+
     public String getRecordHash() {
         return recordHash;
     }
@@ -125,12 +210,15 @@ public final class AuditRecord {
                 Objects.equals(toolName, that.toolName) &&
                 Objects.equals(decision, that.decision) &&
                 Objects.equals(payloadSummary, that.payloadSummary) &&
+                Objects.equals(argumentsHash, that.argumentsHash) &&
+                Objects.equals(reviewedBy, that.reviewedBy) &&
                 Objects.equals(recordHash, that.recordHash);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(recordId, timestamp, agentId, toolName, decision, redactionCount, latencyMs, payloadSummary, recordHash);
+        return Objects.hash(recordId, timestamp, agentId, toolName, decision, redactionCount,
+                latencyMs, payloadSummary, argumentsHash, reviewedBy, recordHash);
     }
 
     @Override
@@ -143,6 +231,7 @@ public final class AuditRecord {
                 ", decision='" + decision + '\'' +
                 ", redactionCount=" + redactionCount +
                 ", latencyMs=" + latencyMs +
+                ", reviewedBy='" + reviewedBy + '\'' +
                 ", recordHash='" + recordHash + '\'' +
                 '}';
     }

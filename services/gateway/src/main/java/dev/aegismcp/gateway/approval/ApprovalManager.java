@@ -377,12 +377,14 @@ public class ApprovalManager implements DeclarativePolicyInterceptor.ApprovalHan
 
         if (decision == ApprovalDecision.APPROVE) {
             logger.info("Approval ticket {} approved by reviewer {}", ticketId, reviewer);
-            futureToRelease.complete(InterceptionVerdict.allow());
+            // The verified reviewer travels with the verdict so the terminal audit record can seal
+            // it as reviewedBy (FEAT-006, C-013).
+            futureToRelease.complete(InterceptionVerdict.allow(reviewer));
         } else {
             logger.info("Approval ticket {} rejected by reviewer {}", ticketId, reviewer);
             futureToRelease.complete(
                     InterceptionVerdict.block(approvalDenied(
-                            "Tool execution rejected by reviewer: " + reason))
+                            "Tool execution rejected by reviewer: " + reason), reviewer)
             );
         }
 

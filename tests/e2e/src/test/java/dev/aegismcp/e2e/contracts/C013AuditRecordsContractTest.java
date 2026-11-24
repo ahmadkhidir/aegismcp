@@ -4,12 +4,16 @@ import com.fasterxml.jackson.databind.JsonNode;
 import dev.aegismcp.e2e.fixtures.ArtifactTest;
 import dev.aegismcp.e2e.fixtures.ContractAssertions;
 import dev.aegismcp.e2e.fixtures.GatewayHarness;
+import dev.aegismcp.e2e.fixtures.GatewayOptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -55,6 +59,82 @@ class C013AuditRecordsContractTest extends ArtifactTest {
         JsonNode pageBody = GatewayHarness.json(page);
         assertEquals(1, pageBody.path("records").size());
         assertTrue(pageBody.path("total").asInt() >= 1);
+    }
+
+    @Test
+    @DisplayName("C-013: seals the verified reviewer on approved and rejected interactions")
+    void sealsReviewerOnApprovedAndRejectedInteractions() throws Exception {
+        GatewayHarness harness = gateway();
+
+        String approvedAgent = "agent-reviewed-approve";
+        GatewayHarness.PendingCall approved = harness.createPendingCall(approvedAgent, "deploy_prod",
+                "{\"environment\":\"production\",\"token\":\"sentinel-approved-credential\"}");
+        ContractAssertions.assertStatus(200, harness.postJson(
+                "/api/v1/approvals/" + approved.ticketId() + "/approve", harness.operatorToken(), ""));
+        ContractAssertions.assertStatus(200, approved.response().get(10, TimeUnit.SECONDS));
+
+        JsonNode approvedRecord = awaitRecord(harness, "?decision=allow&agentId=" + approvedAgent);
+        assertEquals("deploy_prod", approvedRecord.path("toolName").asText());
+        assertEquals(GatewayHarness.OPERATOR_SUBJECT, approvedRecord.path("reviewedBy").asText(),
+                "The verified reviewer must be sealed on the approved record");
+        assertEquals(64, approvedRecord.path("argumentsHash").asText().length());
+        assertFalse(approvedRecord.toString().contains("sentinel-approved-credential"),
+                "The raw arguments must never be returned by the audit query");
+
+        String rejectedAgent = "agent-reviewed-reject";
+        GatewayHarness.PendingCall rejected = harness.createPendingCall(rejectedAgent, "deploy_prod", "{}");
+        ContractAssertions.assertStatus(200, harness.postJson(
+                "/api/v1/approvals/" + rejected.ticketId() + "/reject", harness.operatorToken(),
+                "{\"reason\":\"Unsafe release window\"}"));
+        ContractAssertions.assertRpcError(rejected.response().get(10, TimeUnit.SECONDS),
+                403, -32002, "APPROVAL_DENIED");
+
+        JsonNode rejectedRecord = awaitRecord(harness, "?decision=block&agentId=" + rejectedAgent);
+        assertEquals("deploy_prod", rejectedRecord.path("toolName").asText());
+        assertEquals(GatewayHarness.OPERATOR_SUBJECT, rejectedRecord.path("reviewedBy").asText(),
+                "The rejecting reviewer must be sealed on the blocked record");
+        assertTrue(rejectedRecord.path("argumentsHash").isTextual());
+    }
+
+    @Test
+    @DisplayName("C-013: leaves the reviewer null when no approval applied and digests canonical arguments")
+    void unreviewedRecordsCarryNullReviewer() throws Exception {
+        GatewayHarness harness = gateway();
+
+        ContractAssertions.assertStatus(200, harness.postJson("/mcp/v1/rpc",
+                harness.agentToken("agent-unreviewed-a"),
+                GatewayHarness.toolCall("plain-a", "echo", "{\"alpha\":1,\"beta\":2}")));
+        ContractAssertions.assertStatus(200, harness.postJson("/mcp/v1/rpc",
+                harness.agentToken("agent-unreviewed-b"),
+                GatewayHarness.toolCall("plain-b", "echo", "{\"beta\":2,\"alpha\":1}")));
+
+        JsonNode first = awaitRecord(harness, "?decision=allow&agentId=agent-unreviewed-a");
+        JsonNode second = awaitRecord(harness, "?decision=allow&agentId=agent-unreviewed-b");
+
+        assertTrue(first.path("reviewedBy").isNull(), "A call that needed no approval has no reviewer");
+        assertTrue(second.path("reviewedBy").isNull());
+        assertEquals(64, first.path("argumentsHash").asText().length());
+        assertEquals(first.path("argumentsHash").asText(), second.path("argumentsHash").asText(),
+                "The same arguments in a different field order must seal the same digest");
+    }
+
+    @Test
+    @DisplayName("C-013: seals an expired approval without a reviewer")
+    void sealsExpiredApprovalWithoutReviewer() throws Exception {
+        try (GatewayHarness harness = start(GatewayOptions.defaults().approvalTtl(Duration.ofSeconds(1)))) {
+            String agent = "agent-review-expired";
+            GatewayHarness.PendingCall pending = harness.createPendingCall(agent, "deploy_prod",
+                    "{\"environment\":\"production\"}");
+
+            ContractAssertions.assertRpcError(pending.response().get(15, TimeUnit.SECONDS),
+                    408, -32002, "APPROVAL_TIMEOUT");
+
+            JsonNode expired = awaitRecord(harness, "?decision=block&agentId=" + agent);
+            assertEquals("deploy_prod", expired.path("toolName").asText());
+            assertTrue(expired.path("reviewedBy").isNull(),
+                    "An automatic expiry carries no human reviewer");
+            assertTrue(expired.path("argumentsHash").isTextual());
+        }
     }
 
     @Test

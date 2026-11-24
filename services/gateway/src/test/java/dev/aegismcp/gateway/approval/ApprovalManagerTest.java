@@ -13,6 +13,7 @@ import dev.aegismcp.gateway.policy.SecurityPolicy;
 import dev.aegismcp.gateway.proxy.AgentIdentity;
 import dev.aegismcp.gateway.proxy.InterceptionVerdict;
 import dev.aegismcp.gateway.proxy.SecurityContext;
+import dev.aegismcp.gateway.proxy.ToolCallInterceptor;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -120,6 +121,8 @@ class ApprovalManagerTest {
 
         InterceptionVerdict verdict = future.get(1, TimeUnit.SECONDS);
         assertInstanceOf(InterceptionVerdict.Allow.class, verdict, "Approved request must yield Allow verdict");
+        assertEquals("ciso_reviewer", verdict.reviewedBy(),
+                "The verified reviewer must travel on the verdict to the terminal audit record");
 
         Optional<ApprovalTicket> updatedOpt = approvalManager.getTicket(ticketId);
         assertTrue(updatedOpt.isPresent());
@@ -161,6 +164,8 @@ class ApprovalManagerTest {
         assertEquals(JsonRpcError.MACHINE_APPROVAL_DENIED, block.error().machineCode());
         assertTrue(block.error().message().contains("Prohibited operation on production cluster"));
         assertEquals(io.netty.handler.codec.http.HttpResponseStatus.FORBIDDEN, block.error().toHttpStatus());
+        assertEquals("lead_dba", block.reviewedBy(),
+                "The rejecting reviewer must travel on the verdict to the terminal audit record");
 
         ApprovalTicket updated = approvalManager.getTicket(ticketId).orElseThrow();
         assertEquals("rejected", updated.status());
@@ -190,6 +195,7 @@ class ApprovalManagerTest {
             assertEquals(JsonRpcError.APPROVAL_TIMED_OUT, block.error().code());
             assertEquals(io.netty.handler.codec.http.HttpResponseStatus.REQUEST_TIMEOUT, block.error().toHttpStatus());
             assertTrue(block.error().message().contains("Approval request timed out"));
+            assertNull(block.reviewedBy(), "An automatic expiry has no human reviewer to seal");
 
             List<ApprovalTicket> timedOutTickets = quickTimeoutManager.getTickets("timed_out");
             assertEquals(1, timedOutTickets.size());
@@ -294,6 +300,10 @@ class ApprovalManagerTest {
         PolicyEvaluator evaluator = new PolicyEvaluator(cache);
 
         DeclarativePolicyInterceptor interceptor = new DeclarativePolicyInterceptor(evaluator, approvalManager);
+        // The shipped chain keeps running after policy (anomaly, then the proxy); the reviewer the
+        // approval decision carries must survive to the terminal audit record (FEAT-006, C-013).
+        ToolCallInterceptor chain = ToolCallInterceptor.chain(interceptor,
+                (ctx, req) -> CompletableFuture.completedFuture(InterceptionVerdict.allow()));
 
         SecurityContext context = createContext("agent-dba");
         ObjectNode params = mapper.createObjectNode();
@@ -301,7 +311,7 @@ class ApprovalManagerTest {
 
         JsonRpcRequest request = new JsonRpcRequest(JsonRpcId.of("req-delete-1"), JsonRpcRequest.METHOD_TOOLS_CALL, params);
 
-        CompletableFuture<InterceptionVerdict> future = interceptor.intercept(context, request);
+        CompletableFuture<InterceptionVerdict> future = chain.intercept(context, request);
         assertNotNull(future);
         assertFalse(future.isDone());
 
@@ -314,6 +324,8 @@ class ApprovalManagerTest {
 
         InterceptionVerdict verdict = future.get(1, TimeUnit.SECONDS);
         assertInstanceOf(InterceptionVerdict.Allow.class, verdict);
+        assertEquals("lead_admin", verdict.reviewedBy(),
+                "A downstream stage must not erase the reviewer the approval decision sealed");
     }
 
     @Test
