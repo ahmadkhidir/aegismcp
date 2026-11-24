@@ -291,6 +291,12 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
         HttpResponseStatus status = HttpResponseStatus.OK;
         if (responseWithMatchingId.isError()) {
             status = responseWithMatchingId.error().toHttpStatus();
+            // A velocity breach pauses the identity (C-001 429): answer this call first, then close
+            // the transport stream instead of severing it before the response can be written.
+            if (JsonRpcError.MACHINE_INVOCATION_VELOCITY_EXCEEDED
+                    .equals(responseWithMatchingId.error().machineCode())) {
+                keepAlive = false;
+            }
         }
 
         audit(agentId, toolName, responseWithMatchingId.isError() ? "BLOCKED" : "ALLOWED", startedAt,

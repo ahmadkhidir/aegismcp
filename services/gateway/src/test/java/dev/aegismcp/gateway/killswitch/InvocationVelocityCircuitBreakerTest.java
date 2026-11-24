@@ -2,11 +2,13 @@ package dev.aegismcp.gateway.killswitch;
 
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import dev.aegismcp.gateway.codec.JsonRpcError;
 import dev.aegismcp.gateway.codec.JsonRpcId;
 import dev.aegismcp.gateway.codec.JsonRpcRequest;
 import dev.aegismcp.gateway.proxy.AgentIdentity;
 import dev.aegismcp.gateway.proxy.InterceptionVerdict;
 import dev.aegismcp.gateway.proxy.SecurityContext;
+import io.netty.handler.codec.http.HttpResponseStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -64,7 +66,7 @@ class InvocationVelocityCircuitBreakerTest {
     }
 
     @Test
-    @DisplayName("FEAT-010: Rapid tool burst exceeding threshold trips circuit breaker and auto-quarantines rogue agent")
+    @DisplayName("FEAT-010 / C-001: a rapid burst trips the breaker and pauses the agent with the 429 row")
     void testRapidBurstTripsCircuitBreakerAndQuarantines() throws Exception {
         Instant now = Instant.now();
         SecurityContext ctx = createSecurityContext("looping-agent", now);
@@ -80,17 +82,22 @@ class InvocationVelocityCircuitBreakerTest {
         InterceptionVerdict tripVerdict = circuitBreaker.intercept(ctx, req).get();
         assertInstanceOf(InterceptionVerdict.Block.class, tripVerdict);
         InterceptionVerdict.Block block = (InterceptionVerdict.Block) tripVerdict;
-        assertEquals(-32001, block.error().code());
+        assertEquals(JsonRpcError.RATE_LIMITED, block.error().code());
+        assertEquals(JsonRpcError.MACHINE_INVOCATION_VELOCITY_EXCEEDED, block.error().machineCode());
+        assertEquals(HttpResponseStatus.TOO_MANY_REQUESTS, block.error().toHttpStatus());
         assertTrue(block.error().message().contains("circuit breaker tripped"));
 
-        // Agent is now quarantined in KillSwitchManager
+        // The identity is paused in KillSwitchManager, and the pause is the rate-limit row
         assertTrue(killSwitchManager.isAgentQuarantined("looping-agent"));
+        assertTrue(killSwitchManager.isVelocityPaused("looping-agent"));
         assertEquals(1, metrics.getBlockedViolations24h());
 
-        // Subsequent call is blocked immediately by quarantine check
+        // A later call while paused answers the same rate-limit row, never a policy refusal
         InterceptionVerdict subVerdict = circuitBreaker.intercept(ctx, req).get();
         assertInstanceOf(InterceptionVerdict.Block.class, subVerdict);
-        assertTrue(((InterceptionVerdict.Block) subVerdict).error().message().contains("is quarantined"));
+        InterceptionVerdict.Block subsequent = (InterceptionVerdict.Block) subVerdict;
+        assertEquals(JsonRpcError.MACHINE_INVOCATION_VELOCITY_EXCEEDED, subsequent.error().machineCode());
+        assertEquals(HttpResponseStatus.TOO_MANY_REQUESTS, subsequent.error().toHttpStatus());
     }
 
     @Test

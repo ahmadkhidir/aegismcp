@@ -35,6 +35,13 @@ public class KillSwitchManager {
     private final ConcurrentHashMap<String, QuarantineEntry> quarantinedServers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> toolToServerMap = new ConcurrentHashMap<>();
 
+    /**
+     * Agent identities paused by the automatic invocation-velocity breaker rather than by an operator.
+     * C-001 answers a velocity breach with {@code 429} and pauses the session; the distinction lets
+     * every later call answer the rate-limit row instead of a generic policy refusal.
+     */
+    private final Set<String> velocityPausedAgents = ConcurrentHashMap.newKeySet();
+
     // Active session tracking: agentId -> set of channels, serverId -> set of channels
     private final ConcurrentHashMap<String, Set<Channel>> agentChannels = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Set<Channel>> sessionChannels = new ConcurrentHashMap<>();
@@ -173,6 +180,7 @@ public class KillSwitchManager {
      */
     public int quarantineAgent(String agentId, String reason) {
         Objects.requireNonNull(agentId, "agentId must not be null");
+        velocityPausedAgents.remove(agentId);
         quarantinedAgents.put(agentId, new QuarantineEntry(KillTargetType.AGENT, agentId, reason, Instant.now()));
         logger.warn("Agent '{}' quarantined: {}", agentId, reason);
 
@@ -180,8 +188,31 @@ public class KillSwitchManager {
         return channels != null ? closeChannels(channels) : 0;
     }
 
+    /**
+     * Pauses an agent identity for an automatic invocation-velocity breach (C-001 429, FEAT-010).
+     *
+     * <p>The identity is quarantined exactly like an operator kill, so later calls are refused and
+     * the C-008 release path lifts it, but the transport streams are not severed here: the channel
+     * that tripped the breaker still owes the agent the contract's {@code 429} answer, and closing it
+     * first is what turned a rate-limit response into a dropped connection. The proxy closes that
+     * stream after the response is written.
+     */
+    public void pauseAgent(String agentId, String reason) {
+        Objects.requireNonNull(agentId, "agentId must not be null");
+        String safeReason = (reason != null && !reason.isBlank()) ? reason : "Invocation velocity exceeded";
+        velocityPausedAgents.add(agentId);
+        quarantinedAgents.put(agentId, new QuarantineEntry(KillTargetType.AGENT, agentId, safeReason, Instant.now()));
+        logger.warn("Agent '{}' paused by the invocation velocity breaker: {}", agentId, safeReason);
+    }
+
+    /** True when the agent identity is paused by the invocation-velocity breaker. */
+    public boolean isVelocityPaused(String agentId) {
+        return agentId != null && velocityPausedAgents.contains(agentId);
+    }
+
     public void unquarantineAgent(String agentId) {
         if (agentId != null) {
+            velocityPausedAgents.remove(agentId);
             quarantinedAgents.remove(agentId);
             logger.info("Agent '{}' quarantine removed.", agentId);
         }
@@ -314,6 +345,7 @@ public class KillSwitchManager {
         quarantinedSessions.clear();
         quarantinedTools.clear();
         quarantinedServers.clear();
+        velocityPausedAgents.clear();
         logger.info("All quarantines and lockdowns reset.");
     }
 
@@ -342,7 +374,7 @@ public class KillSwitchManager {
             if (isGlobalLockdown()) {
                 String reason = globalLockdownEntry != null ? globalLockdownEntry.reason() : "Active lockdown";
                 return CompletableFuture.completedFuture(InterceptionVerdict.block(
-                        new JsonRpcError(-32001, "Policy Violation: Global emergency lockdown is active: " + reason)
+                        JsonRpcError.policyViolation("Global emergency lockdown is active: " + reason)
                 ));
             }
 
@@ -351,8 +383,14 @@ public class KillSwitchManager {
             if (agentId != null && isAgentQuarantined(agentId)) {
                 QuarantineEntry entry = quarantinedAgents.get(agentId);
                 String reason = entry != null ? entry.reason() : "Agent quarantined";
+                if (isVelocityPaused(agentId)) {
+                    // A velocity pause is the C-001 rate-limit row, not a policy refusal.
+                    return CompletableFuture.completedFuture(InterceptionVerdict.block(
+                            JsonRpcError.rateLimited(reason)
+                    ));
+                }
                 return CompletableFuture.completedFuture(InterceptionVerdict.block(
-                        new JsonRpcError(-32001, "Policy Violation: Agent '" + agentId + "' is quarantined: " + reason)
+                        JsonRpcError.policyViolation("Agent '" + agentId + "' is quarantined: " + reason)
                 ));
             }
 
@@ -364,7 +402,7 @@ public class KillSwitchManager {
                         QuarantineEntry entry = quarantinedTools.get(tool);
                         String reason = entry != null ? entry.reason() : "Tool quarantined";
                         return CompletableFuture.completedFuture(InterceptionVerdict.block(
-                                new JsonRpcError(-32001, "Policy Violation: Tool '" + tool + "' is quarantined: " + reason)
+                                JsonRpcError.policyViolation("Tool '" + tool + "' is quarantined: " + reason)
                         ));
                     }
 
@@ -374,7 +412,7 @@ public class KillSwitchManager {
                         QuarantineEntry entry = quarantinedServers.get(mappedServerId);
                         String reason = entry != null ? entry.reason() : "Server quarantined";
                         return CompletableFuture.completedFuture(InterceptionVerdict.block(
-                                new JsonRpcError(-32001, "Policy Violation: Upstream server '" + mappedServerId + "' is severed: " + reason)
+                                JsonRpcError.policyViolation("Upstream server '" + mappedServerId + "' is severed: " + reason)
                         ));
                     }
                 }
