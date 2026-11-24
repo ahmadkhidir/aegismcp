@@ -20,6 +20,15 @@ import { OidcError, OidcService, oidcService } from '../services/oidc';
 
 const IDLE_TIMEOUT_SECONDS = 15 * 60; // NFR-029: 15 minutes idle expiration
 
+type CallbackSession = { user: UserProfile; tokens: OidcTokens } | null;
+
+/**
+ * One exchange per authorization code, shared across React StrictMode remounts. The code is
+ * single-use at the provider; a second exchange can only produce invalid_code.
+ */
+const callbackExchanges = new Map<string, Promise<CallbackSession>>();
+let callbackInFlight: Promise<CallbackSession> | null = null;
+
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 interface AuthProviderProps {
@@ -67,17 +76,48 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children, service = 
 
         const searchParams = new URLSearchParams(window.location.search);
         if (searchParams.has('code') || searchParams.has('error')) {
-          const providerError = searchParams.get('error_description') || searchParams.get('error');
+          const callbackParams = new URLSearchParams(searchParams);
+          const code = callbackParams.get('code');
+
+          const providerError = callbackParams.get('error_description') || callbackParams.get('error');
           if (providerError) {
+            window.history.replaceState(
+              {},
+              document.title,
+              window.location.pathname + window.location.hash
+            );
             throw new OidcError('CALLBACK', `The identity provider refused sign-in: ${providerError}`);
           }
-          const result = await service.handleCallback(searchParams);
+
+          let result: CallbackSession = null;
+          if (code) {
+            let exchange = callbackExchanges.get(code);
+            if (!exchange) {
+              exchange = service.handleCallback(callbackParams);
+              callbackExchanges.set(code, exchange);
+            }
+            callbackInFlight = exchange;
+            try {
+              result = await exchange;
+            } finally {
+              // The code is single-use: strip it once the exchange has settled so a reload
+              // cannot replay it. It stays in the URL long enough for a StrictMode remount
+              // to join the same in-flight exchange.
+              window.history.replaceState(
+                {},
+                document.title,
+                window.location.pathname + window.location.hash
+              );
+              if (callbackInFlight === exchange) callbackInFlight = null;
+            }
+          } else if (callbackInFlight) {
+            result = await callbackInFlight;
+          }
+
           if (cancelled) return;
           if (result) {
             setUser(result.user);
             setTokens(result.tokens);
-            const cleanUrl = window.location.pathname + window.location.hash;
-            window.history.replaceState({}, document.title, cleanUrl);
             return;
           }
         }
@@ -92,6 +132,14 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children, service = 
         }
       } catch (error) {
         if (cancelled) return;
+        const saved = service.getSavedSession();
+        if (saved) {
+          // A stale callback must not sign out a session that is still valid.
+          setUser(saved.user);
+          setTokens(saved.tokens);
+          setAuthError(null);
+          return;
+        }
         service.clearSession();
         setUser(null);
         setTokens(null);
@@ -204,7 +252,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children, service = 
       value={{
         user,
         tokens,
-        isAuthenticated: !!user,
+        isAuthenticated: !!user && !!tokens && service.isTokenFresh(tokens.idToken),
         isLoading,
         isAuthenticating,
         isSessionExpired,

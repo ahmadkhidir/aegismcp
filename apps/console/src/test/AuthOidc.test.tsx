@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { StrictMode } from 'react';
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { AuthProvider, useAuth } from '../context/AuthContext';
 import { UserProfileMenu } from '../components/UserProfileMenu';
@@ -69,7 +70,7 @@ function fakeService(
     isConfigured: config.configurationErrors.length === 0,
     getSavedSession: () => saved,
     getAccessToken: () => saved?.tokens.accessToken ?? null,
-    isTokenFresh: () => true,
+    isTokenFresh: vi.fn(() => true),
     saveSession: vi.fn(),
     clearSession: vi.fn(),
     handleCallback: vi.fn().mockResolvedValue(null),
@@ -110,11 +111,50 @@ const AuthConsumer: React.FC = () => {
 
 beforeEach(() => {
   sessionStorage.clear();
+  window.history.replaceState({}, '', '/');
   vi.clearAllMocks();
 });
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe('Provider callback', () => {
+  it('exchanges a code once across StrictMode remounts and strips it', async () => {
+    const session = savedSession();
+    const service = fakeService(null);
+    vi.mocked(service.handleCallback).mockResolvedValue(session);
+    window.history.replaceState({}, '', '/?code=single-flight-code&state=test-state');
+
+    render(
+      <StrictMode>
+        <AuthProvider service={service}>
+          <AuthConsumer />
+        </AuthProvider>
+      </StrictMode>
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId('auth-status')).toHaveTextContent('AUTHENTICATED')
+    );
+    expect(service.handleCallback).toHaveBeenCalledTimes(1);
+    expect(window.location.search).toBe('');
+  });
+
+  it('does not authenticate a stored session whose token is no longer fresh', async () => {
+    const service = fakeService(savedSession());
+    vi.mocked(service.isTokenFresh).mockReturnValue(false);
+
+    render(
+      <AuthProvider service={service}>
+        <AuthConsumer />
+      </AuthProvider>
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId('auth-status')).toHaveTextContent('ANONYMOUS')
+    );
+  });
 });
 
 describe('Identity configuration', () => {

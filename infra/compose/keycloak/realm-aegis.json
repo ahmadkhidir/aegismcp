@@ -21,6 +21,7 @@
   "defaultSignatureAlgorithm": "RS256",
   "accessTokenLifespan": 300,
   "accessTokenLifespanForImplicitFlow": 900,
+  "accessCodeLifespan": 300,
   "ssoSessionIdleTimeout": 900,
   "ssoSessionMaxLifespan": 28800,
   "offlineSessionIdleTimeout": 2592000,
