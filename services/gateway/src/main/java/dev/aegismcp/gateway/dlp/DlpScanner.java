@@ -19,6 +19,10 @@ import java.util.Objects;
  * numeric value is never rewritten and the document keeps its structure. String keys are exempt:
  * a redacted key would silently rename a field of the upstream result.
  *
+ * <p>A label joined to its value without whitespace is one token run, so a credential trigger is
+ * accepted both at the start of a run and immediately after an {@code =} separator
+ * ({@code aws=AKIAIOSFODNN7EXAMPLE}). A {@code :}, quote, or whitespace already restarts the run.
+ *
  * <p>Detections carry offsets in the units of the scanned payload: byte offsets for a UTF-8 byte
  * payload and character offsets for a character payload. Because every pattern is ASCII, a UTF-8
  * continuation byte can never be part of a match, so byte offsets stay exact.
@@ -231,6 +235,13 @@ public final class DlpScanner {
                         onTrigger(payload, trigger, i, from, to, runStart, out);
                     }
                 }
+            } else if (c < 256 && payload.at(i - 1) == '=') {
+                // A label joined to its value without whitespace is one run: the character after
+                // '=' is where the value begins even though it is not a run start.
+                byte trigger = SPECIAL[c];
+                if (trigger != 0) {
+                    onTrigger(payload, trigger, i, from, to, runStart, out);
+                }
             }
             runLen++;
             runDigits += cls >> 1;
@@ -313,6 +324,13 @@ public final class DlpScanner {
                 if (trigger != 0) {
                     onTrigger(payload, trigger, i, from, to, runStart, out);
                 }
+            } else if (payload.at(i - 1) == '=') {
+                // A label joined to its value without whitespace is one run: the character after
+                // '=' is where the value begins even though it is not a run start.
+                byte trigger = SPECIAL[c];
+                if (trigger != 0) {
+                    onTrigger(payload, trigger, i, from, to, runStart, out);
+                }
             }
             runLen++;
             runDigits += cls >> 1;
@@ -381,15 +399,15 @@ public final class DlpScanner {
                 }
             }
             case SP_AWS -> {
-                if (i == runStart && hasAwsPrefix(payload, i, to)) {
+                if (hasAwsPrefix(payload, i, to)) {
                     patterns.scan(DlpPatternType.AWS_ACCESS_KEY, text, i, Math.min(to, i + 20), out);
                 }
             }
             case SP_SECRET -> {
-                if (i == runStart && i + 2 < to && payload.at(i + 1) == 'k' && payload.at(i + 2) == '-') {
+                if (i + 2 < to && payload.at(i + 1) == 'k' && payload.at(i + 2) == '-') {
                     patterns.scan(DlpPatternType.OPENAI_API_KEY, text, i,
                             Math.min(to, i + CREDENTIAL_WINDOW), out);
-                } else if (i == runStart && regionMatchesIgnoreCase(payload, i, "secret", to)) {
+                } else if (regionMatchesIgnoreCase(payload, i, "secret", to)) {
                     patterns.scan(DlpPatternType.AWS_SECRET_KEY, text, i,
                             Math.min(to, i + CREDENTIAL_WINDOW), out);
                 }
@@ -403,26 +421,26 @@ public final class DlpScanner {
                 }
             }
             case SP_GITHUB -> {
-                if (i == runStart && hasGithubPrefix(payload, i, to)) {
+                if (hasGithubPrefix(payload, i, to)) {
                     patterns.scan(DlpPatternType.GITHUB_TOKEN, text, i,
                             Math.min(to, i + CREDENTIAL_WINDOW), out);
                 }
             }
             case SP_BEARER -> {
-                if (i == runStart && regionMatchesIgnoreCase(payload, i, "bearer", to)
+                if (regionMatchesIgnoreCase(payload, i, "bearer", to)
                         && i + 6 < to && isWhitespace(payload.at(i + 6))) {
                     patterns.scan(DlpPatternType.BEARER_TOKEN, text, i,
                             Math.min(to, i + CONNECTION_WINDOW), out);
                 }
             }
             case SP_JDBC -> {
-                if (i == runStart && regionMatches(payload, i, "jdbc:", to)) {
+                if (regionMatches(payload, i, "jdbc:", to)) {
                     patterns.scan(DlpPatternType.JDBC_CONNECTION_STRING, text, i,
                             Math.min(to, i + CONNECTION_WINDOW), out);
                 }
             }
             case SP_PEM -> {
-                if (i == runStart && regionMatches(payload, i, "-----BEGIN", to)) {
+                if (regionMatches(payload, i, "-----BEGIN", to)) {
                     int end = pemBlockEnd(payload, i, to);
                     if (end > i) {
                         patterns.scan(DlpPatternType.PEM_PRIVATE_KEY, text, i, end, out);

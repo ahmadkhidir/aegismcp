@@ -363,4 +363,128 @@ class DlpScrubberTest {
         // In CI and container environments allow margin, ensuring no pathological backtracking (< 500ms)
         assertTrue(warmDurationMs < 500.0, "Execution took too long: " + warmDurationMs + "ms");
     }
+
+    @Test
+    @DisplayName("FEAT-005 / C-001: a credential joined to a lowercase label without whitespace is redacted")
+    void testCredentialAfterLowercaseLabelWithoutWhitespace() {
+        String result = scrubber.scrubText("aws=AKIAIOSFODNN7EXAMPLE");
+
+        assertFalse(result.contains("AKIAIOSFODNN7EXAMPLE"), "The access key must not survive the label");
+        assertEquals("aws=[REDACTED_SECRET:AWS_KEY]", result);
+    }
+
+    @Test
+    @DisplayName("FEAT-005 / C-001: every label-bound credential family survives a no-whitespace label")
+    void testEveryLabelBoundFamilyAfterLowercaseLabelWithoutWhitespace() {
+        String classicToken = runtimeConcat("ghp_", "1234567890abcdefghijklmnopqrstuvwxyz");
+        String openAiKey = runtimeConcat("sk-proj-", "abc1234567890abcdef1234567890");
+        String bearer = runtimeConcat("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", ".", "e30", ".",
+                "t-IDcSemACt8x4iTMCda8Yhe3iZaWbvV5XKSTbuAn0M");
+
+        String github = scrubber.scrubText("github_token=" + classicToken);
+        assertFalse(github.contains(classicToken));
+        assertTrue(github.contains("[REDACTED_SECRET:GITHUB_TOKEN]"), github);
+
+        String openai = scrubber.scrubText("openai_key=" + openAiKey);
+        assertFalse(openai.contains(openAiKey));
+        assertTrue(openai.contains("[REDACTED_SECRET:OPENAI_KEY]"), openai);
+
+        String authorization = scrubber.scrubText("authorization=Bearer " + bearer);
+        assertFalse(authorization.contains(bearer));
+        assertTrue(authorization.contains("[REDACTED_SECRET:BEARER_TOKEN]"), authorization);
+    }
+
+    @Test
+    @DisplayName("FEAT-005 / C-001: the uppercase, whitespace, colon, and quoted label forms still redact")
+    void testLabelFormsWithWhitespaceAndQuotes() {
+        for (String input : new String[]{
+                "AWS=AKIAIOSFODNN7EXAMPLE",
+                "aws = AKIAIOSFODNN7EXAMPLE",
+                "aws: AKIAIOSFODNN7EXAMPLE",
+                "aws= AKIAIOSFODNN7EXAMPLE",
+                "aws:AKIAIOSFODNN7EXAMPLE",
+                "\"aws\":\"AKIAIOSFODNN7EXAMPLE\""}) {
+            String result = scrubber.scrubText(input);
+            assertFalse(result.contains("AKIAIOSFODNN7EXAMPLE"), () -> "Not redacted: " + input);
+            assertTrue(result.contains("[REDACTED_SECRET:AWS_KEY]"), () -> "Wrong marker for: " + input);
+        }
+    }
+
+    @Test
+    @DisplayName("FEAT-005: a label-joined credential inside a JSON string value is redacted")
+    void testLabelJoinedCredentialInsideJsonValue() {
+        String json = "{\"result\":{\"credentials\":\"aws=AKIAIOSFODNN7EXAMPLE\"}}";
+        String scrubbed = new String(scrubber.scrub(json.getBytes(StandardCharsets.UTF_8)), StandardCharsets.UTF_8);
+
+        assertFalse(scrubbed.contains("AKIAIOSFODNN7EXAMPLE"));
+        assertTrue(scrubbed.contains("[REDACTED_SECRET:AWS_KEY]"), scrubbed);
+    }
+
+    @Test
+    @DisplayName("FEAT-005 / C-013: a text scrub reports the number of redactions it made")
+    void testTextScrubReportsRedactionCount() {
+        DlpScrubResult<String> clean = scrubber.scrubTextWithReport("nothing sensitive here");
+        assertEquals(0, clean.redactionCount());
+        assertFalse(clean.redacted());
+        assertEquals("nothing sensitive here", clean.payload());
+
+        DlpScrubResult<String> two = scrubber.scrubTextWithReport(
+                "aws=AKIAIOSFODNN7EXAMPLE and mail admin@corp.net");
+        assertEquals(2, two.redactionCount());
+        assertTrue(two.redacted());
+        assertEquals(2, two.detections().size());
+        assertFalse(two.payload().contains("AKIAIOSFODNN7EXAMPLE"));
+        assertFalse(two.payload().contains("admin@corp.net"));
+    }
+
+    @Test
+    @DisplayName("FEAT-005 / C-013: the byte path reports the count the outbound stage masks")
+    void testByteScrubReportsRedactionCount() {
+        byte[] body = "{\"result\":{\"aws\":\"AKIAIOSFODNN7EXAMPLE\",\"mail\":\"admin@corp.net\"}}"
+                .getBytes(StandardCharsets.UTF_8);
+
+        DlpScrubResult<byte[]> report = scrubber.scrubWithReport(body);
+        assertEquals(2, report.redactionCount());
+
+        String scrubbed = new String(report.payload(), StandardCharsets.UTF_8);
+        assertFalse(scrubbed.contains("AKIAIOSFODNN7EXAMPLE"));
+        assertFalse(scrubbed.contains("admin@corp.net"));
+
+        assertEquals(0, scrubber.scrubWithReport("plain text".getBytes(StandardCharsets.UTF_8)).redactionCount());
+    }
+
+    @Test
+    @DisplayName("FEAT-005 / C-013: a JSON tree scrub sums the count across its text nodes")
+    void testTreeScrubReportsRedactionCount() {
+        ObjectNode root = mapper.createObjectNode();
+        ObjectNode result = root.putObject("result");
+        result.put("apiKey", "AKIAIOSFODNN7EXAMPLE");
+        result.put("email", "john.doe@enterprise.com");
+        result.put("safe", "no secret here");
+
+        DlpScrubResult<JsonNode> report = scrubber.scrubWithReport(root);
+        assertEquals(2, report.redactionCount());
+        assertEquals("[REDACTED_SECRET:AWS_KEY]", report.payload().get("result").get("apiKey").asText());
+        assertEquals("[REDACTED_PII:EMAIL]", report.payload().get("result").get("email").asText());
+    }
+
+    @Test
+    @DisplayName("FEAT-005 / C-013: a JSON-RPC response scrub reports the count of masked spans")
+    void testJsonRpcResponseScrubReportsRedactionCount() {
+        ObjectNode result = mapper.createObjectNode();
+        result.put("secret", "AKIAIOSFODNN7EXAMPLE");
+        result.put("safe", 7);
+
+        DlpScrubResult<JsonRpcResponse> report = scrubber.scrubWithReport(
+                JsonRpcResponse.success(JsonRpcId.of("req-count"), result));
+
+        assertEquals(1, report.redactionCount());
+        assertEquals(JsonRpcId.of("req-count"), report.payload().id());
+        assertEquals("[REDACTED_SECRET:AWS_KEY]",
+                report.payload().result().get("secret").asText());
+
+        DlpScrubResult<JsonRpcResponse> clean = scrubber.scrubWithReport(
+                JsonRpcResponse.success(JsonRpcId.of("req-clean"), mapper.createObjectNode()));
+        assertEquals(0, clean.redactionCount());
+    }
 }

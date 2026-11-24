@@ -32,7 +32,11 @@ import java.util.Objects;
  * tree round trip on a 1 MB response costs tens of milliseconds for no security benefit, while the
  * boundary walk keeps numeric values and document structure byte-identical outside the redacted
  * spans. Conforms to contract C-001 with sub-3ms latency overhead per NFR-002.
- * Anchors: FEAT-005, NFR-002, C-001.
+ *
+ * <p>Every scrub has a reporting form that returns a {@link DlpScrubResult}: the sanitized payload
+ * plus the detections it replaced. Callers that must account for what was masked — the audit trail
+ * and the inspector summary — read the count from that result instead of rescanning.
+ * Anchors: FEAT-005, NFR-002, C-001, C-002, C-013.
  */
 public class DlpScrubber {
 
@@ -90,14 +94,21 @@ public class DlpScrubber {
      * Redacts secrets and PII from a plain-text string.
      */
     public String scrubText(String input) {
+        return scrubTextWithReport(input).payload();
+    }
+
+    /**
+     * Redacts a plain-text string and reports how many spans were replaced.
+     */
+    public DlpScrubResult<String> scrubTextWithReport(String input) {
         if (input == null || input.isEmpty()) {
-            return input;
+            return DlpScrubResult.unchanged(input);
         }
         List<DlpDetection> detections = redactionEngine.resolveNonOverlapping(scanner.scanText(input));
         if (detections.isEmpty()) {
-            return input;
+            return DlpScrubResult.unchanged(input);
         }
-        return redactionEngine.applyRedactions(input, detections);
+        return new DlpScrubResult<>(redactionEngine.applyRedactions(input, detections), detections);
     }
 
     /**
@@ -109,10 +120,19 @@ public class DlpScrubber {
      * Anchors: FEAT-005.
      */
     public JsonNode scrub(JsonNode node) {
-        return scrub(node, 0);
+        return scrubWithReport(node).payload();
     }
 
-    private JsonNode scrub(JsonNode node, int depth) {
+    /**
+     * Scrubs a Jackson JsonNode tree and reports every span replaced across its text nodes.
+     */
+    public DlpScrubResult<JsonNode> scrubWithReport(JsonNode node) {
+        List<DlpDetection> detections = new ArrayList<>();
+        JsonNode scrubbed = scrubNode(node, 0, detections);
+        return new DlpScrubResult<>(scrubbed, detections);
+    }
+
+    private JsonNode scrubNode(JsonNode node, int depth, List<DlpDetection> detections) {
         if (node == null || node.isNull()) {
             return node;
         }
@@ -122,16 +142,19 @@ public class DlpScrubber {
         }
 
         if (node.isTextual()) {
-            String original = node.asText();
-            String scrubbed = scrubText(original);
-            return original.equals(scrubbed) ? node : TextNode.valueOf(scrubbed);
+            DlpScrubResult<String> result = scrubTextWithReport(node.asText());
+            if (!result.redacted()) {
+                return node;
+            }
+            detections.addAll(result.detections());
+            return TextNode.valueOf(result.payload());
         }
 
         if (node.isObject()) {
             ObjectNode objectNode = (ObjectNode) node;
             ObjectNode scrubbedObject = JsonNodeFactory.instance.objectNode();
             for (Map.Entry<String, JsonNode> entry : objectNode.properties()) {
-                scrubbedObject.set(entry.getKey(), scrub(entry.getValue(), depth + 1));
+                scrubbedObject.set(entry.getKey(), scrubNode(entry.getValue(), depth + 1, detections));
             }
             return scrubbedObject;
         }
@@ -140,7 +163,7 @@ public class DlpScrubber {
             ArrayNode arrayNode = (ArrayNode) node;
             ArrayNode scrubbedArray = JsonNodeFactory.instance.arrayNode(arrayNode.size());
             for (int i = 0; i < arrayNode.size(); i++) {
-                scrubbedArray.add(scrub(arrayNode.get(i), depth + 1));
+                scrubbedArray.add(scrubNode(arrayNode.get(i), depth + 1, detections));
             }
             return scrubbedArray;
         }
@@ -154,20 +177,29 @@ public class DlpScrubber {
      * while strictly preserving response id. Conforms to C-001.
      */
     public JsonRpcResponse scrub(JsonRpcResponse response) {
+        return scrubWithReport(response).payload();
+    }
+
+    /**
+     * Scrubs a JSON-RPC 2.0 response and reports how many spans were replaced in its payload.
+     */
+    public DlpScrubResult<JsonRpcResponse> scrubWithReport(JsonRpcResponse response) {
         if (response == null) {
-            return null;
+            return DlpScrubResult.unchanged(null);
         }
 
+        List<DlpDetection> detections = new ArrayList<>();
         if (response.isError()) {
             JsonRpcError err = response.error();
-            String scrubbedMessage = scrubText(err.message());
-            JsonNode scrubbedData = err.data() != null ? scrub(err.data()) : null;
-            JsonRpcError scrubbedError = new JsonRpcError(err.code(), scrubbedMessage, scrubbedData);
-            return JsonRpcResponse.error(response.id(), scrubbedError);
+            DlpScrubResult<String> scrubbedMessage = scrubTextWithReport(err.message());
+            detections.addAll(scrubbedMessage.detections());
+            JsonNode scrubbedData = err.data() != null ? scrubNode(err.data(), 0, detections) : null;
+            JsonRpcError scrubbedError = new JsonRpcError(err.code(), scrubbedMessage.payload(), scrubbedData);
+            return new DlpScrubResult<>(JsonRpcResponse.error(response.id(), scrubbedError), detections);
         }
 
-        JsonNode scrubbedResult = response.result() != null ? scrub(response.result()) : null;
-        return JsonRpcResponse.success(response.id(), scrubbedResult);
+        JsonNode scrubbedResult = response.result() != null ? scrubNode(response.result(), 0, detections) : null;
+        return new DlpScrubResult<>(JsonRpcResponse.success(response.id(), scrubbedResult), detections);
     }
 
     /**
@@ -175,18 +207,26 @@ public class DlpScrubber {
      * A payload that cannot be walked falls back to plain-text scrubbing.
      */
     public String scrubJson(String jsonString) {
+        return scrubJsonWithReport(jsonString).payload();
+    }
+
+    /**
+     * Redacts a JSON document held as a string and reports how many spans were replaced.
+     */
+    public DlpScrubResult<String> scrubJsonWithReport(String jsonString) {
         if (jsonString == null || jsonString.isEmpty()) {
-            return jsonString;
+            return DlpScrubResult.unchanged(jsonString);
         }
         try {
             List<DlpDetection> detections =
                     redactionEngine.resolveNonOverlapping(scanner.scanJsonText(jsonString));
-            return detections.isEmpty()
-                    ? jsonString
-                    : redactionEngine.applyRedactions(jsonString, detections);
+            if (detections.isEmpty()) {
+                return DlpScrubResult.unchanged(jsonString);
+            }
+            return new DlpScrubResult<>(redactionEngine.applyRedactions(jsonString, detections), detections);
         } catch (RuntimeException e) {
             logger.debug("Failed scrubbing JSON payload, falling back to text scrubbing", e);
-            return scrubText(jsonString);
+            return scrubTextWithReport(jsonString);
         }
     }
 
@@ -195,8 +235,15 @@ public class DlpScrubber {
      * keep their JSON type; any other payload is scanned as text.
      */
     public byte[] scrub(byte[] payload) {
+        return scrubWithReport(payload).payload();
+    }
+
+    /**
+     * Sanitizes a raw byte payload and reports how many spans were replaced.
+     */
+    public DlpScrubResult<byte[]> scrubWithReport(byte[] payload) {
         if (payload == null || payload.length == 0) {
-            return payload;
+            return DlpScrubResult.unchanged(payload);
         }
 
         List<DlpDetection> detections;
@@ -208,9 +255,9 @@ public class DlpScrubber {
 
         List<DlpDetection> resolved = redactionEngine.resolveNonOverlapping(detections);
         if (resolved.isEmpty()) {
-            return payload;
+            return DlpScrubResult.unchanged(payload);
         }
-        return redactBytes(payload, resolved);
+        return new DlpScrubResult<>(redactBytes(payload, resolved), resolved);
     }
 
     /**
