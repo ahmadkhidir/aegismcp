@@ -113,14 +113,20 @@ class C024SlackInteractionContractTest extends ArtifactTest {
         assertEquals(false, noValue.path("replace_original").asBoolean());
         assertEquals("This approval action carries no ticket identifier.", noValue.path("text").asText());
 
+        // A refused actor must be checked against a ticket that is still pending. The ticket above
+        // was resolved by the rejection, so reusing it would assert nothing about a refused click
+        // leaving a ticket reachable from the console queue.
+        GatewayHarness.PendingCall refused =
+                harness.createPendingCall("agent-slack-refused", "deploy_prod", "{}");
+
         JsonNode unmapped = GatewayHarness.json(callback(harness, SlackFixtures.interaction(
-                SlackFixtures.UNMAPPED_MEMBER, "aegis_approve", pending.ticketId())));
+                SlackFixtures.UNMAPPED_MEMBER, "aegis_approve", refused.ticketId())));
         assertEquals("ephemeral", unmapped.path("response_type").asText());
         assertEquals("Your Slack account is not mapped to an AegisMCP operator. "
                 + "Ask an administrator to add it to the approval operator map.", unmapped.path("text").asText());
 
         JsonNode viewer = GatewayHarness.json(callback(harness, SlackFixtures.interaction(
-                SlackFixtures.VIEWER_MEMBER, "aegis_approve", pending.ticketId())));
+                SlackFixtures.VIEWER_MEMBER, "aegis_approve", refused.ticketId())));
         assertEquals("ephemeral", viewer.path("response_type").asText());
         assertEquals("Your operator role does not permit approval decisions. "
                 + "An operator or admin role is required.", viewer.path("text").asText());
@@ -129,7 +135,7 @@ class C024SlackInteractionContractTest extends ArtifactTest {
         JsonNode queue = GatewayHarness.json(harness.get("/api/v1/approvals/pending", harness.operatorToken()));
         boolean stillPending = false;
         for (JsonNode ticket : queue.path("tickets")) {
-            if ("agent-slack-reject".equals(ticket.path("agentId").asText())) {
+            if ("agent-slack-refused".equals(ticket.path("agentId").asText())) {
                 stillPending = "pending".equals(ticket.path("status").asText());
             }
         }
