@@ -197,6 +197,18 @@ describe('DashboardScreen', () => {
     expect(screen.getByText('No agent calls are waiting for a human decision.')).toBeInTheDocument();
   });
 
+  it('keeps the dashboard usable when the incident feed is unavailable', async () => {
+    vi.spyOn(AegisApi, 'getViolations').mockRejectedValueOnce(new Error('Not Found'));
+
+    render(
+      <DashboardScreen onNavigateTo={vi.fn()} onOpenKillSwitch={vi.fn()} threatLevel={null} />
+    );
+
+    expect(await screen.findByText(/Incident feed unavailable/i)).toBeInTheDocument();
+    expect(screen.getByTestId('metric-active-agents')).toHaveTextContent('17');
+    expect(screen.queryByTestId('error-state')).not.toBeInTheDocument();
+  });
+
   it('shows the error state and retries after a gateway failure', async () => {
     vi.spyOn(AegisApi, 'getSystemStatus').mockRejectedValueOnce(new Error('Gateway timeout'));
 
