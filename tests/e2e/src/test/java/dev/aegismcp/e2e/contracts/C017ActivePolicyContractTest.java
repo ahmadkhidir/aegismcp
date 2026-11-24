@@ -36,7 +36,9 @@ class C017ActivePolicyContractTest extends ArtifactTest {
     @Test
     @DisplayName("C-017: answers 404 when no policy version is active")
     void answersNotFoundWithoutActivePolicy() throws Exception {
-        try (GatewayHarness harness = start(GatewayOptions.defaults().policyConfigured(false))) {
+        // A serving node must name a policy document, so this deployment supplies one that cannot
+        // compile: the gateway boots, reports POLICY_INVALID, and no version is active.
+        try (GatewayHarness harness = start(GatewayOptions.defaults().policyYaml(""))) {
             ContractAssertions.assertStatus(404,
                     harness.get("/api/v1/policies/active", harness.adminToken()));
         }

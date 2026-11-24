@@ -96,36 +96,45 @@ public final class GatewayHarness implements AutoCloseable {
         Map<String, String> environment = new LinkedHashMap<>();
         environment.put("AEGIS_GATEWAY_HOST", "127.0.0.1");
         environment.put("AEGIS_GATEWAY_PORT", "0");
-        if (options.tlsEnabled) {
-            environment.put("AEGIS_TLS_KEYSTORE_PATH", tls.serverKeystore.toString());
-            environment.put("AEGIS_TLS_KEYSTORE_PASSWORD", "changeit");
-            environment.put("AEGIS_TLS_KEYSTORE_TYPE", "PKCS12");
-            environment.put("AEGIS_TLS_TRUSTSTORE_PATH", tls.serverTruststore.toString());
-            environment.put("AEGIS_TLS_TRUSTSTORE_PASSWORD", "changeit");
-            environment.put("AEGIS_TLS_CLIENT_AUTH", "OPTIONAL");
-        }
-        if (options.upstreamConfigured) {
-            environment.put("AEGIS_UPSTREAM_URL", upstream.url());
-        }
-        environment.put("AEGIS_UPSTREAM_TRANSPORT", "http");
-        environment.put("AEGIS_UPSTREAM_CONNECT_TIMEOUT_MS", "2000");
-        environment.put("AEGIS_UPSTREAM_REQUEST_TIMEOUT_MS", "5000");
-        environment.put("AEGIS_OIDC_JWKS_URL", identityProvider.jwksUrl());
-        environment.put("AEGIS_OIDC_ISSUER", identityProvider.issuer());
-        environment.put("AEGIS_OIDC_AUDIENCE", identityProvider.audience());
-        environment.put("AEGIS_OIDC_JWKS_CACHE_TTL_SECONDS", "30");
-        environment.put("AEGIS_SPIFFE_TRUST_DOMAINS", "aegis.dev");
-        environment.put("AEGIS_SPIFFE_TRUST_BUNDLE_PATH", tls.trustBundlePem.toString());
-        if (options.policyConfigured) {
-            environment.put("AEGIS_POLICY_FILE", policyFile.toString());
-        }
-        environment.put("AEGIS_APPROVAL_TTL_SECONDS", String.valueOf(options.approvalTtl.toSeconds()));
-        environment.put("AEGIS_VELOCITY_THRESHOLD", String.valueOf(options.velocityThreshold));
-        environment.put("AEGIS_VELOCITY_WINDOW_SECONDS", String.valueOf(options.velocityWindowSeconds));
-        if (options.slackConfigured) {
-            environment.put("AEGIS_SLACK_APPROVAL_WEBHOOK_URL", slackWebhook.url());
-            environment.put("AEGIS_SLACK_SIGNING_SECRET", SlackFixtures.SIGNING_SECRET);
-            environment.put("AEGIS_SLACK_OPERATORS", SlackFixtures.OPERATOR_MAP);
+        if (options.probeOnly) {
+            // The only deployment that may omit the serving configuration; it reports
+            // CONFIGURATION_INVALID and attaches no agent request path (C-023, NFR-027).
+            environment.put("AEGIS_GATEWAY_PROBE_ONLY", "true");
+        } else {
+            if (options.tlsEnabled) {
+                environment.put("AEGIS_TLS_KEYSTORE_PATH", tls.serverKeystore.toString());
+                environment.put("AEGIS_TLS_KEYSTORE_PASSWORD", "changeit");
+                environment.put("AEGIS_TLS_KEYSTORE_TYPE", "PKCS12");
+                environment.put("AEGIS_TLS_TRUSTSTORE_PATH", tls.serverTruststore.toString());
+                environment.put("AEGIS_TLS_TRUSTSTORE_PASSWORD", "changeit");
+                environment.put("AEGIS_TLS_CLIENT_AUTH", "OPTIONAL");
+            } else {
+                // A plaintext serving listener is allowed only as an explicit operator choice.
+                environment.put("AEGIS_TLS_ENABLED", "false");
+            }
+            if (options.upstreamConfigured) {
+                environment.put("AEGIS_UPSTREAM_URL", upstream.url());
+            }
+            environment.put("AEGIS_UPSTREAM_TRANSPORT", "http");
+            environment.put("AEGIS_UPSTREAM_CONNECT_TIMEOUT_MS", "2000");
+            environment.put("AEGIS_UPSTREAM_REQUEST_TIMEOUT_MS", "5000");
+            environment.put("AEGIS_OIDC_JWKS_URL", identityProvider.jwksUrl());
+            environment.put("AEGIS_OIDC_ISSUER", identityProvider.issuer());
+            environment.put("AEGIS_OIDC_AUDIENCE", identityProvider.audience());
+            environment.put("AEGIS_OIDC_JWKS_CACHE_TTL_SECONDS", "30");
+            environment.put("AEGIS_SPIFFE_TRUST_DOMAINS", "aegis.dev");
+            environment.put("AEGIS_SPIFFE_TRUST_BUNDLE_PATH", tls.trustBundlePem.toString());
+            if (options.policyConfigured) {
+                environment.put("AEGIS_POLICY_FILE", policyFile.toString());
+            }
+            environment.put("AEGIS_APPROVAL_TTL_SECONDS", String.valueOf(options.approvalTtl.toSeconds()));
+            environment.put("AEGIS_VELOCITY_THRESHOLD", String.valueOf(options.velocityThreshold));
+            environment.put("AEGIS_VELOCITY_WINDOW_SECONDS", String.valueOf(options.velocityWindowSeconds));
+            if (options.slackConfigured) {
+                environment.put("AEGIS_SLACK_APPROVAL_WEBHOOK_URL", slackWebhook.url());
+                environment.put("AEGIS_SLACK_SIGNING_SECRET", SlackFixtures.SIGNING_SECRET);
+                environment.put("AEGIS_SLACK_OPERATORS", SlackFixtures.OPERATOR_MAP);
+            }
         }
 
         GatewayProcess process;
@@ -144,7 +153,8 @@ public final class GatewayHarness implements AutoCloseable {
     }
 
     public URI baseUri() {
-        return URI.create((options.tlsEnabled ? "https" : "http") + "://127.0.0.1:" + process.port());
+        boolean tls = options.tlsEnabled && !options.probeOnly;
+        return URI.create((tls ? "https" : "http") + "://127.0.0.1:" + process.port());
     }
 
     public String url(String path) {

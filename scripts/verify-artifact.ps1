@@ -7,6 +7,9 @@
     The script builds the gateway distribution with the Gradle wrapper, starts the installed
     launcher with AEGIS_GATEWAY_PORT=0 so the operating system assigns a free port, waits for the
     server to announce the bound port, and requires GET /health to answer 200 with "status":"UP".
+    The boot is explicitly probe-only (AEGIS_GATEWAY_PROBE_ONLY=true): a serving node refuses to
+    start without its TLS, upstream, identity, and policy settings, so the boot check states its
+    intent instead of relying on their absence.
     The process is stopped and its temporary files are removed on exit, success or failure.
 
     This is the PowerShell counterpart of scripts/verify-artifact.
@@ -91,11 +94,13 @@ try {
         exit 1
     }
 
-    Write-Output 'verify-artifact: booting the packaged gateway on an ephemeral port'
+    Write-Output 'verify-artifact: booting the packaged gateway on an ephemeral port in probe-only mode'
     $previousHost = $env:AEGIS_GATEWAY_HOST
     $previousPort = $env:AEGIS_GATEWAY_PORT
+    $previousProbeOnly = $env:AEGIS_GATEWAY_PROBE_ONLY
     $env:AEGIS_GATEWAY_HOST = '127.0.0.1'
     $env:AEGIS_GATEWAY_PORT = '0'
+    $env:AEGIS_GATEWAY_PROBE_ONLY = 'true'
     try {
         $script:serverProcess = Start-Process -FilePath $fileName -ArgumentList $arguments `
             -NoNewWindow -PassThru -RedirectStandardOutput $log -RedirectStandardError $errorLog
@@ -103,6 +108,7 @@ try {
     finally {
         $env:AEGIS_GATEWAY_HOST = $previousHost
         $env:AEGIS_GATEWAY_PORT = $previousPort
+        $env:AEGIS_GATEWAY_PROBE_ONLY = $previousProbeOnly
     }
 
     $port = $null

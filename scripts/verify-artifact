@@ -4,6 +4,9 @@
 # The script builds the gateway distribution with the Gradle wrapper, starts the installed
 # launcher with AEGIS_GATEWAY_PORT=0 so the operating system assigns a free port, waits for the
 # server to announce the bound port, and requires GET /health to answer 200 with "status":"UP".
+# The boot is explicitly probe-only (AEGIS_GATEWAY_PROBE_ONLY=true): a serving node refuses to
+# start without its TLS, upstream, identity, and policy settings, so the boot check states its
+# intent instead of relying on their absence.
 # The process is stopped and its temporary files are removed on exit, success or failure.
 #
 # Usage: scripts/verify-artifact
@@ -56,8 +59,8 @@ if [ ! -f "$launcher" ]; then
     exit 1
 fi
 
-printf 'verify-artifact: booting the packaged gateway on an ephemeral port\n'
-AEGIS_GATEWAY_HOST=127.0.0.1 AEGIS_GATEWAY_PORT=0 \
+printf 'verify-artifact: booting the packaged gateway on an ephemeral port in probe-only mode\n'
+AEGIS_GATEWAY_HOST=127.0.0.1 AEGIS_GATEWAY_PORT=0 AEGIS_GATEWAY_PROBE_ONLY=true \
     bash "$launcher" > "$log" 2>&1 &
 server_pid=$!
 

@@ -65,6 +65,10 @@ class HealthEndpointTest {
 
     @Test
     void readinessProbeReportsUpDependenciesAndTimestamp() throws Exception {
+        // The in-process probe seam boots probe-only, so it reports the configuration dependency
+        // down by design; this test exercises the readiness mechanics with every check healthy.
+        server.getReadiness().markDependencyHealthy(GatewayReadiness.Dependency.CONFIGURATION);
+
         HttpResponse<String> response = send("/ready", "GET");
 
         assertEquals(200, response.statusCode());
@@ -82,6 +86,7 @@ class HealthEndpointTest {
 
     @Test
     void readinessProbeRefusesTrafficWhileAReadinessCheckFails() throws Exception {
+        server.getReadiness().markDependencyHealthy(GatewayReadiness.Dependency.CONFIGURATION);
         server.getReadiness().markDependencyUnhealthy(GatewayReadiness.Dependency.POLICY);
 
         HttpResponse<String> response = send("/ready", "GET");

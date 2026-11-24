@@ -20,6 +20,7 @@ class GatewayConfigurationUpstreamTest {
     @DisplayName("FEAT-001: an explicit transport setting selects the upstream transport")
     void explicitTransportSelectsTransport() {
         GatewayConfiguration configuration = GatewayConfiguration.load(Map.of(
+                "AEGIS_GATEWAY_PROBE_ONLY", "true",
                 "AEGIS_UPSTREAM_URL", "https://tools.example.test/mcp",
                 "AEGIS_UPSTREAM_TRANSPORT", "sse"));
 
@@ -30,6 +31,7 @@ class GatewayConfigurationUpstreamTest {
     @DisplayName("FEAT-001: a ws endpoint without an explicit setting infers WebSocket")
     void webSocketEndpointIsInferred() {
         GatewayConfiguration configuration = GatewayConfiguration.load(Map.of(
+                "AEGIS_GATEWAY_PROBE_ONLY", "true",
                 "AEGIS_UPSTREAM_URL", "wss://tools.example.test/mcp"));
 
         assertEquals(UpstreamTransport.WEBSOCKET, configuration.upstream().transport());
@@ -39,6 +41,7 @@ class GatewayConfigurationUpstreamTest {
     @DisplayName("FEAT-001: the default upstream transport is one HTTPS call per request")
     void defaultTransportIsHttp() {
         GatewayConfiguration configuration = GatewayConfiguration.load(Map.of(
+                "AEGIS_GATEWAY_PROBE_ONLY", "true",
                 "AEGIS_UPSTREAM_URL", "https://tools.example.test/mcp"));
 
         assertEquals(UpstreamTransport.HTTP, configuration.upstream().transport());
@@ -48,6 +51,7 @@ class GatewayConfigurationUpstreamTest {
     @DisplayName("FEAT-001: an endpoint whose scheme contradicts the transport fails startup")
     void contradictorySchemeFailsStartup() {
         assertThrows(ConfigurationException.class, () -> GatewayConfiguration.load(Map.of(
+                "AEGIS_GATEWAY_PROBE_ONLY", "true",
                 "AEGIS_UPSTREAM_URL", "ws://tools.example.test/mcp",
                 "AEGIS_UPSTREAM_TRANSPORT", "http")));
     }
@@ -56,6 +60,7 @@ class GatewayConfigurationUpstreamTest {
     @DisplayName("FEAT-001: an undeclared transport name fails startup")
     void unknownTransportFailsStartup() {
         assertThrows(ConfigurationException.class, () -> GatewayConfiguration.load(Map.of(
+                "AEGIS_GATEWAY_PROBE_ONLY", "true",
                 "AEGIS_UPSTREAM_URL", "https://tools.example.test/mcp",
                 "AEGIS_UPSTREAM_TRANSPORT", "carrier-pigeon")));
     }
