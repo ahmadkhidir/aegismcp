@@ -357,7 +357,7 @@ class KillCommandTest {
 
         assertEquals(ExitCode.USAGE, result.exitCode());
         assertFalse(result.err().contains(AWS_KEY), "a credential-shaped value must be redacted");
-        assertTrue(result.err().contains("[REDACTED_API_KEY]"));
+        assertTrue(result.err().contains("[REDACTED_SECRET:AWS_KEY]"));
     }
 
     @Test

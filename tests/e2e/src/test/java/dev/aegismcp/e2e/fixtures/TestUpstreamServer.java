@@ -2,6 +2,7 @@ package dev.aegismcp.e2e.fixtures;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -77,6 +78,10 @@ public final class TestUpstreamServer implements AutoCloseable {
                     result.set("arguments", request.path("params").path("arguments"));
                 }
                 response = envelope(id, result);
+            } else if ("tools/list".equals(method)) {
+                // The manifest the gateway reads to validate arguments against each tool's published
+                // schema (FEAT-012, C-001 SCHEMA_VALIDATION_FAILED).
+                response = envelope(id, toolManifest());
             } else {
                 ObjectNode result = MAPPER.createObjectNode();
                 result.put("method", method);
@@ -108,6 +113,54 @@ public final class TestUpstreamServer implements AutoCloseable {
         envelope.set("id", id);
         envelope.set("result", result);
         return MAPPER.writeValueAsString(envelope);
+    }
+
+    /**
+     * The tool manifest this mock server publishes. Every tool the contract policy exercises is
+     * described here so the gateway validates arguments against a schema the server really publishes
+     * rather than against a gateway-side table (FEAT-012).
+     */
+    private static ObjectNode toolManifest() {
+        ObjectNode manifest = MAPPER.createObjectNode();
+        var tools = manifest.putArray("tools");
+
+        tools.addObject().put("name", "echo").set("inputSchema",
+                schemaWith("message", "string", false));
+        tools.addObject().put("name", "ping").set("inputSchema", objectSchema());
+        tools.addObject().put("name", "read_file").set("inputSchema",
+                schemaWith("path", "string", true));
+        tools.addObject().put("name", "curl:exec").set("inputSchema",
+                schemaWith("url", "string", false));
+        tools.addObject().put("name", "get_sensitive_config").set("inputSchema", objectSchema());
+        tools.addObject().put("name", "typed_tool").set("inputSchema",
+                schemaWith("rows", "integer", true));
+        tools.addObject().put("name", "constrained_tool").set("inputSchema",
+                schemaWith("max_rows", "integer", false));
+        tools.addObject().put("name", "deploy_prod").set("inputSchema",
+                schemaWith("environment", "string", false));
+
+        return manifest;
+    }
+
+    private static ObjectNode objectSchema() {
+        ObjectNode schema = MAPPER.createObjectNode();
+        schema.put("type", "object");
+        return schema;
+    }
+
+    private static ObjectNode schemaWith(String property, String type, boolean required) {
+        ObjectNode schema = objectSchema();
+        ObjectNode properties = MAPPER.createObjectNode();
+        ObjectNode propertySchema = MAPPER.createObjectNode();
+        propertySchema.put("type", type);
+        properties.set(property, propertySchema);
+        schema.set("properties", properties);
+        if (required) {
+            ArrayNode names = MAPPER.createArrayNode();
+            names.add(property);
+            schema.set("required", names);
+        }
+        return schema;
     }
 
     @Override

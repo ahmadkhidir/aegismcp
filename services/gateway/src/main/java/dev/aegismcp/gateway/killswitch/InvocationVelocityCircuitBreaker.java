@@ -94,7 +94,8 @@ public class InvocationVelocityCircuitBreaker implements ToolCallInterceptor {
                     + windowDuration.toSeconds() + "s (threshold: " + maxCallsThreshold + ")";
             logger.error("CIRCUIT BREAKER TRIPPED for agent '{}': {}", agentId, reason);
 
-            killSwitchManager.quarantine(KillTargetType.AGENT, agentId, reason);
+            // Pause the identity without severing the channel that owes this call its C-001 answer.
+            killSwitchManager.pauseAgent(agentId, reason);
             if (metrics != null) {
                 metrics.recordBlockedViolation();
             }
@@ -156,8 +157,14 @@ public class InvocationVelocityCircuitBreaker implements ToolCallInterceptor {
             if (metrics != null) {
                 metrics.recordBlockedViolation();
             }
+            String quarantineReason = "Agent '" + agentId + "' is paused by the invocation velocity circuit breaker";
+            if (killSwitchManager.isVelocityPaused(agentId)) {
+                return CompletableFuture.completedFuture(InterceptionVerdict.block(
+                        JsonRpcError.rateLimited(quarantineReason)
+                ));
+            }
             return CompletableFuture.completedFuture(InterceptionVerdict.block(
-                    new JsonRpcError(-32001, "Policy Violation: Agent '" + agentId + "' is quarantined by emergency kill-switch")
+                    JsonRpcError.policyViolation("Agent '" + agentId + "' is quarantined by emergency kill-switch")
             ));
         }
 
@@ -165,8 +172,9 @@ public class InvocationVelocityCircuitBreaker implements ToolCallInterceptor {
         boolean tripped = recordInvocation(agentId, timestamp);
 
         if (tripped) {
+            // C-001: HTTP 429, -32003 Rate Limited, machine code INVOCATION_VELOCITY_EXCEEDED.
             return CompletableFuture.completedFuture(InterceptionVerdict.block(
-                    new JsonRpcError(-32001, "Policy Violation: Invocation velocity circuit breaker tripped for agent '"
+                    JsonRpcError.rateLimited("Invocation velocity circuit breaker tripped for agent '"
                             + agentId + "' (> " + maxCallsThreshold + " calls in " + windowDuration.toSeconds() + "s)")
             ));
         }

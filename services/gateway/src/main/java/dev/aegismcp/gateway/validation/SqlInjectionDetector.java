@@ -5,9 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -15,11 +13,6 @@ import java.util.regex.Pattern;
  * Anchors: FEAT-012, NFR-024.
  */
 public class SqlInjectionDetector {
-
-    private static final Set<String> SQL_PARAM_NAMES = Set.of(
-            "query", "sql", "statement", "db_query", "sql_query",
-            "filter", "where", "command", "querystring", "search"
-    );
 
     private static final List<Pattern> SQL_INJECTION_PATTERNS = List.of(
             // UNION [ALL] SELECT
@@ -54,8 +47,9 @@ public class SqlInjectionDetector {
             return violations;
         }
 
-        boolean isDbTool = toolSchema != null && toolSchema.isDatabaseTool();
-
+        // FEAT-012 runs the heuristics on string arguments, not on arguments whose name happens to
+        // look like SQL. A tool may carry the payload under any key (`q`, `filter`, `term`), so the
+        // name-based gate let injection through untouched.
         Iterator<Map.Entry<String, JsonNode>> fields = arguments.fields();
         while (fields.hasNext()) {
             Map.Entry<String, JsonNode> field = fields.next();
@@ -63,19 +57,12 @@ public class SqlInjectionDetector {
             JsonNode paramValue = field.getValue();
 
             if (paramValue.isTextual()) {
-                String text = paramValue.asText();
-                boolean shouldInspect = isDbTool || isSqlParameter(paramName) || containsObviousSqlKeywords(text);
-                if (shouldInspect) {
-                    checkSqlInjection(paramName, text, violations);
-                }
+                checkSqlInjection(paramName, paramValue.asText(), violations);
             } else if (paramValue.isArray()) {
                 int idx = 0;
                 for (JsonNode item : paramValue) {
                     if (item.isTextual()) {
-                        String text = item.asText();
-                        if (isDbTool || isSqlParameter(paramName) || containsObviousSqlKeywords(text)) {
-                            checkSqlInjection(paramName + "[" + idx + "]", text, violations);
-                        }
+                        checkSqlInjection(paramName + "[" + idx + "]", item.asText(), violations);
                     }
                     idx++;
                 }
@@ -83,18 +70,6 @@ public class SqlInjectionDetector {
         }
 
         return violations;
-    }
-
-    private boolean isSqlParameter(String paramName) {
-        if (paramName == null) return false;
-        String lower = paramName.toLowerCase(Locale.ROOT);
-        return SQL_PARAM_NAMES.contains(lower) || lower.endsWith("query") || lower.endsWith("sql");
-    }
-
-    private boolean containsObviousSqlKeywords(String text) {
-        if (text == null) return false;
-        String upper = text.toUpperCase(Locale.ROOT);
-        return upper.contains("UNION") || upper.contains("DROP TABLE") || upper.contains("1=1") || upper.contains("--");
     }
 
     private void checkSqlInjection(String paramName, String value, List<ValidationViolation> violations) {

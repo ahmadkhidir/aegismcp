@@ -151,8 +151,8 @@ class DlpScrubberThroughputTest {
 
         assertFalse(body.contains("AKIAIOSFODNN7EXAMPLE"), "Credential must not survive the 1 MB path");
         assertFalse(body.contains("admin@corp.net"), "Personal data must not survive the 1 MB path");
-        assertTrue(body.contains("[REDACTED_API_KEY]"));
-        assertTrue(body.contains("[REDACTED_PII]"));
+        assertTrue(body.contains("[REDACTED_SECRET:AWS_KEY]"));
+        assertTrue(body.contains("[REDACTED_PII:EMAIL]"));
     }
 
     private static byte[] mixClass(int index, byte[] small, byte[] medium, byte[] large, byte[] maximum) {

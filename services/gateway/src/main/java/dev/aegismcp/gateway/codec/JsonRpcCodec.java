@@ -131,7 +131,10 @@ public class JsonRpcCodec {
             throw new JsonRpcCodecException(JsonRpcError.invalidRequest("JSON-RPC request must be a JSON object"));
         }
 
-        JsonRpcId id = extractId(root);
+        // C-001 makes id a required string or number on every request. A request without one has no
+        // identifier to repeat on the answer, so it is refused as an invalid request object instead
+        // of being forwarded upstream under a synthetic null id.
+        JsonRpcId id = extractRequiredId(root);
 
         JsonNode versionNode = root.get("jsonrpc");
         if (versionNode == null || !JsonRpcMessage.JSONRPC_VERSION.equals(versionNode.asText())) {
@@ -173,6 +176,26 @@ public class JsonRpcCodec {
         }
 
         return new JsonRpcResponse(JsonRpcMessage.JSONRPC_VERSION, id, resultNode, error);
+    }
+
+    /**
+     * Extracts the required request identifier. C-001 admits a string or a number only: a missing,
+     * null, or structured value is a C-001 {@code INVALID_REQUEST} row, not a notification.
+     */
+    private JsonRpcId extractRequiredId(JsonNode root) {
+        JsonNode idNode = root.get("id");
+        if (idNode == null) {
+            throw new JsonRpcCodecException(
+                    JsonRpcError.invalidRequest("Missing required 'id' property; it must be a string or a number"));
+        }
+        if (idNode.isTextual()) {
+            return JsonRpcId.of(idNode.asText());
+        }
+        if (idNode.isNumber()) {
+            return JsonRpcId.of(idNode.asLong());
+        }
+        throw new JsonRpcCodecException(
+                JsonRpcError.invalidRequest("Invalid 'id' property; it must be a string or a number"));
     }
 
     private JsonRpcId extractId(JsonNode root) {

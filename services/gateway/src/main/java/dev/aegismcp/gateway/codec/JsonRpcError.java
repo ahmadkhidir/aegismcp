@@ -73,8 +73,21 @@ public record JsonRpcError(
         return new JsonRpcError(METHOD_NOT_FOUND, "Method not found: " + method);
     }
 
-    public static JsonRpcError invalidParams(String details) {
-        return new JsonRpcError(INVALID_PARAMS, "Invalid params: " + details);
+    /**
+     * C-001 maps arguments that fail the target tool's published JSON schema to HTTP {@code 400}
+     * with {@code -32602 Invalid params} and machine code {@code SCHEMA_VALIDATION_FAILED}.
+     */
+    public static JsonRpcError schemaValidationFailed(String details) {
+        return new JsonRpcError(INVALID_PARAMS, "Invalid params: " + details,
+                machineData(MACHINE_SCHEMA_VALIDATION_FAILED));
+    }
+
+    /**
+     * C-001 maps an argument that violates a declared constraint to HTTP {@code 403} with
+     * {@code -32001 Policy Violation} and machine code {@code ARGUMENT_CONSTRAINT_VIOLATED}.
+     */
+    public static JsonRpcError argumentConstraintViolated(String details) {
+        return policyViolation(MACHINE_ARGUMENT_CONSTRAINT_VIOLATED, details);
     }
 
     public static JsonRpcError internalError(String details) {

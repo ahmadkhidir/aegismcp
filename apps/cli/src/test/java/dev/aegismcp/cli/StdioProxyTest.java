@@ -110,7 +110,7 @@ class StdioProxyTest {
 
         // Verify DLP engine scrubbed the secret key from MockMcpChildServer
         assertFalse(output.contains(TestCredential.awsAccessKey()), "AWS secret access key must be scrubbed by DLP");
-        assertTrue(output.contains("[REDACTED_API_KEY]"), "Scrubbed output should contain redaction token");
+        assertTrue(output.contains("[REDACTED_SECRET:AWS_KEY]"), "Scrubbed output should contain redaction token");
 
         // Verify inspector rendered log
         String errOutput = parentErr.toString(StandardCharsets.UTF_8);

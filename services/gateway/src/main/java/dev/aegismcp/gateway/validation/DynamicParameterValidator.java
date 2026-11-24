@@ -21,6 +21,7 @@ public class DynamicParameterValidator {
     private final PathTraversalSanitizer pathTraversalSanitizer;
     private final SqlInjectionDetector sqlInjectionDetector;
     private final CommandInjectionDetector commandInjectionDetector;
+    private final ToolSchemaSource schemaSource;
 
     // Policy override / whitelist for authorized database administrator agents (FEAT-012 Edge Cases)
     private final Set<String> whitelistedDbAdmins = ConcurrentHashMap.newKeySet();
@@ -33,6 +34,15 @@ public class DynamicParameterValidator {
         this(schemaRegistry, new JsonSchemaValidator(), new PathTraversalSanitizer(), new SqlInjectionDetector(), new CommandInjectionDetector());
     }
 
+    /**
+     * Validator whose unknown tools are resolved from the manifest the upstream MCP server
+     * publishes, so schema enforcement uses the tool's own published definition (FEAT-012).
+     */
+    public DynamicParameterValidator(ToolSchemaRegistry schemaRegistry, ToolSchemaSource schemaSource) {
+        this(schemaRegistry, new JsonSchemaValidator(), new PathTraversalSanitizer(),
+                new SqlInjectionDetector(), new CommandInjectionDetector(), schemaSource);
+    }
+
     public DynamicParameterValidator(
             ToolSchemaRegistry schemaRegistry,
             JsonSchemaValidator jsonSchemaValidator,
@@ -40,11 +50,24 @@ public class DynamicParameterValidator {
             SqlInjectionDetector sqlInjectionDetector,
             CommandInjectionDetector commandInjectionDetector
     ) {
+        this(schemaRegistry, jsonSchemaValidator, pathTraversalSanitizer, sqlInjectionDetector,
+                commandInjectionDetector, ToolSchemaSource.empty());
+    }
+
+    public DynamicParameterValidator(
+            ToolSchemaRegistry schemaRegistry,
+            JsonSchemaValidator jsonSchemaValidator,
+            PathTraversalSanitizer pathTraversalSanitizer,
+            SqlInjectionDetector sqlInjectionDetector,
+            CommandInjectionDetector commandInjectionDetector,
+            ToolSchemaSource schemaSource
+    ) {
         this.schemaRegistry = Objects.requireNonNull(schemaRegistry, "schemaRegistry must not be null");
         this.jsonSchemaValidator = Objects.requireNonNull(jsonSchemaValidator, "jsonSchemaValidator must not be null");
         this.pathTraversalSanitizer = Objects.requireNonNull(pathTraversalSanitizer, "pathTraversalSanitizer must not be null");
         this.sqlInjectionDetector = Objects.requireNonNull(sqlInjectionDetector, "sqlInjectionDetector must not be null");
         this.commandInjectionDetector = Objects.requireNonNull(commandInjectionDetector, "commandInjectionDetector must not be null");
+        this.schemaSource = schemaSource != null ? schemaSource : ToolSchemaSource.empty();
     }
 
     /**
@@ -85,7 +108,7 @@ public class DynamicParameterValidator {
     public ValidationResult validate(String agentId, String toolName, JsonNode arguments) {
         List<ValidationViolation> violations = new ArrayList<>();
 
-        ToolSchema toolSchema = schemaRegistry.getSchema(toolName);
+        ToolSchema toolSchema = resolveSchema(toolName);
         if (toolSchema == null) {
             // Infer basic schema metadata from tool name when missing from manifest (FEAT-012 edge cases)
             toolSchema = ToolSchema.of(toolName != null ? toolName : "unknown", null);
@@ -116,6 +139,24 @@ public class DynamicParameterValidator {
 
     public ToolSchemaRegistry getSchemaRegistry() {
         return schemaRegistry;
+    }
+
+    /**
+     * Resolves the tool's published schema, consulting the manifest source when the registry does not
+     * know the tool yet. The source is bounded and coalesced, so a call never waits on another call's
+     * manifest read and an unreadable manifest falls back to the generic checks.
+     */
+    private ToolSchema resolveSchema(String toolName) {
+        ToolSchema schema = schemaRegistry.getSchema(toolName);
+        if (schema == null && toolName != null) {
+            schemaSource.loadInto(schemaRegistry);
+            schema = schemaRegistry.getSchema(toolName);
+        }
+        return schema;
+    }
+
+    public ToolSchemaSource getSchemaSource() {
+        return schemaSource;
     }
 
     public JsonSchemaValidator getJsonSchemaValidator() {

@@ -4,11 +4,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.aegismcp.gateway.anomaly.SecurityViolation;
 import dev.aegismcp.gateway.audit.AuditLedger;
+import dev.aegismcp.gateway.codec.JsonRpcError;
 import dev.aegismcp.gateway.codec.JsonRpcId;
 import dev.aegismcp.gateway.codec.JsonRpcRequest;
 import dev.aegismcp.gateway.proxy.AgentIdentity;
 import dev.aegismcp.gateway.proxy.InterceptionVerdict;
 import dev.aegismcp.gateway.proxy.SecurityContext;
+import io.netty.handler.codec.http.HttpResponseStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -22,7 +24,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Unit tests verifying DynamicValidationInterceptor Netty pipeline integration,
- * fail-closed rejection with JSON-RPC error -32005, and AuditLedger recording.
+ * fail-closed rejection with the C-001 row that names the failing check, and AuditLedger recording.
  * Anchors: FEAT-012, C-001, NFR-024, schema.md#SecurityViolation.
  */
 class DynamicValidationInterceptorTest {
@@ -83,8 +85,8 @@ class DynamicValidationInterceptorTest {
     }
 
     @Test
-    @DisplayName("FEAT-012 AC 5: Schema violation rejects tool call with JSON-RPC error -32005 Schema/Parameter Violation")
-    void testSchemaViolationRejectedWithErrorCode32005() {
+    @DisplayName("C-001: a schema violation is 400 -32602 SCHEMA_VALIDATION_FAILED")
+    void testSchemaViolationRejectedWithContractRow() {
         SecurityContext context = SecurityContext.of(AgentIdentity.fromBearer("agent-test-token"), new InetSocketAddress(8080));
 
         ObjectNode toolParams = mapper.createObjectNode();
@@ -100,13 +102,14 @@ class DynamicValidationInterceptorTest {
         assertTrue(verdict instanceof InterceptionVerdict.Block);
 
         InterceptionVerdict.Block block = (InterceptionVerdict.Block) verdict;
-        assertEquals(-32005, block.error().code());
-        assertTrue(block.error().message().startsWith("Schema/Parameter Violation:"));
+        assertEquals(JsonRpcError.INVALID_PARAMS, block.error().code());
+        assertEquals(JsonRpcError.MACHINE_SCHEMA_VALIDATION_FAILED, block.error().machineCode());
+        assertEquals(HttpResponseStatus.BAD_REQUEST, block.error().toHttpStatus());
         assertTrue(block.error().message().contains("type mismatch"));
     }
 
     @Test
-    @DisplayName("FEAT-012 AC 5 & AC 6: Path traversal records SecurityViolation of type path_traversal and returns -32005")
+    @DisplayName("C-001: path traversal records a path_traversal violation and answers 403 PATH_TRAVERSAL")
     void testPathTraversalRecordedAndBlocked() {
         SecurityContext context = SecurityContext.of(AgentIdentity.fromBearer("agent-attacker"), new InetSocketAddress(8080));
 
@@ -122,7 +125,9 @@ class DynamicValidationInterceptorTest {
         assertTrue(verdict instanceof InterceptionVerdict.Block);
 
         InterceptionVerdict.Block block = (InterceptionVerdict.Block) verdict;
-        assertEquals(-32005, block.error().code());
+        assertEquals(JsonRpcError.POLICY_VIOLATION, block.error().code());
+        assertEquals(JsonRpcError.MACHINE_PATH_TRAVERSAL, block.error().machineCode());
+        assertEquals(HttpResponseStatus.FORBIDDEN, block.error().toHttpStatus());
         assertTrue(block.error().message().contains("Path traversal"));
 
         // Verify recorded SecurityViolation
@@ -138,7 +143,7 @@ class DynamicValidationInterceptorTest {
     }
 
     @Test
-    @DisplayName("FEAT-012 AC 5 & AC 6: Command injection records SecurityViolation of type schema_violation and returns -32005")
+    @DisplayName("C-001: command injection records a schema_violation and answers 403 ARGUMENT_CONSTRAINT_VIOLATED")
     void testCommandInjectionRecordedAndBlocked() {
         SecurityContext context = SecurityContext.of(AgentIdentity.fromBearer("agent-shell-inject"), new InetSocketAddress(8080));
 
@@ -154,7 +159,9 @@ class DynamicValidationInterceptorTest {
         assertTrue(verdict instanceof InterceptionVerdict.Block);
 
         InterceptionVerdict.Block block = (InterceptionVerdict.Block) verdict;
-        assertEquals(-32005, block.error().code());
+        assertEquals(JsonRpcError.POLICY_VIOLATION, block.error().code());
+        assertEquals(JsonRpcError.MACHINE_ARGUMENT_CONSTRAINT_VIOLATED, block.error().machineCode());
+        assertEquals(HttpResponseStatus.FORBIDDEN, block.error().toHttpStatus());
         assertTrue(block.error().message().contains("Command injection"));
 
         List<SecurityViolation> violations = interceptor.getRecordedViolations();
