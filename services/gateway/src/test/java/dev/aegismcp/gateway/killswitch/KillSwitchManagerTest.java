@@ -231,4 +231,57 @@ class KillSwitchManagerTest {
         assertEquals(0, metrics.getActiveConnections());
         assertEquals(0, metrics.getActiveAgents());
     }
+
+    @Test
+    @DisplayName("C-010 / C-008: an alias is addressable but never counted as a second agent")
+    void testAgentAliasIsNotCounted() {
+        GatewayMetrics metrics = new GatewayMetrics();
+        killSwitchManager.attachMetrics(metrics);
+        String workloadId = "ns/agents/sa/support-bot";
+        String spiffeUri = "spiffe://cluster.local/ns/agents/sa/support-bot";
+
+        EmbeddedChannel first = new EmbeddedChannel();
+        killSwitchManager.registerSession(workloadId, first);
+        killSwitchManager.registerAgentAlias(spiffeUri, workloadId);
+
+        assertEquals(1, metrics.getActiveConnections());
+        assertEquals(1, metrics.getActiveAgents());
+        assertTrue(killSwitchManager.hasAgentSession(spiffeUri));
+
+        first.close();
+        assertEquals(0, metrics.getActiveConnections());
+        assertEquals(0, metrics.getActiveAgents());
+        assertFalse(killSwitchManager.hasAgentSession(spiffeUri));
+
+        // A second register/close cycle starts from zero, not from a leaked or doubled count.
+        EmbeddedChannel second = new EmbeddedChannel();
+        killSwitchManager.registerSession(workloadId, second);
+        killSwitchManager.registerAgentAlias(spiffeUri, workloadId);
+        assertEquals(1, metrics.getActiveConnections());
+        assertEquals(1, metrics.getActiveAgents());
+
+        second.close();
+        assertEquals(0, metrics.getActiveConnections());
+        assertEquals(0, metrics.getActiveAgents());
+    }
+
+    @Test
+    @DisplayName("C-010: a channel that re-registers under another identity is counted once")
+    void testChannelReassignedToAnotherIdentityIsCountedOnce() {
+        GatewayMetrics metrics = new GatewayMetrics();
+        killSwitchManager.attachMetrics(metrics);
+        EmbeddedChannel channel = new EmbeddedChannel();
+
+        killSwitchManager.registerSession("agent-1", channel);
+        assertEquals(1, metrics.getActiveAgents());
+
+        killSwitchManager.registerSession("agent-2", channel);
+        assertEquals(1, metrics.getActiveAgents(), "one live channel is one distinct identity");
+        assertFalse(killSwitchManager.hasAgentSession("agent-1"));
+        assertTrue(killSwitchManager.hasAgentSession("agent-2"));
+
+        channel.close();
+        assertEquals(0, metrics.getActiveAgents());
+        assertEquals(0, metrics.getActiveConnections());
+    }
 }
