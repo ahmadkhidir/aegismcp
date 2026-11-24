@@ -69,7 +69,9 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
   const [systemStatus, setSystemStatus] = useState<SystemStatusResponse | null>(null);
   const [metrics, setMetrics] = useState<MetricsSummaryResponse | null>(null);
   const [timeseries, setTimeseries] = useState<MetricsTimeseriesResponse | null>(null);
+  const [timeseriesUnavailable, setTimeseriesUnavailable] = useState(false);
   const [violations, setViolations] = useState<SecurityViolation[]>([]);
+  const [violationsUnavailable, setViolationsUnavailable] = useState(false);
   const [urgentApprovals, setUrgentApprovals] = useState<ApprovalTicket[]>([]);
 
   const loadDashboardData = useCallback(async () => {
@@ -83,18 +85,39 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
         ? AegisApi.getPendingApprovals(3)
         : Promise.resolve({ tickets: [] as ApprovalTicket[] });
 
-      const [statusRes, metricsRes, seriesRes, violationsRes, approvalsRes] = await Promise.all([
+      const [statusRes, metricsRes, approvalsRes] = await Promise.all([
         AegisApi.getSystemStatus(),
         AegisApi.getMetricsSummary(),
-        AegisApi.getMetricsTimeseries(),
-        AegisApi.getViolations({ limit: 10 }),
         approvalsRequest,
       ]);
+
+      // The chart and the incident feed are secondary surfaces: a missing or
+      // unavailable feed must not replace the whole dashboard with an error.
+      const [seriesRes, violationsRes] = await Promise.allSettled([
+        AegisApi.getMetricsTimeseries(),
+        AegisApi.getViolations({ limit: 10 }),
+      ]);
+
       setSystemStatus(statusRes);
       setMetrics(metricsRes);
-      setTimeseries(seriesRes);
-      setViolations(violationsRes);
       setUrgentApprovals(approvalsRes.tickets);
+
+      if (seriesRes.status === 'fulfilled') {
+        setTimeseries(seriesRes.value);
+        setTimeseriesUnavailable(false);
+      } else {
+        setTimeseries(null);
+        setTimeseriesUnavailable(true);
+      }
+
+      if (violationsRes.status === 'fulfilled') {
+        setViolations(violationsRes.value);
+        setViolationsUnavailable(false);
+      } else {
+        setViolations([]);
+        setViolationsUnavailable(true);
+      }
+
       setLoading(false);
     } catch (err: unknown) {
       setLoading(false);
@@ -307,7 +330,9 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
               <Skeleton className="h-44 w-full" />
             ) : buckets.length === 0 ? (
               <div className="h-44 flex items-center justify-center text-caption text-grey-500">
-                No telemetry for the last 24 hours.
+                {timeseriesUnavailable
+                  ? 'Telemetry feed unavailable. The gateway did not return the 24-hour series.'
+                  : 'No telemetry for the last 24 hours.'}
               </div>
             ) : (
               <div className="h-44 flex items-end gap-1 pt-4 px-2 border-b border-grey-300">
@@ -362,6 +387,10 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                 <Skeleton className="h-8 w-full" />
                 <Skeleton className="h-8 w-full" />
                 <Skeleton className="h-8 w-full" />
+              </div>
+            ) : violationsUnavailable ? (
+              <div className="py-8 text-center text-caption text-grey-500">
+                Incident feed unavailable. The gateway did not return the security violation feed.
               </div>
             ) : violations.length === 0 ? (
               <EmptyState
