@@ -104,10 +104,12 @@ public class IdentityVerificationHandler extends SimpleChannelInboundHandler<Ful
             ctx.executor().execute(() -> {
                 ctx.channel().attr(AgentIdentity.VERIFIED_ATTRIBUTE).set(bound);
                 if (killSwitchManager != null) {
+                    // One session is one agent identity, counted once (C-010): a SPIFFE session carries
+                    // both a workload ID and the SPIFFE URI that derive from the same credential, so
+                    // only the workload identity registers the live stream. The URI is recorded as an
+                    // alias so an operator can still address the agent by either form (C-008).
                     killSwitchManager.registerSession(bound.agentId(), ctx.channel());
-                    if (bound.spiffeId() != null) {
-                        killSwitchManager.registerSession(bound.spiffeId(), ctx.channel());
-                    }
+                    killSwitchManager.registerAgentAlias(bound.spiffeId(), bound.agentId());
                 }
                 ctx.fireChannelRead(request);
             });

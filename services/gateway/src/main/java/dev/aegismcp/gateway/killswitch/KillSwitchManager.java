@@ -47,8 +47,16 @@ public class KillSwitchManager {
      */
     private final Set<String> velocityPausedAgents = ConcurrentHashMap.newKeySet();
 
-    // Active session tracking: agentId -> set of channels, serverId -> set of channels
+    // Active session tracking: canonical agent identity -> set of channels, serverId -> set of channels
     private final ConcurrentHashMap<String, Set<Channel>> agentChannels = new ConcurrentHashMap<>();
+    /**
+     * Second credential form of a canonical agent identity, such as the SPIFFE URI behind a workload
+     * ID. Aliases let the C-008 emergency kill address a session by either form; they are never
+     * identities themselves, so they do not feed the C-010 live-agent count.
+     */
+    private final ConcurrentHashMap<String, String> agentAliases = new ConcurrentHashMap<>();
+    /** The single agent identity each tracked channel is counted under (C-010). */
+    private final ConcurrentHashMap<Channel, String> channelAgentIdentities = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Set<Channel>> sessionChannels = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Set<Channel>> serverChannels = new ConcurrentHashMap<>();
     private final Set<Channel> allChannels = ConcurrentHashMap.newKeySet();
@@ -96,18 +104,18 @@ public class KillSwitchManager {
     }
 
     /**
-     * Registers an active transport channel associated with an agent workload and optional upstream server.
+     * Registers an active transport channel associated with an agent identity and optional upstream
+     * server. A channel is counted under exactly one agent identity (C-010), so a repeated
+     * registration of the same channel and identity never double-counts.
      */
     public void registerSession(String agentId, String serverId, Channel channel) {
         if (channel == null) {
             return;
         }
         boolean newChannel = allChannels.add(channel);
-        boolean newAgent = false;
+        boolean identityChanged = false;
         if (agentId != null && !agentId.isBlank()) {
-            Set<Channel> channels = agentChannels.computeIfAbsent(agentId, k -> ConcurrentHashMap.newKeySet());
-            newAgent = channels.isEmpty();
-            channels.add(channel);
+            identityChanged = assignAgentIdentity(agentId, channel);
         }
         if (serverId != null && !serverId.isBlank()) {
             serverChannels.computeIfAbsent(serverId, k -> ConcurrentHashMap.newKeySet()).add(channel);
@@ -116,11 +124,60 @@ public class KillSwitchManager {
         if (newChannel) {
             channel.closeFuture().addListener(f -> unregisterSession(channel));
         }
-        // Server and named-session membership do not change either published count, so only a new
-        // transport stream or a newly seen agent identity republishes the snapshot.
-        if (newChannel || newAgent) {
+        // Server membership does not change either published count, so only a new transport stream
+        // or a change of agent identity republishes the snapshot.
+        if (newChannel || identityChanged) {
             publishSessionCounts();
         }
+    }
+
+    /**
+     * Binds a channel to its one counted agent identity, replacing any identity the channel was
+     * counted under before, so one live session can never add two agents to the C-010 summary.
+     */
+    private boolean assignAgentIdentity(String agentId, Channel channel) {
+        String previous = channelAgentIdentities.put(channel, agentId);
+        boolean moved = previous != null && !previous.equals(agentId);
+        boolean added = agentChannels
+                .computeIfAbsent(agentId, k -> ConcurrentHashMap.newKeySet())
+                .add(channel);
+        if (moved) {
+            removeAgentChannel(previous, channel);
+        }
+        return added || moved;
+    }
+
+    /**
+     * Records a second credential form of a canonical agent identity, such as the SPIFFE URI behind
+     * the workload ID. An alias resolves kill-switch targets (C-008) but is not itself an identity,
+     * so it never adds to the C-010 live-agent count.
+     */
+    public void registerAgentAlias(String alias, String agentId) {
+        if (alias == null || alias.isBlank() || agentId == null || agentId.isBlank() || alias.equals(agentId)) {
+            return;
+        }
+        agentAliases.put(alias, agentId);
+    }
+
+    /** Resolves an alias such as a SPIFFE URI to the canonical identity that is counted (C-010). */
+    private String canonicalAgentId(String agentId) {
+        if (agentId == null) {
+            return null;
+        }
+        String canonical = agentAliases.get(agentId);
+        return canonical != null ? canonical : agentId;
+    }
+
+    private boolean removeAgentChannel(String agentId, Channel channel) {
+        Set<Channel> channels = agentChannels.get(agentId);
+        if (channels == null || !channels.remove(channel)) {
+            return false;
+        }
+        if (channels.isEmpty() && agentChannels.remove(agentId, channels)) {
+            // No live session holds the identity or its aliases any more.
+            agentAliases.values().removeIf(agentId::equals);
+        }
+        return true;
     }
 
     /**
@@ -143,18 +200,29 @@ public class KillSwitchManager {
             return;
         }
         boolean removed = allChannels.remove(channel);
-        for (Set<Channel> channels : agentChannels.values()) {
-            removed |= channels.remove(channel);
+        String agentId = channelAgentIdentities.remove(channel);
+        if (agentId != null) {
+            removed |= removeAgentChannel(agentId, channel);
         }
-        for (Set<Channel> channels : sessionChannels.values()) {
-            removed |= channels.remove(channel);
-        }
-        for (Set<Channel> channels : serverChannels.values()) {
-            removed |= channels.remove(channel);
-        }
+        removed |= removeChannel(sessionChannels, channel);
+        removed |= removeChannel(serverChannels, channel);
         if (removed) {
             publishSessionCounts();
         }
+    }
+
+    private static boolean removeChannel(Map<String, Set<Channel>> registry, Channel channel) {
+        boolean removed = false;
+        for (Map.Entry<String, Set<Channel>> entry : registry.entrySet()) {
+            Set<Channel> channels = entry.getValue();
+            if (channels.remove(channel)) {
+                removed = true;
+                if (channels.isEmpty()) {
+                    registry.remove(entry.getKey(), channels);
+                }
+            }
+        }
+        return removed;
     }
 
     /**
@@ -215,6 +283,8 @@ public class KillSwitchManager {
         int closed = closeChannels(allChannels);
         allChannels.clear();
         agentChannels.clear();
+        channelAgentIdentities.clear();
+        agentAliases.clear();
         serverChannels.clear();
         publishSessionCounts();
         return closed;
@@ -240,15 +310,19 @@ public class KillSwitchManager {
     /**
      * Quarantines an agent workload and severs its active transport sessions.
      *
+     * <p>The target may be either form of the identity, the workload ID or its SPIFFE URI; both
+     * resolve to the one identity the session is counted and enforced under (C-008, C-010).
+     *
      * @return number of closed sessions
      */
     public int quarantineAgent(String agentId, String reason) {
         Objects.requireNonNull(agentId, "agentId must not be null");
-        velocityPausedAgents.remove(agentId);
-        quarantinedAgents.put(agentId, new QuarantineEntry(KillTargetType.AGENT, agentId, reason, Instant.now()));
-        logger.warn("Agent '{}' quarantined: {}", agentId, reason);
+        String canonical = canonicalAgentId(agentId);
+        velocityPausedAgents.remove(canonical);
+        quarantinedAgents.put(canonical, new QuarantineEntry(KillTargetType.AGENT, canonical, reason, Instant.now()));
+        logger.warn("Agent '{}' quarantined: {}", canonical, reason);
 
-        Set<Channel> channels = agentChannels.remove(agentId);
+        Set<Channel> channels = agentChannels.remove(canonical);
         publishSessionCounts();
         return channels != null ? closeChannels(channels) : 0;
     }
@@ -277,19 +351,22 @@ public class KillSwitchManager {
 
     public void unquarantineAgent(String agentId) {
         if (agentId != null) {
-            velocityPausedAgents.remove(agentId);
-            quarantinedAgents.remove(agentId);
-            logger.info("Agent '{}' quarantine removed.", agentId);
+            String canonical = canonicalAgentId(agentId);
+            velocityPausedAgents.remove(canonical);
+            quarantinedAgents.remove(canonical);
+            logger.info("Agent '{}' quarantine removed.", canonical);
         }
     }
 
     public boolean isAgentQuarantined(String agentId) {
-        return agentId != null && quarantinedAgents.containsKey(agentId);
+        String canonical = canonicalAgentId(agentId);
+        return canonical != null && quarantinedAgents.containsKey(canonical);
     }
 
     /** True when the agent identity currently holds at least one open transport stream. */
     public boolean hasAgentSession(String agentId) {
-        Set<Channel> channels = agentId != null ? agentChannels.get(agentId) : null;
+        String canonical = canonicalAgentId(agentId);
+        Set<Channel> channels = canonical != null ? agentChannels.get(canonical) : null;
         return channels != null && !channels.isEmpty();
     }
 
