@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -30,7 +31,26 @@ import java.util.regex.Pattern;
  */
 public final class GatewayProcess implements AutoCloseable {
 
-    private static final Duration STARTUP_TIMEOUT = Duration.ofSeconds(45);
+    /**
+     * The readiness budget for a healthy artifact. A packaged boot announces its port within a few
+     * seconds on an idle host, but a Windows host under concurrent Gradle and JVM load can take
+     * tens of seconds before the child writes its first log line, so the harness gives a slow boot
+     * three minutes instead of mistaking load for a hang (NFR-005).
+     */
+    private static final Duration BASE_STARTUP_TIMEOUT = Duration.ofMinutes(3);
+
+    /**
+     * The hard ceiling for one boot. Startup output extends the wait in {@code BASE_STARTUP_TIMEOUT}
+     * steps so a loaded host that is still making progress is tolerated, but no launch can hold a
+     * suite forever (NFR-005).
+     */
+    private static final Duration MAX_STARTUP_TIMEOUT = Duration.ofMinutes(5);
+
+    /** Readiness poll cadence. Each poll also checks whether the child exited or advanced. */
+    private static final Duration POLL_INTERVAL = Duration.ofMillis(100);
+
+    private static final int CAPTURED_TAIL_LINES = 300;
+
     private static final Pattern BOUND_PORT =
             Pattern.compile("started successfully on [^:]+:(\\d+)");
 
@@ -57,63 +77,136 @@ public final class GatewayProcess implements AutoCloseable {
     /**
      * Starts the artifact with the supplied environment overrides. The process inherits nothing
      * from the test JVM's {@code AEGIS_*} namespace, so parallel suites cannot contaminate it.
+     *
+     * <p>Every failure is a {@link GatewayStartupException} that names whether the distribution was
+     * unavailable, the launcher could not start, the child exited, or the bounded wait expired, and
+     * carries the captured output. The harness never launches the child a second time.
      */
-    public static GatewayProcess start(Map<String, String> overrides) throws Exception {
-        Path repositoryRoot = repositoryRoot();
-        Path launcher = ensureInstalled(repositoryRoot);
-        Path workDirectory = Files.createTempDirectory("aegis-e2e-gateway-");
+    public static GatewayProcess start(Map<String, String> overrides) {
+        Path launcher;
+        try {
+            launcher = ensureInstalled(repositoryRoot());
+        } catch (GatewayStartupException e) {
+            throw e;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new GatewayStartupException(
+                    "Gateway startup interrupted while preparing the packaged gateway"
+                            + " distribution.",
+                    GatewayStartupException.Failure.INTERRUPTED, Duration.ZERO, "", e);
+        } catch (Exception e) {
+            throw new GatewayStartupException(
+                    "Gateway startup failed: the packaged gateway distribution is unavailable ("
+                            + e.getMessage() + ").",
+                    GatewayStartupException.Failure.DISTRIBUTION_UNAVAILABLE, Duration.ZERO, "", e);
+        }
+        return start(launchCommand(launcher), launcher.toAbsolutePath().toString(), overrides,
+                BASE_STARTUP_TIMEOUT, MAX_STARTUP_TIMEOUT);
+    }
 
-        List<String> command = new ArrayList<>();
-        boolean windows = isWindows();
-        if (windows) {
-            command.add(System.getenv().getOrDefault("ComSpec", "cmd.exe"));
-            command.add("/d");
-            command.add("/s");
-            command.add("/c");
-            command.add("\"" + launcher.toAbsolutePath() + "\"");
-        } else {
-            command.add(launcher.toAbsolutePath().toString());
+    /**
+     * Launches a caller-supplied command with the same bounded readiness wait. The startup-diagnostic
+     * suite uses it with a deliberately failing launcher, so the timeout path is exercised without a
+     * production defect and without starting a second gateway.
+     */
+    static GatewayProcess start(List<String> command, String description, Map<String, String> overrides,
+                                Duration baseTimeout, Duration hardLimit) {
+        if (baseTimeout.isNegative() || baseTimeout.isZero()
+                || hardLimit.compareTo(baseTimeout) < 0) {
+            throw new IllegalArgumentException(
+                    "The startup budget must be positive and no larger than its hard limit");
         }
 
-        ProcessBuilder builder = new ProcessBuilder(command)
-                .directory(workDirectory.toFile());
+        long startedAt = System.nanoTime();
+        Path workDirectory;
+        try {
+            workDirectory = Files.createTempDirectory("aegis-e2e-gateway-");
+        } catch (IOException e) {
+            throw new GatewayStartupException(
+                    "Gateway startup failed: the harness could not create a work directory for "
+                            + description + ": " + e.getMessage(),
+                    GatewayStartupException.Failure.LAUNCH_FAILED, Duration.ZERO, "", e);
+        }
+
+        ProcessBuilder builder = new ProcessBuilder(command).directory(workDirectory.toFile());
         Map<String, String> environment = builder.environment();
         environment.keySet().removeIf(key -> key.toUpperCase(Locale.ROOT).startsWith("AEGIS_"));
         environment.putAll(overrides);
         builder.redirectErrorStream(false);
 
-        Process process = builder.start();
-        Deque<String> tail = new ArrayDeque<>();
-        Thread stdout = drain("gateway-stdout", process.getInputStream(), tail, true);
-        Thread stderr = drain("gateway-stderr", process.getErrorStream(), tail, false);
-
-        long deadline = System.nanoTime() + STARTUP_TIMEOUT.toNanos();
-        Matcher matcher;
-        while (true) {
-            matcher = BOUND_PORT.matcher(snapshot(tail));
-            if (matcher.find()) {
-                break;
-            }
-            if (!process.isAlive()) {
-                String captured = snapshot(tail);
-                stop(process);
-                deleteRecursively(workDirectory);
-                throw new IllegalStateException(
-                        "The packaged gateway exited before reporting a bound port.\n" + captured);
-            }
-            if (System.nanoTime() > deadline) {
-                String captured = snapshot(tail);
-                stop(process);
-                deleteRecursively(workDirectory);
-                throw new IllegalStateException(
-                        "The packaged gateway did not report a bound port within "
-                                + STARTUP_TIMEOUT.toSeconds() + "s.\n" + captured);
-            }
-            Thread.sleep(100);
+        Process process;
+        try {
+            process = builder.start();
+        } catch (IOException e) {
+            deleteRecursively(workDirectory);
+            throw new GatewayStartupException(
+                    "Gateway startup failed: the launcher " + description + " could not be started: "
+                            + e.getMessage(),
+                    GatewayStartupException.Failure.LAUNCH_FAILED,
+                    Duration.ofNanos(System.nanoTime() - startedAt), "", e);
         }
 
-        int port = Integer.parseInt(matcher.group(1));
-        return new GatewayProcess(process, port, workDirectory, tail, stdout, stderr);
+        Deque<String> tail = new ArrayDeque<>();
+        AtomicLong outputLines = new AtomicLong();
+        Thread stdout = drain("gateway-stdout", process.getInputStream(), tail, outputLines, true);
+        Thread stderr = drain("gateway-stderr", process.getErrorStream(), tail, outputLines, false);
+
+        long hardDeadline = System.nanoTime() + hardLimit.toNanos();
+        long deadline = Math.min(System.nanoTime() + baseTimeout.toNanos(), hardDeadline);
+        long observedLines = 0L;
+        long lastProgressAt = startedAt;
+
+        try {
+            while (true) {
+                Matcher matcher = BOUND_PORT.matcher(snapshot(tail));
+                if (matcher.find()) {
+                    int port = Integer.parseInt(matcher.group(1));
+                    return new GatewayProcess(process, port, workDirectory, tail, stdout, stderr);
+                }
+
+                long now = System.nanoTime();
+                if (!process.isAlive()) {
+                    awaitDrainers(stdout, stderr);
+                    throw exitedEarly(process.exitValue(), description, startedAt, tail);
+                }
+
+                long lines = outputLines.get();
+                if (lines > observedLines) {
+                    // The child is still advancing, so restart the readiness budget within the hard
+                    // ceiling. A silent launch gets no such extension.
+                    observedLines = lines;
+                    lastProgressAt = now;
+                    deadline = Math.min(now + baseTimeout.toNanos(), hardDeadline);
+                }
+
+                if (now - deadline >= 0) {
+                    throw readinessTimeout(description, startedAt, now, lastProgressAt, baseTimeout,
+                            hardLimit, tail);
+                }
+
+                long remainingMillis = TimeUnit.NANOSECONDS.toMillis(deadline - now) + 1;
+                process.waitFor(Math.min(POLL_INTERVAL.toMillis(), remainingMillis),
+                        TimeUnit.MILLISECONDS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            String captured = snapshot(tail);
+            Duration waited = Duration.ofNanos(System.nanoTime() - startedAt);
+            stop(process);
+            awaitDrainers(stdout, stderr);
+            deleteRecursively(workDirectory);
+            throw new GatewayStartupException(
+                    "Gateway startup interrupted after "
+                            + GatewayStartupException.describe(waited)
+                            + " while waiting for " + description + " to announce a bound port."
+                            + GatewayStartupException.renderOutput(captured),
+                    GatewayStartupException.Failure.INTERRUPTED, waited, captured, e);
+        } catch (GatewayStartupException e) {
+            stop(process);
+            awaitDrainers(stdout, stderr);
+            deleteRecursively(workDirectory);
+            throw e;
+        }
     }
 
     public int port() {
@@ -129,11 +222,14 @@ public final class GatewayProcess implements AutoCloseable {
         return snapshot(outputTail);
     }
 
-    private static synchronized String snapshot(Deque<String> tail) {
-        return String.join("\n", tail);
+    private static String snapshot(Deque<String> tail) {
+        synchronized (tail) {
+            return String.join("\n", tail);
+        }
     }
 
-    private static Thread drain(String name, java.io.InputStream stream, Deque<String> tail, boolean stdout) {
+    private static Thread drain(String name, java.io.InputStream stream, Deque<String> tail,
+                                AtomicLong outputLines, boolean stdout) {
         Thread thread = new Thread(() -> {
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(stream, StandardCharsets.UTF_8))) {
@@ -141,10 +237,11 @@ public final class GatewayProcess implements AutoCloseable {
                 while ((line = reader.readLine()) != null) {
                     synchronized (tail) {
                         tail.addLast((stdout ? "[out] " : "[err] ") + line);
-                        while (tail.size() > 300) {
+                        while (tail.size() > CAPTURED_TAIL_LINES) {
                             tail.removeFirst();
                         }
                     }
+                    outputLines.incrementAndGet();
                 }
             } catch (IOException ignored) {
                 // The stream closes when the child exits; the tail already holds its output.
@@ -153,6 +250,65 @@ public final class GatewayProcess implements AutoCloseable {
         thread.setDaemon(true);
         thread.start();
         return thread;
+    }
+
+    /** The platform-specific command line that runs an installed distribution launcher. */
+    private static List<String> launchCommand(Path launcher) {
+        List<String> command = new ArrayList<>();
+        if (isWindows()) {
+            // The batch launcher is not executable on its own; cmd owns the .bat shim.
+            command.add(System.getenv().getOrDefault("ComSpec", "cmd.exe"));
+            command.add("/d");
+            command.add("/s");
+            command.add("/c");
+            command.add("\"" + launcher.toAbsolutePath() + "\"");
+        } else {
+            command.add(launcher.toAbsolutePath().toString());
+        }
+        return command;
+    }
+
+    private static GatewayStartupException exitedEarly(int exitStatus, String description,
+                                                       long startedAt, Deque<String> tail) {
+        String captured = snapshot(tail);
+        Duration waited = Duration.ofNanos(System.nanoTime() - startedAt);
+        return new GatewayStartupException(
+                "Gateway startup failed: the process exited with status " + exitStatus
+                        + " before announcing a bound port (" + description + "). This is a startup"
+                        + " failure, not a contract assertion result."
+                        + GatewayStartupException.renderOutput(captured),
+                GatewayStartupException.Failure.PROCESS_EXITED, waited, captured, null);
+    }
+
+    private static GatewayStartupException readinessTimeout(String description, long startedAt,
+                                                            long now, long lastProgressAt,
+                                                            Duration baseTimeout, Duration hardLimit,
+                                                            Deque<String> tail) {
+        String captured = snapshot(tail);
+        Duration waited = Duration.ofNanos(now - startedAt);
+        Duration silent = Duration.ofNanos(now - lastProgressAt);
+        return new GatewayStartupException(
+                "Gateway startup failed: readiness timeout. The process was still running but had"
+                        + " not announced a bound port after "
+                        + GatewayStartupException.describe(waited)
+                        + " (base budget " + GatewayStartupException.describe(baseTimeout)
+                        + ", hard limit " + GatewayStartupException.describe(hardLimit)
+                        + "; no new output for " + GatewayStartupException.describe(silent)
+                        + "). " + description + ". This is a startup failure, not a contract"
+                        + " assertion result."
+                        + GatewayStartupException.renderOutput(captured),
+                GatewayStartupException.Failure.READINESS_TIMEOUT, waited, captured, null);
+    }
+
+    private static void awaitDrainers(Thread... drainers) {
+        for (Thread drainer : drainers) {
+            try {
+                drainer.join(2_000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
     }
 
     private static Path ensureInstalled(Path repositoryRoot) throws Exception {

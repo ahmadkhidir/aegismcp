@@ -146,6 +146,9 @@ public final class GatewayHarness implements AutoCloseable {
             if (slackWebhook != null) {
                 slackWebhook.close();
             }
+            // A startup failure must not leave the generated TLS material, policy, or identity
+            // fixtures behind, even though no harness instance exists to close them.
+            deleteRecursively(workDirectory);
             throw e;
         }
 
