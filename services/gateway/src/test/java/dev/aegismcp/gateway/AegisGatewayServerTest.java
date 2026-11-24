@@ -53,10 +53,12 @@ class AegisGatewayServerTest {
                 .connectTimeout(Duration.ofSeconds(2))
                 .build();
 
+        // Generous client timeout: the first request pays Netty's one-time class loading, which is
+        // not part of the liveness signal this test asserts.
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create("http://127.0.0.1:" + server.getPort() + "/health"))
                 .GET()
-                .timeout(Duration.ofSeconds(2))
+                .timeout(Duration.ofSeconds(15))
                 .build();
 
         HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());

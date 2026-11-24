@@ -7,6 +7,7 @@ import dev.aegismcp.gateway.anomaly.AnomalyRule;
 import dev.aegismcp.gateway.anomaly.ToolChainingAnomalyInterceptor;
 import dev.aegismcp.gateway.approval.ApprovalManagementHandler;
 import dev.aegismcp.gateway.approval.ApprovalManager;
+import dev.aegismcp.gateway.approval.ApprovalNotificationConfig;
 import dev.aegismcp.gateway.audit.AuditLedger;
 import dev.aegismcp.gateway.audit.AuditRecord;
 import dev.aegismcp.gateway.audit.AuditRecordsHandler;
@@ -117,7 +118,7 @@ import java.util.concurrent.TimeUnit;
  * matches no owned path is answered {@code 404} rather than a fallback success body.
  *
  * <p>Anchors: FEAT-001, FEAT-002, FEAT-004, FEAT-005, FEAT-006, FEAT-007, FEAT-008, FEAT-009,
- * FEAT-012, NFR-001, NFR-005, NFR-021, NFR-027, C-001, C-002, C-009, C-010.
+ * FEAT-012, NFR-001, NFR-005, NFR-010, NFR-021, NFR-027, C-001, C-002, C-009, C-010.
  */
 public class AegisGatewayServer {
 
@@ -173,7 +174,9 @@ public class AegisGatewayServer {
 
     /**
      * Builds the shipped gateway from validated operator configuration. Every request-path class is
-     * constructed here; nothing else binds a port or assembles a handler chain.
+     * constructed here; nothing else binds a port or assembles a handler chain. A configuration
+     * that is not explicitly probe-only must be complete; an incomplete one fails startup naming
+     * every missing key instead of booting a partially served node (NFR-010, NFR-027).
      */
     public AegisGatewayServer(GatewayConfiguration configuration) {
         this(configuration,
@@ -181,12 +184,11 @@ public class AegisGatewayServer {
                 true,
                 new AuditLedger(),
                 new PolicyCache(),
-                new ApprovalManager(configuration.approvalTtl()),
+                new ApprovalManager(configuration.approvalTtl(), configuration.approvals()),
                 new KillSwitchManager(),
                 new GatewayMetrics(),
                 null,
-                true,
-                true);
+                !configuration.probeOnly());
     }
 
     /**
@@ -203,11 +205,11 @@ public class AegisGatewayServer {
                 true,
                 new AuditLedger(),
                 new PolicyCache(),
-                new ApprovalManager(GatewayConfiguration.DEFAULT_APPROVAL_TTL),
+                new ApprovalManager(GatewayConfiguration.DEFAULT_APPROVAL_TTL,
+                        ApprovalNotificationConfig.none()),
                 new KillSwitchManager(),
                 new GatewayMetrics(),
                 null,
-                false,
                 false);
     }
 
@@ -236,7 +238,6 @@ public class AegisGatewayServer {
                 killSwitchManager,
                 gatewayMetrics,
                 complianceReportEngine,
-                false,
                 false);
     }
 
@@ -250,8 +251,7 @@ public class AegisGatewayServer {
             KillSwitchManager killSwitchManager,
             GatewayMetrics gatewayMetrics,
             ComplianceReportEngine complianceReportEngine,
-            boolean assembleRequestPath,
-            boolean productionMode
+            boolean assembleRequestPath
     ) {
         this.configuration = Objects.requireNonNull(configuration, "configuration must not be null");
         this.host = configuration.host();
@@ -339,18 +339,20 @@ public class AegisGatewayServer {
             this.mcpProxyHandler = null;
         }
 
-        if (productionMode && !configuration.rpcConfigured()) {
-            logger.warn("Gateway started without a complete serving configuration; missing: {}. "
-                            + "Probes answer but readiness reports CONFIGURATION_INVALID and agent calls fail closed.",
-                    configuration.missingOptionalSettings());
+        if (configuration.probeOnly()) {
+            // Probe-only is the one deployment allowed to omit the serving configuration. The
+            // readiness contract reports it as an unhealthy configuration dependency, and no
+            // agent request path is attached, so every agent call fails closed (C-023, NFR-027).
             readiness.markDependencyUnhealthy(GatewayReadiness.Dependency.CONFIGURATION);
+            logger.info("Gateway is probe-only ({}); serving /health and /ready only, "
+                    + "every agent request is refused", GatewayConfiguration.PROBE_ONLY_ENV);
         }
     }
 
     /**
      * Starts the Netty listener on the configured host and port. TLS is installed when the
-     * configuration supplies a keystore; otherwise the listener is probe-only and readiness reports
-     * the configuration as incomplete.
+     * configuration supplies a keystore. A probe-only configuration serves the health and readiness
+     * probes only; a serving configuration was validated before any listener is bound.
      */
     public synchronized void start() throws InterruptedException {
         if (running) {

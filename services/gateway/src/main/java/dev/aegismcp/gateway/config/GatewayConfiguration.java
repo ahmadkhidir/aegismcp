@@ -3,6 +3,7 @@ package dev.aegismcp.gateway.config;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import dev.aegismcp.gateway.approval.ApprovalNotificationConfig;
 import dev.aegismcp.gateway.proxy.UpstreamTransport;
 
 import java.io.IOException;
@@ -30,15 +31,24 @@ import java.util.Set;
  * {@link #local(String, int)} (the in-process default used by the probe and unit-test seam: no
  * upstream, no identity provider, no policy document, every agent request fails closed).
  *
- * <p>Anchors: FEAT-001, FEAT-009, NFR-021, NFR-027.
+ * <p>A gateway that is not explicitly probe-only must carry every setting an agent-facing proxy
+ * needs — a TLS listener (or an explicit {@code AEGIS_TLS_ENABLED=false}), an upstream, an identity
+ * provider, and a policy document. When one is absent, startup fails with one error naming every
+ * missing key; no development default is substituted (NFR-010, NFR-027). Probe-only mode
+ * ({@value #PROBE_ONLY_ENV}) is the only way to boot without them, and it serves the health and
+ * readiness probes only.
+ *
+ * <p>Anchors: FEAT-001, FEAT-009, NFR-010, NFR-021, NFR-027.
  */
 public record GatewayConfiguration(
         String host,
         int port,
+        boolean probeOnly,
         Tls tls,
         Upstream upstream,
         Identity identity,
         Path policyDocument,
+        ApprovalNotificationConfig approvals,
         Duration approvalTtl,
         int maxContentLength,
         int velocityThreshold,
@@ -47,6 +57,13 @@ public record GatewayConfiguration(
 
     /** Name of the YAML configuration document environment variable. */
     public static final String CONFIG_FILE_ENV = "AEGIS_GATEWAY_CONFIG";
+
+    /**
+     * Explicit opt-in to a probe-only node: the listener serves {@code GET /health} and
+     * {@code GET /ready}, reports {@code CONFIGURATION_INVALID}, and refuses every agent request.
+     * It is the only deployment that may omit the serving configuration.
+     */
+    public static final String PROBE_ONLY_ENV = "AEGIS_GATEWAY_PROBE_ONLY";
 
     public static final String DEFAULT_HOST = "0.0.0.0";
     public static final int DEFAULT_PORT = 8443;
@@ -63,6 +80,7 @@ public record GatewayConfiguration(
         Objects.requireNonNull(tls, "tls must not be null");
         Objects.requireNonNull(upstream, "upstream must not be null");
         Objects.requireNonNull(identity, "identity must not be null");
+        Objects.requireNonNull(approvals, "approvals must not be null");
         Objects.requireNonNull(approvalTtl, "approvalTtl must not be null");
         if (maxContentLength <= 0) {
             throw new ConfigurationException("limits.maxContentLength must be positive, got " + maxContentLength);
@@ -71,11 +89,45 @@ public record GatewayConfiguration(
             throw new ConfigurationException("limits.velocityThreshold must be positive, got " + velocityThreshold);
         }
         Objects.requireNonNull(velocityWindow, "velocityWindow must not be null");
+
+        if (!probeOnly) {
+            List<String> missing = missingServingSettings(tls, upstream, identity, policyDocument);
+            if (!missing.isEmpty()) {
+                throw new ConfigurationException(
+                        "Gateway serving configuration is incomplete; missing: "
+                                + String.join(", ", missing)
+                                + ". Set " + PROBE_ONLY_ENV + "=true to boot a probe-only node.");
+            }
+        }
     }
 
-    /** TLS listener configuration; {@code enabled} is only true when a keystore was supplied. */
+    /** Names every setting an agent-facing proxy needs that the supplied configuration lacks. */
+    private static List<String> missingServingSettings(
+            Tls tls, Upstream upstream, Identity identity, Path policyDocument) {
+        List<String> missing = new ArrayList<>();
+        if (!tls.servesTraffic()) {
+            missing.add("AEGIS_TLS_KEYSTORE_PATH");
+        }
+        if (!upstream.configured()) {
+            missing.add("AEGIS_UPSTREAM_URL");
+        }
+        if (!identity.configured()) {
+            missing.add("AEGIS_OIDC_JWKS_URL/AEGIS_SPIFFE_TRUST_DOMAINS");
+        }
+        if (policyDocument == null) {
+            missing.add("AEGIS_POLICY_FILE");
+        }
+        return missing;
+    }
+
+    /**
+     * TLS listener configuration; {@code enabled} is only true when a keystore was supplied.
+     * {@code explicitlyDisabled} records an operator's {@code AEGIS_TLS_ENABLED=false}, which is
+     * the only plaintext listener a serving node accepts; an absent TLS setting is not a default.
+     */
     public record Tls(
             boolean enabled,
+            boolean explicitlyDisabled,
             Path keystorePath,
             String keystorePassword,
             String keystoreType,
@@ -105,7 +157,12 @@ public record GatewayConfiguration(
         }
 
         public static Tls disabled() {
-            return new Tls(false, null, null, "PKCS12", null, null, null, ClientAuth.NONE);
+            return new Tls(false, false, null, null, "PKCS12", null, null, null, ClientAuth.NONE);
+        }
+
+        /** True when the listener is configured to serve: TLS enabled, or plaintext explicitly chosen. */
+        public boolean servesTraffic() {
+            return enabled || explicitlyDisabled;
         }
     }
 
@@ -208,15 +265,21 @@ public record GatewayConfiguration(
         }
     }
 
-    /** Configuration for an in-process gateway: probe endpoints only, every agent call fails closed. */
+    /**
+     * Configuration for an in-process probe-only gateway: health and readiness only, every agent
+     * call fails closed. The probe and unit-test seams use it instead of relying on an absent
+     * serving configuration.
+     */
     public static GatewayConfiguration local(String host, int port) {
         return new GatewayConfiguration(
                 host,
                 port,
+                true,
                 Tls.disabled(),
                 Upstream.none(),
                 Identity.none(),
                 null,
+                ApprovalNotificationConfig.none(),
                 DEFAULT_APPROVAL_TTL,
                 DEFAULT_MAX_CONTENT_LENGTH,
                 DEFAULT_VELOCITY_THRESHOLD,
@@ -240,43 +303,43 @@ public record GatewayConfiguration(
         if (configFile != null && !configFile.isBlank()) {
             document = readYaml(Path.of(configFile));
         }
-        return resolve(new Lookup(environment, document));
+        // Approval destinations are part of the gateway configuration and are validated in the
+        // same startup pass, so a half-configured channel fails here rather than inside the
+        // approval manager after the listener is already accepting connections (FEAT-006).
+        ApprovalNotificationConfig approvals = ApprovalNotificationConfig.load(environment);
+        return resolve(new Lookup(environment, document), approvals);
     }
 
     /** True when the configuration supplies what an agent-facing proxy needs to serve traffic. */
     public boolean rpcConfigured() {
-        return tls.enabled() && upstream.configured() && identity.configured() && policyDocument != null;
+        return !probeOnly && tls.servesTraffic() && upstream.configured()
+                && identity.configured() && policyDocument != null;
     }
 
-    /** Names the settings that are absent, for a single startup warning rather than a crash. */
-    public List<String> missingOptionalSettings() {
-        List<String> missing = new ArrayList<>();
-        if (!upstream.configured()) {
-            missing.add("AEGIS_UPSTREAM_URL");
+    /** Names every serving setting that is absent, in the order a startup error reports them. */
+    public List<String> missingServingSettings() {
+        if (probeOnly) {
+            return List.of();
         }
-        if (!identity.configured()) {
-            missing.add("AEGIS_OIDC_JWKS_URL/AEGIS_SPIFFE_TRUST_DOMAINS");
-        }
-        if (policyDocument == null) {
-            missing.add("AEGIS_POLICY_FILE");
-        }
-        if (!tls.enabled()) {
-            missing.add("AEGIS_TLS_KEYSTORE_PATH");
-        }
-        return missing;
+        return missingServingSettings(tls, upstream, identity, policyDocument);
     }
 
-    private static GatewayConfiguration resolve(Lookup lookup) {
+    private static GatewayConfiguration resolve(
+            Lookup lookup, ApprovalNotificationConfig approvals) {
         String host = lookup.text("AEGIS_GATEWAY_HOST", "gateway.host", DEFAULT_HOST);
         int port = lookup.integer("AEGIS_GATEWAY_PORT", "gateway.port", DEFAULT_PORT);
+        boolean probeOnly = lookup.bool(PROBE_ONLY_ENV, "gateway.probeOnly", false);
 
         Path keystore = lookup.path("AEGIS_TLS_KEYSTORE_PATH", "tls.keystore");
+        String tlsEnabledSetting = lookup.text("AEGIS_TLS_ENABLED", "tls.enabled", null);
+        boolean tlsExplicitlyDisabled = "false".equalsIgnoreCase(tlsEnabledSetting);
         boolean tlsEnabled = lookup.bool("AEGIS_TLS_ENABLED", "tls.enabled", keystore != null);
         Path truststore = lookup.path("AEGIS_TLS_TRUSTSTORE_PATH", "tls.truststore");
         ClientAuth clientAuth = parseClientAuth(lookup.text("AEGIS_TLS_CLIENT_AUTH", "tls.clientAuth",
                 truststore != null ? "OPTIONAL" : "NONE"));
         Tls tls = new Tls(
                 tlsEnabled,
+                tlsExplicitlyDisabled,
                 keystore,
                 lookup.text("AEGIS_TLS_KEYSTORE_PASSWORD", "tls.keystorePassword", null),
                 lookup.text("AEGIS_TLS_KEYSTORE_TYPE", "tls.keystoreType", "PKCS12"),
@@ -326,10 +389,12 @@ public record GatewayConfiguration(
         return new GatewayConfiguration(
                 host,
                 port,
+                probeOnly,
                 tls,
                 upstream,
                 identity,
                 policyDocument,
+                approvals,
                 approvalTtl,
                 lookup.integer("AEGIS_MAX_CONTENT_LENGTH", "limits.maxContentLength", DEFAULT_MAX_CONTENT_LENGTH),
                 lookup.integer("AEGIS_VELOCITY_THRESHOLD", "limits.velocityThreshold", DEFAULT_VELOCITY_THRESHOLD),

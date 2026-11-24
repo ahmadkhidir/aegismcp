@@ -19,10 +19,10 @@ class C022HealthContractTest extends ArtifactTest {
     @Test
     @DisplayName("C-022: answers the liveness probe while dependencies are down")
     void answersLivenessProbeWhileDependenciesAreDown() throws Exception {
-        // The gateway is configured without an upstream, so the dependency state is degraded while
-        // the process still serves requests. Liveness must not reflect that.
+        // A probe-only node carries no serving configuration, so its dependency state is degraded
+        // while the process still serves requests. Liveness must not reflect that.
         try (GatewayHarness harness = start(dev.aegismcp.e2e.fixtures.GatewayOptions.defaults()
-                .upstreamConfigured(false))) {
+                .probeOnly(true))) {
             HttpResponse<String> response = harness.get("/health", null);
             ContractAssertions.assertStatus(200, response);
             JsonNode body = GatewayHarness.json(response);

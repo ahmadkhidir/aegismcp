@@ -57,6 +57,8 @@ public final class GatewayOptions {
     public boolean upstreamConfigured = true;
     public boolean policyConfigured = true;
     public boolean tlsEnabled = true;
+    /** Explicit probe-only node: no serving settings, /health and /ready only. */
+    public boolean probeOnly = false;
 
     public static GatewayOptions defaults() {
         return new GatewayOptions();
@@ -94,6 +96,11 @@ public final class GatewayOptions {
 
     public GatewayOptions tlsEnabled(boolean value) {
         this.tlsEnabled = value;
+        return this;
+    }
+
+    public GatewayOptions probeOnly(boolean value) {
+        this.probeOnly = value;
         return this;
     }
 }

@@ -29,7 +29,7 @@ class C023ReadinessContractTest extends ArtifactTest {
         assertEquals("UP", body.path("checks").path("auditLedger").path("status").asText());
         ContractAssertions.assertIso8601(body.path("timestamp").asText(), "timestamp");
 
-        try (GatewayHarness degraded = start(GatewayOptions.defaults().upstreamConfigured(false))) {
+        try (GatewayHarness degraded = start(GatewayOptions.defaults().probeOnly(true))) {
             HttpResponse<String> down = degraded.get("/ready", null);
             ContractAssertions.assertStatus(503, down);
             JsonNode downBody = GatewayHarness.json(down);
