@@ -96,5 +96,38 @@ class AuditRecordTest {
         assertEquals(original.getLatencyMs(), deserialized.getLatencyMs());
         assertEquals(original.getPayloadSummary(), deserialized.getPayloadSummary());
         assertEquals(original.getRecordHash(), deserialized.getRecordHash());
+        assertEquals(original.getArgumentsHash(), deserialized.getArgumentsHash());
+        assertNull(deserialized.getReviewedBy());
+    }
+
+    @Test
+    @DisplayName("C-013: the sealed reviewer and arguments digest survive serialization and stay bound to the hash")
+    void testSealedReviewFieldsRoundTripAndAlterTheHash() throws Exception {
+        String argumentsHash = ArgumentDigest.of(mapper.readTree("{\"environment\":\"production\"}"));
+        AuditRecord approved = AuditRecord.create("agent-deploy", "deploy_prod", "allow", 0, 2.0,
+                "status=200", argumentsHash, "operator@aegis.test");
+
+        assertTrue(approved.getRecordHash().matches("[0-9a-f]{64}"));
+        assertEquals(argumentsHash, approved.getArgumentsHash());
+        assertEquals("operator@aegis.test", approved.getReviewedBy());
+
+        AuditRecord deserialized = mapper.readValue(mapper.writeValueAsString(approved), AuditRecord.class);
+        assertEquals("operator@aegis.test", deserialized.getReviewedBy());
+        assertEquals(argumentsHash, deserialized.getArgumentsHash());
+        assertEquals(approved.getRecordHash(), deserialized.getRecordHash());
+
+        // The same interaction without a reviewer is a different sealed record.
+        AuditRecord unreviewed = AuditRecord.create("agent-deploy", "deploy_prod", "allow", 0, 2.0,
+                "status=200", argumentsHash, null);
+        assertNotEquals(approved.getRecordHash(), unreviewed.getRecordHash());
+        assertNull(unreviewed.getReviewedBy());
+
+        // A different arguments digest is a different sealed record too.
+        AuditRecord otherArguments = AuditRecord.of(approved.getRecordId(), approved.getTimestamp(),
+                approved.getAgentId(), approved.getToolName(), approved.getDecision(),
+                approved.getRedactionCount(), approved.getLatencyMs(), approved.getPayloadSummary(),
+                ArgumentDigest.of(mapper.readTree("{\"environment\":\"staging\"}")),
+                approved.getReviewedBy());
+        assertNotEquals(approved.getRecordHash(), otherArguments.getRecordHash());
     }
 }

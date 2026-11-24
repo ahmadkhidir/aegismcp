@@ -31,10 +31,29 @@ public interface ToolCallInterceptor {
                     JsonRpcRequest reqToUse = verdict instanceof InterceptionVerdict.Modify m
                             ? m.modifiedRequest()
                             : request;
-                    return interceptor.intercept(context, reqToUse);
+                    return interceptor.intercept(context, reqToUse)
+                            .thenApply(next -> carryReviewer(next, verdict.reviewedBy()));
                 });
             }
             return future;
         };
+    }
+
+    /**
+     * An approval decision belongs to the interaction, not to the stage that produced it: a stage
+     * that runs after policy must not erase the reviewer the suspended call was released with
+     * (FEAT-006, C-013). A later verdict that carries its own reviewer keeps it.
+     */
+    private static InterceptionVerdict carryReviewer(InterceptionVerdict verdict, String reviewedBy) {
+        if (reviewedBy == null || verdict.reviewedBy() != null) {
+            return verdict;
+        }
+        if (verdict instanceof InterceptionVerdict.Block block) {
+            return InterceptionVerdict.block(block.error(), reviewedBy);
+        }
+        if (verdict instanceof InterceptionVerdict.Allow) {
+            return InterceptionVerdict.allow(reviewedBy);
+        }
+        return verdict;
     }
 }

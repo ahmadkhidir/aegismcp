@@ -2,6 +2,7 @@ package dev.aegismcp.gateway.proxy;
 
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import dev.aegismcp.gateway.audit.ArgumentDigest;
 import dev.aegismcp.gateway.codec.HttpJsonRpcDecoder;
 import dev.aegismcp.gateway.codec.JsonRpcCodec;
 import dev.aegismcp.gateway.codec.JsonRpcCodecException;
@@ -103,14 +104,17 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
     /**
      * Records a terminal outcome of one proxied request. Implementations must not persist the raw
      * tool arguments or response payload (FEAT-007, NFR-023); the summary is the method name, the
-     * verdict, and the HTTP status only.
+     * verdict, and the HTTP status only, while {@code argumentsHash} is the one-way digest of the
+     * canonicalized arguments and {@code reviewedBy} is the verified reviewer when a human decision
+     * applied (C-013, schema.md#AuditBlock).
      */
     @FunctionalInterface
     public interface AuditTrail {
-        void record(String agentId, String toolName, String decision, double latencyMs, String summary);
+        void record(String agentId, String toolName, String decision, double latencyMs,
+                    String summary, String argumentsHash, String reviewedBy);
 
         static AuditTrail noop() {
-            return (agentId, toolName, decision, latencyMs, summary) -> {
+            return (agentId, toolName, decision, latencyMs, summary, argumentsHash, reviewedBy) -> {
             };
         }
     }
@@ -205,6 +209,11 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
 
     private void executeInterceptionPipeline(ChannelHandlerContext ctx, SecurityContext securityContext,
                                             JsonRpcRequest rpcRequest, boolean keepAlive, long startedAt) {
+        // The digest is sealed with the decision, so the arguments themselves are never stored
+        // (C-013, schema.md#AuditBlock). A resources/read is digested through the same projection
+        // the chain evaluates, which is where its resource parameters live.
+        String argumentsHash = ArgumentDigest.of(
+                PolicyBearingMethods.toChainRequest(rpcRequest).toolArguments());
         if (PolicyBearingMethods.isPolicyBearing(rpcRequest)) {
             // C-001 makes exactly tools/call and resources/read policy-bearing, and both take the
             // whole chain: identity at the edge, parameter validation, policy (which may suspend for
@@ -216,6 +225,11 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
             boolean projected = !rpcRequest.isToolCall();
             logger.debug("Intercepting policy-bearing MCP method: {} for agent: {}",
                     PolicyBearingMethods.policyTarget(rpcRequest), securityContext.identity().agentId());
+
+            // Set by the verdict that leaves the interception chain; an approval decision carries
+            // the verified reviewer, every automatic outcome leaves it null (FEAT-006).
+            java.util.concurrent.atomic.AtomicReference<String> reviewedBy =
+                    new java.util.concurrent.atomic.AtomicReference<>();
 
             interceptor.intercept(securityContext, chainRequest)
                     // An approval deadline is an interception outcome (C-001 408), not an upstream
@@ -233,6 +247,7 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
                         throw new java.util.concurrent.CompletionException(cause);
                     })
                     .thenCompose(verdict -> {
+                        reviewedBy.set(verdict.reviewedBy());
                         if (verdict instanceof InterceptionVerdict.Block block) {
                             JsonRpcResponse errorResponse = JsonRpcResponse.error(rpcRequest.id(), block.error());
                             return CompletableFuture.completedFuture(errorResponse);
@@ -256,19 +271,22 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
                         return upstreamClient.forward(securityContext, modify.modifiedRequest());
                     })
                     .whenComplete((response, throwable) -> handlePipelineResult(
-                            ctx, securityContext, rpcRequest, response, throwable, keepAlive, startedAt));
+                            ctx, securityContext, rpcRequest, response, throwable, keepAlive, startedAt,
+                            argumentsHash, reviewedBy.get()));
         } else {
             // A method C-001 does not make policy-bearing (initialize, tools/list, ping) passes
             // directly to the upstream server without a policy decision.
             upstreamClient.forward(securityContext, rpcRequest)
                     .whenComplete((response, throwable) -> handlePipelineResult(
-                            ctx, securityContext, rpcRequest, response, throwable, keepAlive, startedAt));
+                            ctx, securityContext, rpcRequest, response, throwable, keepAlive, startedAt,
+                            argumentsHash, null));
         }
     }
 
     private void handlePipelineResult(ChannelHandlerContext ctx, SecurityContext securityContext,
                                        JsonRpcRequest rpcRequest, JsonRpcResponse response,
-                                       Throwable throwable, boolean keepAlive, long startedAt) {
+                                       Throwable throwable, boolean keepAlive, long startedAt,
+                                       String argumentsHash, String reviewedBy) {
         String agentId = securityContext.identity().agentId();
         String toolName = rpcRequest.toolName() != null ? rpcRequest.toolName() : rpcRequest.method();
 
@@ -278,12 +296,14 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
             // Every upstream crash, disconnect, refused exchange, malformed answer, or deadline
             // maps to the C-001 502 row with -32603 and machine code UPSTREAM_UNAVAILABLE.
             if (isUpstreamFailure(cause)) {
-                audit(agentId, toolName, "UPSTREAM_UNAVAILABLE", startedAt, "status=502");
+                audit(agentId, toolName, "UPSTREAM_UNAVAILABLE", startedAt, "status=502",
+                        argumentsHash, reviewedBy);
                 sendError(ctx, rpcRequest.id(),
                         JsonRpcError.upstreamUnavailable("The upstream MCP server did not answer"),
                         HttpResponseStatus.BAD_GATEWAY, keepAlive);
             } else {
-                audit(agentId, toolName, "INTERNAL_ERROR", startedAt, "status=500");
+                audit(agentId, toolName, "INTERNAL_ERROR", startedAt, "status=500",
+                        argumentsHash, reviewedBy);
                 sendError(ctx, rpcRequest.id(),
                         JsonRpcError.internalError("The gateway could not complete the request"),
                         HttpResponseStatus.INTERNAL_SERVER_ERROR, keepAlive);
@@ -292,7 +312,8 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
         }
 
         if (response == null) {
-            audit(agentId, toolName, "INTERNAL_ERROR", startedAt, "status=500");
+            audit(agentId, toolName, "INTERNAL_ERROR", startedAt, "status=500",
+                    argumentsHash, reviewedBy);
             sendError(ctx, rpcRequest.id(),
                     JsonRpcError.internalError("The upstream MCP server returned no response"),
                     HttpResponseStatus.INTERNAL_SERVER_ERROR, keepAlive);
@@ -320,7 +341,7 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
         }
 
         audit(agentId, toolName, responseWithMatchingId.isError() ? "BLOCKED" : "ALLOWED", startedAt,
-                "status=" + status.code());
+                "status=" + status.code(), argumentsHash, reviewedBy);
         sendResponse(ctx, responseWithMatchingId, status, keepAlive);
     }
 
@@ -346,9 +367,14 @@ public class McpProxyHandler extends SimpleChannelInboundHandler<FullHttpRequest
     }
 
     private void audit(String agentId, String toolName, String decision, long startedAt, String summary) {
+        audit(agentId, toolName, decision, startedAt, summary, ArgumentDigest.of(null), null);
+    }
+
+    private void audit(String agentId, String toolName, String decision, long startedAt, String summary,
+                       String argumentsHash, String reviewedBy) {
         double latencyMs = (System.nanoTime() - startedAt) / 1_000_000.0;
         try {
-            auditTrail.record(agentId, toolName, decision, latencyMs, summary);
+            auditTrail.record(agentId, toolName, decision, latencyMs, summary, argumentsHash, reviewedBy);
         } catch (RuntimeException e) {
             // An audit sink failure must never turn into a client-visible success or an unhandled
             // pipeline error; the ledger append reports its own failures.

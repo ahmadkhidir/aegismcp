@@ -103,7 +103,7 @@ class McpProxyHandlerPolicyBearingTest {
     }
 
     private McpProxyHandler.AuditTrail auditTrail() {
-        return (agentId, toolName, decision, latencyMs, summary) ->
+        return (agentId, toolName, decision, latencyMs, summary, argumentsHash, reviewedBy) ->
                 audits.add(agentId + "|" + toolName + "|" + decision + "|" + summary);
     }
 

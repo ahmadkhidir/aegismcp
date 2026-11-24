@@ -538,14 +538,17 @@ public class AegisGatewayServer {
     }
 
     private McpProxyHandler.AuditTrail buildAuditTrail() {
-        return (agentId, toolName, decision, latencyMs, summary) -> auditLedger.append(
-                AuditRecord.create(
-                        agentId != null ? agentId : "unauthenticated",
-                        toolName != null ? toolName : "mcp/rpc",
-                        decision,
-                        0,
-                        latencyMs,
-                        summary != null ? summary : ""));
+        return (agentId, toolName, decision, latencyMs, summary, argumentsHash, reviewedBy) ->
+                auditLedger.append(
+                        AuditRecord.create(
+                                agentId != null ? agentId : "unauthenticated",
+                                toolName != null ? toolName : "mcp/rpc",
+                                decision,
+                                0,
+                                latencyMs,
+                                summary != null ? summary : "",
+                                argumentsHash,
+                                reviewedBy));
     }
 
     private void loadPolicyDocument(GatewayConfiguration configuration) {

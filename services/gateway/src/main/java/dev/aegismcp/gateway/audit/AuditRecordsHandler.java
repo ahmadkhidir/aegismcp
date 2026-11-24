@@ -190,18 +190,21 @@ public class AuditRecordsHandler extends SimpleChannelInboundHandler<FullHttpReq
                     continue;
                 }
                 if (matches(query, block, record, decision)) {
+                    // The arguments digest and the resolving reviewer are sealed on the record
+                    // itself, so the query repeats them instead of deriving or joining anything
+                    // (C-013, schema.md#AuditBlock). The raw arguments are never stored.
                     result.add(new AuditRecordDto(
                             block.getBlockIndex(),
                             block.getBlockHash(),
                             block.getParentHash(),
                             record.getAgentId(),
                             record.getToolName(),
-                            sha256Hex(record.getPayloadSummary()),
+                            record.getArgumentsHash(),
                             decision,
                             record.getRedactionCount(),
                             record.getLatencyMs(),
                             record.getTimestamp(),
-                            null
+                            record.getReviewedBy()
                     ));
                 }
             }
@@ -255,10 +258,6 @@ public class AuditRecordsHandler extends SimpleChannelInboundHandler<FullHttpReq
         // Administrative action entries are sealed in the same chain but are not tool
         // interactions; the query excludes them (C-013).
         return null;
-    }
-
-    private static String sha256Hex(String value) {
-        return HashUtils.sha256Hex(value != null ? value : "");
     }
 
     private static String bearerToken(FullHttpRequest request) {
