@@ -10,9 +10,21 @@ docs
 contracts
 assets
 
-# Local environment, secrets, and host state
+# Local environment, secrets, and host state. `.env`/`.env.*` match at the context root only, so
+# the nested files (for example the compose stack's generated credentials) are excluded by their
+# own patterns; no environment file or key material enters the build context (NFR-023, NFR-028).
 .env
 .env.*
+**/.env
+**/.env.*
+**/*.jks
+**/*.p12
+**/*.pfx
+**/*.pem
+**/*.key
+**/*.crt
+**/*.p8
+**/secrets/
 local.properties
 *.log
 *.hprof

@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# build-image - build the gateway image, write its SBOM, and gate the build on the vulnerability
+# policy in NFR-028.
+#
+# The script is the supported image build path. It:
+#   1. builds infra/docker/Dockerfile from the repository root, stamping the OCI revision and
+#      version labels from the checkout;
+#   2. saves the image and writes an SPDX JSON SBOM next to this file;
+#   3. scans the image and exits non-zero when a CRITICAL or HIGH vulnerability is present or any
+#      embedded secret is found, so no image passes the gate while it violates NFR-028 or bakes a
+#      credential into a layer (NFR-023).
+#
+# The scanner is the version- and digest-pinned Trivy image NFR-028 names, so a workstation, CI,
+# and a release host run the same scanner bytes (infra/AGENTS.md "Supply chain"). Both runs share
+# one cache directory inside the temporary work directory, so the vulnerability database downloads
+# once per build.
+#
+# Usage: infra/docker/build-image [image-ref]
+#   image-ref        tag to build, default aegismcp-gateway:local
+# Environment:
+#   AEGIS_IMAGE_REF  same as the argument
+#   AEGIS_SBOM_PATH  SBOM destination, default infra/docker/build/aegismcp-gateway.spdx.json
+#
+# Exit status: 0 when the image builds and the gate passes, 1 otherwise.
+
+set -uo pipefail
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$script_dir/../.." && pwd)
+
+image_ref=${1:-${AEGIS_IMAGE_REF:-aegismcp-gateway:local}}
+sbom_path=${AEGIS_SBOM_PATH:-$script_dir/build/aegismcp-gateway.spdx.json}
+
+# Trivy 0.76.2, pinned by digest so the gate cannot change under a moving tag (NFR-028).
+trivy_image="aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb"
+
+fail() {
+    printf 'build-image: %s\n' "$*" >&2
+    exit 1
+}
+
+command -v docker >/dev/null 2>&1 || fail "docker is not on PATH"
+
+revision=$(git -C "$repo_root" rev-parse HEAD 2>/dev/null) || revision=unknown
+version=$(git -C "$repo_root" describe --tags --always 2>/dev/null) || version=unknown
+if [ -n "$(git -C "$repo_root" status --porcelain 2>/dev/null)" ]; then
+    version="$version-dirty"
+fi
+
+work_dir=$(mktemp -d 2>/dev/null) || fail "cannot create a temporary directory"
+archive="$work_dir/image.tar"
+
+cleanup() {
+    rm -rf "$work_dir"
+}
+trap cleanup EXIT
+
+# Docker Desktop and Git Bash hand docker.exe a Windows path; on Linux the POSIX path is used
+# as-is.
+mount_dir=$work_dir
+if command -v cygpath >/dev/null 2>&1; then
+    mount_dir=$(cygpath -w "$work_dir")
+fi
+
+printf 'build-image: building %s (revision %s, version %s)\n' "$image_ref" "$revision" "$version"
+docker build \
+    -f "$script_dir/Dockerfile" \
+    --build-arg "BUILD_REVISION=$revision" \
+    --build-arg "BUILD_VERSION=$version" \
+    -t "$image_ref" \
+    "$repo_root" || fail "the image build failed"
+
+printf 'build-image: saving the image for the scanner\n'
+docker save -o "$archive" "$image_ref" || fail "docker save failed"
+
+mkdir -p "$(dirname -- "$sbom_path")"
+
+printf 'build-image: writing the SBOM to %s\n' "${sbom_path#"$repo_root"/}"
+docker run --rm -v "$mount_dir:/scan" "$trivy_image" image \
+    --input /scan/image.tar \
+    --cache-dir /scan/trivy-cache \
+    --format spdx-json \
+    --output /scan/sbom.spdx.json \
+    --timeout 30m \
+    --quiet || fail "the SBOM could not be generated"
+cp "$work_dir/sbom.spdx.json" "$sbom_path" || fail "the SBOM could not be copied to $sbom_path"
+
+printf 'build-image: scanning for CRITICAL/HIGH vulnerabilities\n'
+docker run --rm -v "$mount_dir:/scan" "$trivy_image" image \
+    --input /scan/image.tar \
+    --cache-dir /scan/trivy-cache \
+    --scanners vuln \
+    --severity CRITICAL,HIGH \
+    --exit-code 1 \
+    --timeout 30m || fail "the image violates the NFR-028 vulnerability policy"
+
+printf 'build-image: scanning for embedded secrets in any layer\n'
+docker run --rm -v "$mount_dir:/scan" "$trivy_image" image \
+    --input /scan/image.tar \
+    --cache-dir /scan/trivy-cache \
+    --scanners secret \
+    --exit-code 1 \
+    --timeout 30m || fail "the image bakes a credential into a layer (NFR-023)"
+
+printf 'build-image: %s passed the gate; SBOM at %s\n' "$image_ref" "${sbom_path#"$repo_root"/}"
