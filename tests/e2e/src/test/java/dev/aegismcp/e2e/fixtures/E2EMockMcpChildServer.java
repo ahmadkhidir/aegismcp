@@ -1,4 +1,4 @@
-package dev.aegismcp.e2e;
+package dev.aegismcp.e2e.fixtures;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
