@@ -40,7 +40,7 @@ class PolicyManagementHandlerTest {
     void setUp() {
         cache = new PolicyCache();
         handler = new PolicyManagementHandler(cache, PolicyCompiler.getInstance(), mapper,
-                (method, bearerToken) -> {
+                (path, method, bearerToken) -> {
                     if (bearerToken == null || bearerToken.isBlank()) {
                         return PolicyManagementHandler.PolicyAuthorizer.AuthResult
                                 .unauthenticated("Missing authentication credentials");

@@ -30,15 +30,15 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Netty HTTP handler for the declarative policy management contracts C-005, C-006, C-017, and
- * C-018. Serves the policy catalogue, the publish path, and the active-document read and
- * activation paths.
+ * Netty HTTP handler for the declarative policy management contracts C-005, C-006, C-012, C-017,
+ * and C-018. Serves the policy catalogue, the publish path, the active-document read and
+ * activation paths, and the simulation path.
  *
  * <p>Every request is authenticated through the injected authorizer built from the verified OIDC
  * token; a missing or invalid token is {@code 401}, a verified principal without the contract
  * role is {@code 403}. No decision is taken from a caller-supplied header.
  *
- * <p>Anchors: FEAT-002, FEAT-008, C-005, C-006, C-017, C-018, NFR-029.
+ * <p>Anchors: FEAT-002, FEAT-008, C-005, C-006, C-012, C-017, C-018, NFR-029.
  */
 @ChannelHandler.Sharable
 public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
@@ -60,13 +60,15 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
     private final PolicyEvaluator policyEvaluator;
 
     /**
-     * Authenticates and authorizes a caller of a policy management endpoint. The HTTP method
-     * selects the contract role set: readable paths accept {@code admin}, {@code operator}, or
-     * {@code auditor}, while publishing and activation require {@code admin}.
+     * Authenticates and authorizes a caller of a policy management endpoint. Authorization is a
+     * function of the request path and method, because two POST paths carry different role sets:
+     * readable paths accept {@code admin}, {@code operator}, or {@code auditor} (C-005, C-017),
+     * publishing and activation require {@code admin} (C-006, C-018), and simulation accepts
+     * {@code admin} or {@code operator} (C-012).
      */
     @FunctionalInterface
     public interface PolicyAuthorizer {
-        AuthResult check(HttpMethod method, String bearerToken);
+        AuthResult check(String path, HttpMethod method, String bearerToken);
 
         record AuthResult(boolean authorized, boolean forbidden, String errorReason) {
             public static AuthResult allow() {
@@ -123,7 +125,7 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
             String bearerToken = bearerToken(request);
             PolicyAuthorizer.AuthResult authResult;
             try {
-                authResult = authorizer.check(request.method(), bearerToken);
+                authResult = authorizer.check(path, request.method(), bearerToken);
             } catch (RuntimeException e) {
                 logger.warn("Policy authorization failed closed: {}", e.getMessage());
                 authResult = PolicyAuthorizer.AuthResult.unauthenticated("Invalid or missing credentials");
@@ -417,6 +419,12 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
         sendJson(ctx, HttpResponseStatus.OK, activated, keepAlive);
     }
 
+    /**
+     * Answers the C-012 verdict for a sample invocation, evaluated against the same compiled policy
+     * live traffic uses, without dispatching the call upstream. The body must be a JSON object whose
+     * {@code agentId} and {@code toolName} are strings and whose {@code arguments} is an object; any
+     * other shape is the contract's 400 row.
+     */
     private void handleSimulatePolicy(ChannelHandlerContext ctx, FullHttpRequest request, boolean keepAlive) {
         byte[] bytes = readBody(request);
         if (bytes.length == 0) {
@@ -425,21 +433,44 @@ public class PolicyManagementHandler extends SimpleChannelInboundHandler<FullHtt
             return;
         }
 
-        PolicyDto.SimulatePolicyRequest simRequest;
+        JsonNode document;
         try {
-            simRequest = jsonMapper.readValue(bytes, PolicyDto.SimulatePolicyRequest.class);
+            document = jsonMapper.readTree(bytes);
         } catch (Exception e) {
             sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
                     new PolicyDto.ErrorResponse("Invalid JSON payload"), keepAlive);
             return;
         }
+        if (document == null || !document.isObject()) {
+            sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
+                    new PolicyDto.ErrorResponse(
+                            "Invalid simulation payload: the body must be a JSON object"),
+                    keepAlive);
+            return;
+        }
 
-        if (simRequest.agentId() == null || simRequest.agentId().isBlank()
-                || simRequest.toolName() == null || simRequest.toolName().isBlank()) {
+        JsonNode agentId = document.get("agentId");
+        JsonNode toolName = document.get("toolName");
+        if (agentId == null || !agentId.isTextual() || agentId.asText().isBlank()
+                || toolName == null || !toolName.isTextual() || toolName.asText().isBlank()) {
             sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
                     new PolicyDto.ErrorResponse("agentId and toolName are required"), keepAlive);
             return;
         }
+
+        // C-012 declares `arguments` as a required object; an array, a scalar, or an absent field
+        // is the contract's 400 row rather than an empty argument set.
+        JsonNode arguments = document.get("arguments");
+        if (arguments == null || !arguments.isObject()) {
+            sendJson(ctx, HttpResponseStatus.BAD_REQUEST,
+                    new PolicyDto.ErrorResponse(
+                            "Invalid simulation payload: 'arguments' must be a JSON object"),
+                    keepAlive);
+            return;
+        }
+
+        PolicyDto.SimulatePolicyRequest simRequest =
+                new PolicyDto.SimulatePolicyRequest(agentId.asText(), toolName.asText(), arguments);
 
         List<String> violations = new java.util.ArrayList<>();
 

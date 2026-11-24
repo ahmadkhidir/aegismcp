@@ -90,7 +90,7 @@ class PolicySimulationC012Test {
                 policyCache,
                 PolicyCompiler.getInstance(),
                 mapper,
-                (method, bearerToken) -> (bearerToken == null || bearerToken.isBlank())
+                (path, method, bearerToken) -> (bearerToken == null || bearerToken.isBlank())
                         ? PolicyManagementHandler.PolicyAuthorizer.AuthResult
                                 .unauthenticated("Missing authentication credentials")
                         : PolicyManagementHandler.PolicyAuthorizer.AuthResult.allow(),
@@ -279,5 +279,42 @@ class PolicySimulationC012Test {
         assertEquals("ALLOWED", simResp.verdict());
         assertEquals("rule-read", simResp.ruleMatched());
         assertTrue(simResp.violations().isEmpty());
+    }
+
+    @Test
+    @DisplayName("C-012: A body that is not a JSON object returns 400")
+    void testNonObjectBodyReturns400() {
+        assertEquals(HttpResponseStatus.BAD_REQUEST, simulate("[]").status());
+        assertEquals(HttpResponseStatus.BAD_REQUEST, simulate("\"agent-analyst\"").status());
+    }
+
+    @Test
+    @DisplayName("C-012: Non-object arguments return 400 rather than an empty argument set")
+    void testNonObjectArgumentsReturns400() {
+        for (String arguments : new String[]{"[]", "\"path\"", "7", "true", "null"}) {
+            String payload = "{\"agentId\":\"agent-analyst\",\"toolName\":\"read_file\","
+                    + "\"arguments\":" + arguments + "}";
+            assertEquals(HttpResponseStatus.BAD_REQUEST, simulate(payload).status(),
+                    "'arguments' was " + arguments);
+        }
+    }
+
+    @Test
+    @DisplayName("C-012: An absent arguments field returns 400")
+    void testMissingArgumentsReturns400() {
+        assertEquals(HttpResponseStatus.BAD_REQUEST,
+                simulate("{\"agentId\":\"agent-analyst\",\"toolName\":\"read_file\"}").status());
+    }
+
+    private FullHttpResponse simulate(String payload) {
+        DefaultFullHttpRequest request = new DefaultFullHttpRequest(
+                HttpVersion.HTTP_1_1,
+                HttpMethod.POST,
+                "/api/v1/policies/simulate",
+                Unpooled.wrappedBuffer(payload.getBytes(StandardCharsets.UTF_8))
+        );
+        request.headers().set(HttpHeaderNames.AUTHORIZATION, "Bearer admin-token");
+        channel.writeInbound(request);
+        return channel.readOutbound();
     }
 }
