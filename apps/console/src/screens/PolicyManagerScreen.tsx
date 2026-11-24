@@ -1,11 +1,11 @@
 /**
  * Specification Anchors: FEAT-002, FEAT-008, FEAT-012, C-005, C-006, C-012, C-017, C-018
  * Screen 4: Policy Manager. Loads real policy versions and the active
- * document, publishes drafts through C-006, activates through C-018, and
- * evaluates sample payloads through C-012.
+ * document, lints the YAML locally before submission, publishes drafts through
+ * C-006, activates through C-018, and evaluates sample payloads through C-012.
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   FileCode,
   Play,
@@ -16,6 +16,7 @@ import {
   Rocket,
   Layers,
 } from 'lucide-react';
+import { LineCounter, parseDocument } from 'yaml';
 import { AegisApi, ApiError } from '../services/api';
 import { PolicyRecord, PolicySimulateResponse } from '../types/contracts';
 import { Skeleton } from '../components/Skeleton';
@@ -28,6 +29,44 @@ interface PolicyManagerScreenProps {
   canManagePolicy?: boolean;
   /** C-012 admits admin and operator. */
   canSimulatePolicy?: boolean;
+}
+
+/**
+ * One finding rendered by the editor's Lint Error state.
+ *
+ * `line` and `column` are 1-based positions inside the editor document. They
+ * are null when the gateway rejected the document with a schema violation that
+ * carries no document position.
+ */
+interface PolicyLintIssue {
+  line: number | null;
+  column: number | null;
+  message: string;
+  /** `editor` is a local parse failure; `gateway` is a C-006 or C-018 rejection. */
+  source: 'editor' | 'gateway';
+}
+
+/**
+ * FEAT-008 / screens/04-policy-manager.md: the editor validates YAML locally
+ * before a document is submitted. The maintained `yaml` parser reports the
+ * same document structure the gateway consumes, and its line counter supplies
+ * the failing line and column without a bespoke parser.
+ */
+function lintPolicyYaml(rawYaml: string): PolicyLintIssue | null {
+  const lineCounter = new LineCounter();
+  const document = parseDocument(rawYaml, { prettyErrors: false, lineCounter });
+  const parseError = document.errors[0];
+  if (!parseError) return null;
+
+  const offset = parseError.pos[0];
+  const position = offset >= 0 ? lineCounter.linePos(offset) : null;
+
+  return {
+    line: position?.line ?? null,
+    column: position?.col ?? null,
+    message: parseError.message,
+    source: 'editor',
+  };
 }
 
 export const PolicyManagerScreen: React.FC<PolicyManagerScreenProps> = ({
@@ -47,6 +86,15 @@ export const PolicyManagerScreen: React.FC<PolicyManagerScreenProps> = ({
   const [isDeploying, setIsDeploying] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  /** A document the gateway refused as invalid; cleared by the next edit. */
+  const [gatewayLint, setGatewayLint] = useState<PolicyLintIssue | null>(null);
+  const gutterRef = useRef<HTMLDivElement>(null);
+
+  const editorLint = useMemo(() => lintPolicyYaml(editorYaml), [editorYaml]);
+  const lintIssue = editorLint ?? gatewayLint;
+  /** A local parse failure is the only lint finding that can block a submit. */
+  const lintBlocksSubmit = editorLint !== null;
+  const editorLineCount = useMemo(() => editorYaml.split('\n').length, [editorYaml]);
 
   const [simTool, setSimTool] = useState('');
   const [simAgent, setSimAgent] = useState('');
@@ -107,12 +155,28 @@ export const PolicyManagerScreen: React.FC<PolicyManagerScreenProps> = ({
     setSimError(null);
     setActionError(null);
     setActionMessage(null);
+    setGatewayLint(null);
   };
 
   const handleEditorChange = (value: string) => {
     setEditorYaml(value);
     setIsDirty(true);
     setActionMessage(null);
+    setGatewayLint(null);
+  };
+
+  /**
+   * C-006 and C-018 answer 400 when the document violates the policy schema.
+   * That rejection belongs in the editor's Lint Error state, beside the local
+   * parse finding, rather than in the generic action banner.
+   */
+  const surfaceSubmitFailure = (err: unknown, fallback: string) => {
+    if (err instanceof ApiError && err.status === 400) {
+      setGatewayLint({ line: null, column: null, message: err.message, source: 'gateway' });
+      setActionError(null);
+      return;
+    }
+    setActionError(err instanceof Error ? err.message : fallback);
   };
 
   const handleSimulate = async () => {
@@ -157,6 +221,11 @@ export const PolicyManagerScreen: React.FC<PolicyManagerScreenProps> = ({
       setActionError('A policy name, version, and YAML document are required.');
       return;
     }
+    if (lintBlocksSubmit) {
+      setActionError(null);
+      setActionMessage(null);
+      return;
+    }
 
     setIsPublishing(true);
     setActionError(null);
@@ -175,7 +244,7 @@ export const PolicyManagerScreen: React.FC<PolicyManagerScreenProps> = ({
       );
       await loadPolicies();
     } catch (err: unknown) {
-      setActionError(err instanceof Error ? err.message : 'Failed to publish the policy draft');
+      surfaceSubmitFailure(err, 'Failed to publish the policy draft');
     } finally {
       setIsPublishing(false);
     }
@@ -185,6 +254,11 @@ export const PolicyManagerScreen: React.FC<PolicyManagerScreenProps> = ({
     if (!canManagePolicy) return;
     if (!policyName.trim() || !versionInput.trim() || !editorYaml.trim()) {
       setActionError('A policy name, version, and YAML document are required.');
+      return;
+    }
+    if (lintBlocksSubmit) {
+      setActionError(null);
+      setActionMessage(null);
       return;
     }
 
@@ -201,7 +275,7 @@ export const PolicyManagerScreen: React.FC<PolicyManagerScreenProps> = ({
       setActionMessage(`Activated ${response.name} ${response.version}.`);
       await loadPolicies();
     } catch (err: unknown) {
-      setActionError(err instanceof Error ? err.message : 'Failed to activate the policy');
+      surfaceSubmitFailure(err, 'Failed to activate the policy');
     } finally {
       setIsDeploying(false);
     }
@@ -288,11 +362,13 @@ export const PolicyManagerScreen: React.FC<PolicyManagerScreenProps> = ({
         <div className="flex items-center gap-space-sm">
           <button
             onClick={handlePublishDraft}
-            disabled={isPublishing || isDeploying || !canManagePolicy}
+            disabled={isPublishing || isDeploying || !canManagePolicy || lintBlocksSubmit}
             title={
-              canManagePolicy
-                ? 'Save this document as a draft version'
-                : 'The admin role is required to publish a policy'
+              !canManagePolicy
+                ? 'The admin role is required to publish a policy'
+                : lintBlocksSubmit
+                  ? 'Fix the YAML lint error before saving this document'
+                  : 'Save this document as a draft version'
             }
             data-testid="save-draft-button"
             className="inline-flex items-center gap-1.5 px-space-md py-1.5 bg-grey-200 hover:bg-grey-300 disabled:opacity-40 text-grey-800 font-semibold text-caption rounded-radius-md transition-colors border border-grey-300"
@@ -307,11 +383,15 @@ export const PolicyManagerScreen: React.FC<PolicyManagerScreenProps> = ({
 
           <button
             onClick={handleDeployPolicy}
-            disabled={isDeploying || isPublishing || !isDirty || !canManagePolicy}
+            disabled={
+              isDeploying || isPublishing || !isDirty || !canManagePolicy || lintBlocksSubmit
+            }
             title={
-              canManagePolicy
-                ? 'Activate this document'
-                : 'The admin role is required to activate a policy'
+              !canManagePolicy
+                ? 'The admin role is required to activate a policy'
+                : lintBlocksSubmit
+                  ? 'Fix the YAML lint error before deploying this document'
+                  : 'Activate this document'
             }
             data-testid="deploy-policy-button"
             className="inline-flex items-center gap-1.5 px-space-md py-1.5 bg-primary-500 hover:bg-primary-600 disabled:opacity-40 text-grey-900 font-bold text-caption rounded-radius-md transition-colors shadow-sm"
@@ -412,7 +492,17 @@ export const PolicyManagerScreen: React.FC<PolicyManagerScreenProps> = ({
         <div className="flex-1 flex flex-col border-b lg:border-b-0 lg:border-r border-grey-300 bg-grey-50 min-h-[300px] lg:min-h-0 overflow-hidden">
           <div className="px-space-md py-space-xs bg-grey-100 border-b border-grey-300 flex items-center justify-between text-caption text-grey-500 font-mono">
             <span>policy.yaml</span>
-            <span>Lines: {editorYaml.split('\n').length}</span>
+            <span className="flex items-center gap-2">
+              {lintIssue && (
+                <span
+                  data-testid="policy-lint-badge"
+                  className="px-1.5 py-0.5 rounded-radius-sm bg-error-100 border border-error-300 text-error-700 font-semibold"
+                >
+                  Lint Error
+                </span>
+              )}
+              <span>Lines: {editorLineCount}</span>
+            </span>
           </div>
 
           {loading ? (
@@ -420,14 +510,79 @@ export const PolicyManagerScreen: React.FC<PolicyManagerScreenProps> = ({
               <Skeleton className="h-64 w-full" />
             </div>
           ) : (
-            <textarea
-              data-testid="policy-yaml-editor"
-              value={editorYaml}
-              onChange={(event) => handleEditorChange(event.target.value)}
-              placeholder="apiVersion: security.aegis.io/v1alpha1&#10;kind: SecurityPolicy"
-              className="flex-1 w-full min-h-[220px] lg:min-h-0 p-space-md bg-grey-50 text-grey-800 font-mono text-caption leading-relaxed outline-none resize-none selection:bg-primary-300"
-              spellCheck={false}
-            />
+            <div className="flex-1 flex min-h-0">
+              {/*
+                The editor is a textarea, so the failing line is marked in a
+                line gutter that scrolls with the document: the number carries
+                the red wavy underline the Lint Error state declares.
+              */}
+              <div
+                ref={gutterRef}
+                aria-hidden="true"
+                data-testid="policy-editor-gutter"
+                className="w-12 shrink-0 overflow-hidden select-none bg-grey-100 border-r border-grey-300 py-space-md pr-space-xs text-right font-mono text-caption leading-relaxed"
+              >
+                {Array.from({ length: editorLineCount }, (_, index) => {
+                  const lineNumber = index + 1;
+                  const isFailingLine = lintIssue?.line === lineNumber;
+                  return (
+                    <div
+                      key={lineNumber}
+                      data-testid={isFailingLine ? 'policy-lint-line' : undefined}
+                      className={
+                        isFailingLine
+                          ? 'text-error-700 font-semibold underline decoration-wavy decoration-error-500'
+                          : 'text-grey-400'
+                      }
+                    >
+                      {lineNumber}
+                    </div>
+                  );
+                })}
+              </div>
+              <textarea
+                data-testid="policy-yaml-editor"
+                aria-invalid={lintIssue ? true : undefined}
+                aria-describedby={lintIssue ? 'policy-lint-error' : undefined}
+                value={editorYaml}
+                onChange={(event) => handleEditorChange(event.target.value)}
+                onScroll={(event) => {
+                  if (gutterRef.current) gutterRef.current.scrollTop = event.currentTarget.scrollTop;
+                }}
+                placeholder="apiVersion: security.aegis.io/v1alpha1&#10;kind: SecurityPolicy"
+                className="flex-1 w-full min-h-[220px] lg:min-h-0 p-space-md bg-grey-50 text-grey-800 font-mono text-caption leading-relaxed outline-none resize-none selection:bg-primary-300"
+                spellCheck={false}
+              />
+            </div>
+          )}
+
+          {lintIssue && (
+            <div
+              id="policy-lint-error"
+              role="alert"
+              data-testid="policy-lint-error"
+              className="px-space-md py-space-sm bg-error-100 border-t border-error-300 text-error-900 text-caption flex items-start gap-1.5"
+            >
+              <AlertCircle className="w-4 h-4 text-error-700 shrink-0 mt-0.5" />
+              <div className="space-y-0.5 min-w-0">
+                <p className="font-semibold">
+                  Lint Error
+                  {lintIssue.line !== null && (
+                    <span data-testid="policy-lint-position">
+                      {` — line ${lintIssue.line}${
+                        lintIssue.column !== null ? `, column ${lintIssue.column}` : ''
+                      }`}
+                    </span>
+                  )}
+                </p>
+                <p className="font-mono break-words">{lintIssue.message}</p>
+                <p className="text-error-700">
+                  {lintIssue.source === 'gateway'
+                    ? 'The gateway rejected this document, so the active policy is unchanged. Correct the policy and submit it again.'
+                    : 'Saving and deploying are blocked until the document parses.'}
+                </p>
+              </div>
+            </div>
           )}
         </div>
 
