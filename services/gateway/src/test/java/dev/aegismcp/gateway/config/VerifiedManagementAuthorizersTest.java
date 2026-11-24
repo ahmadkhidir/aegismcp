@@ -4,6 +4,7 @@ import dev.aegismcp.gateway.identity.JwksKeyResolver;
 import dev.aegismcp.gateway.identity.OidcTokenValidator;
 import dev.aegismcp.gateway.identity.TestJwtGenerator;
 import dev.aegismcp.gateway.killswitch.EmergencyManagementHandler;
+import dev.aegismcp.gateway.policy.PolicyManagementHandler;
 import io.netty.handler.codec.http.HttpMethod;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -32,6 +33,8 @@ class VerifiedManagementAuthorizersTest {
     private static final String ISSUER = "https://idp.example.com";
     private static final String AUDIENCE = "aegis-console";
     private static final String KID = "test-key";
+    private static final String POLICIES_PATH = PolicyManagementHandler.POLICIES_PATH;
+    private static final String SIMULATE_PATH = PolicyManagementHandler.POLICIES_SIMULATE_PATH;
 
     private static KeyPair keyPair;
     private static VerifiedManagementAuthorizers authorizers;
@@ -56,7 +59,7 @@ class VerifiedManagementAuthorizersTest {
     @Test
     @DisplayName("A missing token is unauthenticated on every management surface")
     void missingTokenIsUnauthenticatedEverywhere() {
-        assertFalse(authorizers.policy().check(HttpMethod.GET, null).authorized());
+        assertFalse(authorizers.policy().check(POLICIES_PATH, HttpMethod.GET, null).authorized());
         assertFalse(authorizers.auditRecords().check(null).authorized());
         assertFalse(authorizers.auditVerification().check(null).authorized());
         assertFalse(authorizers.compliance().check(null).authorized());
@@ -78,8 +81,9 @@ class VerifiedManagementAuthorizersTest {
     @DisplayName("The admin role reaches every management surface")
     void adminReachesEverySurface() throws Exception {
         String bearer = token("admin");
-        assertTrue(authorizers.policy().check(HttpMethod.GET, bearer).authorized());
-        assertTrue(authorizers.policy().check(HttpMethod.POST, bearer).authorized());
+        assertTrue(authorizers.policy().check(POLICIES_PATH, HttpMethod.GET, bearer).authorized());
+        assertTrue(authorizers.policy().check(POLICIES_PATH, HttpMethod.POST, bearer).authorized());
+        assertTrue(authorizers.policy().check(SIMULATE_PATH, HttpMethod.POST, bearer).authorized());
         assertTrue(authorizers.auditRecords().check(bearer).authorized());
         assertTrue(authorizers.auditVerification().check(bearer).authorized());
         assertTrue(authorizers.compliance().check(bearer).authorized());
@@ -100,10 +104,12 @@ class VerifiedManagementAuthorizersTest {
                 .authorized());
         assertTrue(authorizers.emergency().check("/api/v1/emergency/kill", HttpMethod.POST, bearer, null)
                 .authorized());
-        assertTrue(authorizers.policy().check(HttpMethod.GET, bearer).authorized());
+        assertTrue(authorizers.policy().check(POLICIES_PATH, HttpMethod.GET, bearer).authorized());
 
-        assertFalse(authorizers.policy().check(HttpMethod.POST, bearer).authorized());
-        assertFalse(authorizers.policy().check(HttpMethod.PUT, bearer).authorized());
+        // C-012 simulation is an operator surface, unlike the C-006 publish path it shares POST with.
+        assertTrue(authorizers.policy().check(SIMULATE_PATH, HttpMethod.POST, bearer).authorized());
+        assertFalse(authorizers.policy().check(POLICIES_PATH, HttpMethod.POST, bearer).authorized());
+        assertFalse(authorizers.policy().check(POLICIES_PATH, HttpMethod.PUT, bearer).authorized());
         assertFalse(authorizers.auditRecords().check(bearer).authorized());
         assertFalse(authorizers.compliance().check(bearer).authorized());
     }
@@ -120,9 +126,11 @@ class VerifiedManagementAuthorizersTest {
         assertFalse(authorizers.approvals().check("/api/v1/approvals/appr_1/reject", HttpMethod.POST, bearer)
                 .authorized());
 
-        // C-005/C-017 policy reads accept the auditor; C-006/C-018 writes require admin.
-        assertTrue(authorizers.policy().check(HttpMethod.GET, bearer).authorized());
-        assertFalse(authorizers.policy().check(HttpMethod.PUT, bearer).authorized());
+        // C-005/C-017 policy reads accept the auditor; C-006/C-018 writes require admin, and
+        // C-012 simulation is closed to the auditor.
+        assertTrue(authorizers.policy().check(POLICIES_PATH, HttpMethod.GET, bearer).authorized());
+        assertFalse(authorizers.policy().check(POLICIES_PATH, HttpMethod.PUT, bearer).authorized());
+        assertFalse(authorizers.policy().check(SIMULATE_PATH, HttpMethod.POST, bearer).authorized());
 
         assertTrue(authorizers.auditRecords().check(bearer).authorized());
         assertTrue(authorizers.auditVerification().check(bearer).authorized());
@@ -143,7 +151,8 @@ class VerifiedManagementAuthorizersTest {
                 .authorized());
         assertFalse(authorizers.emergency().check("/api/v1/emergency/kill", HttpMethod.POST, bearer, null)
                 .authorized());
-        assertFalse(authorizers.policy().check(HttpMethod.GET, bearer).authorized());
+        assertFalse(authorizers.policy().check(POLICIES_PATH, HttpMethod.GET, bearer).authorized());
+        assertFalse(authorizers.policy().check(SIMULATE_PATH, HttpMethod.POST, bearer).authorized());
         assertFalse(authorizers.auditRecords().check(bearer).authorized());
     }
 

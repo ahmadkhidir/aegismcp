@@ -28,13 +28,14 @@ import java.util.Set;
  *   <li>C-019 approval history: {@code admin}, {@code operator}, or {@code auditor};</li>
  *   <li>C-005/C-017 policy reads: {@code admin}, {@code operator}, or {@code auditor};</li>
  *   <li>C-006/C-018 policy publish and activation: {@code admin};</li>
+ *   <li>C-012 policy simulation: {@code admin} or {@code operator};</li>
  *   <li>C-008 emergency kill: {@code admin} or {@code operator};</li>
  *   <li>C-009/C-010/C-020 fleet reads: any RBAC role;</li>
  *   <li>C-011 compliance export and C-013/C-015 audit reads: {@code admin} or {@code auditor}.</li>
  * </ul>
  *
  * <p>Anchors: FEAT-008, FEAT-009, NFR-029, C-003, C-004, C-005, C-006, C-008, C-009, C-010,
- * C-011, C-013, C-014, C-015, C-017, C-018, C-019, C-020.
+ * C-011, C-012, C-013, C-014, C-015, C-017, C-018, C-019, C-020.
  */
 public final class VerifiedManagementAuthorizers {
 
@@ -52,10 +53,20 @@ public final class VerifiedManagementAuthorizers {
         this.validator = validator;
     }
 
+    /**
+     * Policy endpoints. Authorization is path-bound where the contract differs from the method
+     * default: reads accept {@code admin}, {@code operator}, or {@code auditor} (C-005, C-017),
+     * publishing and activation require {@code admin} (C-006, C-018), and simulation accepts
+     * {@code admin} or {@code operator} (C-012).
+     */
     public PolicyManagementHandler.PolicyAuthorizer policy() {
-        return (method, bearerToken) -> {
-            Verdict verdict = verify(bearerToken,
-                    HttpMethod.POST.equals(method) || HttpMethod.PUT.equals(method) ? ADMIN_ONLY : ADMIN_OPERATOR_AUDITOR);
+        return (path, method, bearerToken) -> {
+            Set<String> allowed = PolicyManagementHandler.POLICIES_SIMULATE_PATH.equals(path)
+                    ? ADMIN_OPERATOR
+                    : HttpMethod.POST.equals(method) || HttpMethod.PUT.equals(method)
+                            ? ADMIN_ONLY
+                            : ADMIN_OPERATOR_AUDITOR;
+            Verdict verdict = verify(bearerToken, allowed);
             return new PolicyManagementHandler.PolicyAuthorizer.AuthResult(
                     verdict.authorized(), verdict.forbidden(), verdict.reason());
         };
