@@ -22,7 +22,6 @@ public final class DlpConfig {
     private final boolean enableEntropyScanner;
     private final double entropyThreshold;
     private final int minEntropyTokenLength;
-    private final boolean fineGrainedPii;
     private final long scanTimeoutMillis;
     private final Map<DlpCategory, String> categoryReplacements;
     private final Map<DlpPatternType, String> patternReplacements;
@@ -31,7 +30,6 @@ public final class DlpConfig {
         this.enableEntropyScanner = builder.enableEntropyScanner;
         this.entropyThreshold = builder.entropyThreshold;
         this.minEntropyTokenLength = builder.minEntropyTokenLength;
-        this.fineGrainedPii = builder.fineGrainedPii;
         this.scanTimeoutMillis = builder.scanTimeoutMillis;
         this.categoryReplacements = Collections.unmodifiableMap(new EnumMap<>(builder.categoryReplacements));
         this.patternReplacements = Collections.unmodifiableMap(new EnumMap<>(builder.patternReplacements));
@@ -57,20 +55,25 @@ public final class DlpConfig {
         return minEntropyTokenLength;
     }
 
-    public boolean isFineGrainedPii() {
-        return fineGrainedPii;
-    }
-
     public long getScanTimeoutMillis() {
         return scanTimeoutMillis;
     }
 
+    /**
+     * Resolves the replacement for a detection.
+     *
+     * <p>C-001 fixes the marker shape: {@code [REDACTED_SECRET:TYPE]} for a credential and
+     * {@code [REDACTED_PII:TYPE]} for a personal identifier, where TYPE is the detected family. The
+     * pattern's own family marker therefore wins over the category-wide fallback; an operator-supplied
+     * pattern replacement still overrides it.
+     */
     public String resolveReplacement(DlpPatternType patternType) {
         if (patternReplacements.containsKey(patternType)) {
             return patternReplacements.get(patternType);
         }
-        if (fineGrainedPii && patternType.category() == DlpCategory.PII) {
-            return patternType.fineGrainedReplacement();
+        String familyMarker = patternType.fineGrainedReplacement();
+        if (familyMarker != null && !familyMarker.isBlank()) {
+            return familyMarker;
         }
         DlpCategory cat = patternType.category();
         return categoryReplacements.getOrDefault(cat, cat.defaultReplacement());
@@ -80,7 +83,6 @@ public final class DlpConfig {
         private boolean enableEntropyScanner = true;
         private double entropyThreshold = DEFAULT_ENTROPY_THRESHOLD;
         private int minEntropyTokenLength = DEFAULT_MIN_ENTROPY_TOKEN_LENGTH;
-        private boolean fineGrainedPii = false;
         private long scanTimeoutMillis = DEFAULT_SCAN_TIMEOUT_MILLIS;
         private final Map<DlpCategory, String> categoryReplacements = new EnumMap<>(DlpCategory.class);
         private final Map<DlpPatternType, String> patternReplacements = new EnumMap<>(DlpPatternType.class);
@@ -109,11 +111,6 @@ public final class DlpConfig {
                 throw new IllegalArgumentException("Minimum entropy token length must be >= 8");
             }
             this.minEntropyTokenLength = minLength;
-            return this;
-        }
-
-        public Builder fineGrainedPii(boolean fineGrained) {
-            this.fineGrainedPii = fineGrained;
             return this;
         }
 

@@ -88,7 +88,7 @@ class TerminalInspectorTest {
 
         String output = buffer.toString(StandardCharsets.UTF_8);
         assertFalse(output.contains(TestCredential.awsAccessKey()), "the raw credential must never reach the terminal");
-        assertTrue(output.contains("[REDACTED_API_KEY]"));
+        assertTrue(output.contains("[REDACTED_SECRET:AWS_KEY]"));
         assertTrue(output.contains("/tmp/notes.txt"), "benign values stay visible");
     }
 
@@ -120,7 +120,7 @@ class TerminalInspectorTest {
 
         String output = buffer.toString(StandardCharsets.UTF_8);
         assertFalse(output.contains(TestCredential.awsAccessKey()));
-        assertTrue(output.contains("[REDACTED_API_KEY]"));
+        assertTrue(output.contains("[REDACTED_SECRET:AWS_KEY]"));
     }
 
     @Test
@@ -134,7 +134,7 @@ class TerminalInspectorTest {
 
         String output = buffer.toString(StandardCharsets.UTF_8);
         assertFalse(output.contains(TestCredential.awsAccessKey()));
-        assertTrue(output.contains("[REDACTED_API_KEY]"));
+        assertTrue(output.contains("[REDACTED_SECRET:AWS_KEY]"));
     }
 
     private static PrintStream stream(ByteArrayOutputStream buffer) {

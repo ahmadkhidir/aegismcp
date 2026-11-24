@@ -65,8 +65,8 @@ class DlpOutboundHandlerTest {
 
         assertFalse(scrubbedBody.contains("AKIAIOSFODNN7EXAMPLE"));
         assertFalse(scrubbedBody.contains("agent.smith@matrix.corp"));
-        assertTrue(scrubbedBody.contains("[REDACTED_API_KEY]"));
-        assertTrue(scrubbedBody.contains("[REDACTED_PII]"));
+        assertTrue(scrubbedBody.contains("[REDACTED_SECRET:AWS_KEY]"));
+        assertTrue(scrubbedBody.contains("[REDACTED_PII:EMAIL]"));
         assertTrue(scrubbedBody.contains("12345"));
         assertTrue(scrubbedBody.contains("\"safeField\": 12345"), "Numeric JSON values must keep their type");
         assertEquals(HttpResponseStatus.OK, scrubbedResponse.status());
@@ -133,7 +133,7 @@ class DlpOutboundHandlerTest {
         assertNotNull(scrubbedResponse);
         String body = scrubbedResponse.content().toString(StandardCharsets.UTF_8);
         assertFalse(body.contains("AKIAIOSFODNN7EXAMPLE"));
-        assertTrue(body.contains("[REDACTED_API_KEY]"));
+        assertTrue(body.contains("[REDACTED_SECRET:AWS_KEY]"));
         scrubbedResponse.release();
     }
 

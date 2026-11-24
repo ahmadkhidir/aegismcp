@@ -41,7 +41,7 @@ class DlpScrubberTest {
 
         assertFalse(result.contains("AKIAIOSFODNN7EXAMPLE"));
         assertFalse(result.contains(secretKey));
-        assertTrue(result.contains("[REDACTED_API_KEY]"));
+        assertTrue(result.contains("[REDACTED_SECRET:AWS_KEY]"));
     }
 
     @Test
@@ -54,7 +54,7 @@ class DlpScrubberTest {
 
         assertFalse(result.contains(key1));
         assertFalse(result.contains(key2));
-        assertTrue(result.contains("[REDACTED_API_KEY]"));
+        assertTrue(result.contains("[REDACTED_SECRET:OPENAI_KEY]"));
     }
 
     @Test
@@ -68,7 +68,7 @@ class DlpScrubberTest {
 
         assertFalse(result.contains(classicToken));
         assertFalse(result.contains(fineGrainedToken));
-        assertTrue(result.contains("[REDACTED_API_KEY]"));
+        assertTrue(result.contains("[REDACTED_SECRET:GITHUB_TOKEN]"));
     }
 
     @Test
@@ -79,7 +79,7 @@ class DlpScrubberTest {
         String result = scrubber.scrubText(input);
 
         assertFalse(result.contains("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"));
-        assertEquals("Authorization: Bearer [REDACTED_API_KEY]", result);
+        assertEquals("Authorization: Bearer [REDACTED_SECRET:BEARER_TOKEN]", result);
     }
 
     @Test
@@ -100,11 +100,11 @@ class DlpScrubberTest {
 
         String resultRsa = scrubber.scrubText("Key:\n" + rsaKey);
         assertFalse(resultRsa.contains("MIIEowIBAAKCAQEA0Y1+examplePrivateDataKeyContentHere"));
-        assertTrue(resultRsa.contains("[REDACTED_PRIVATE_KEY]"));
+        assertTrue(resultRsa.contains("[REDACTED_SECRET:PRIVATE_KEY]"));
 
         String resultEc = scrubber.scrubText("EC:\n" + ecKey);
         assertFalse(resultEc.contains("MHcCAQEEIForTestingPurposesOnly1234567890=="));
-        assertTrue(resultEc.contains("[REDACTED_PRIVATE_KEY]"));
+        assertTrue(resultEc.contains("[REDACTED_SECRET:PRIVATE_KEY]"));
     }
 
     @Test
@@ -120,7 +120,7 @@ class DlpScrubberTest {
         assertFalse(result.contains("s3cr3t"));
         assertFalse(result.contains("mockPass"));
         assertFalse(result.contains("mySecret"));
-        assertTrue(result.contains("[REDACTED_DB_CREDENTIAL]"));
+        assertTrue(result.contains("[REDACTED_SECRET:DATABASE_CREDENTIAL]"));
 
         // Verify non-credential DB URLs are preserved
         String safePgUrl = "postgres://localhost:5432/public_db";
@@ -139,21 +139,21 @@ class DlpScrubberTest {
         assertFalse(result.contains("(555) 234-5678"));
         assertFalse(result.contains("123-45-6789"));
         assertFalse(result.contains("4111-1111-1111-1111"));
-        assertTrue(result.contains("[REDACTED_PII]"));
+        assertTrue(result.contains("[REDACTED_PII:EMAIL]"));
+        assertTrue(result.contains("[REDACTED_PII:PHONE]"));
+        assertTrue(result.contains("[REDACTED_PII:SSN]"));
+        assertTrue(result.contains("[REDACTED_PII:CREDIT_CARD]"));
     }
 
     @Test
-    @DisplayName("FEAT-005: Fine-grained PII replacement configuration")
+    @DisplayName("FEAT-005 / C-001: each PII family carries its own marker by default")
     void testFineGrainedPiiRedaction() {
-        DlpConfig fineGrainedConfig = DlpConfig.builder().fineGrainedPii(true).build();
-        DlpScrubber fineScrubber = new DlpScrubber(fineGrainedConfig);
-
         String input = "Email: alice@test.com, SSN: 123-45-6789, Phone: (555) 234-5678";
-        String result = fineScrubber.scrubText(input);
+        String result = scrubber.scrubText(input);
 
-        assertTrue(result.contains("[REDACTED_EMAIL]"));
-        assertTrue(result.contains("[REDACTED_SSN]"));
-        assertTrue(result.contains("[REDACTED_PHONE]"));
+        assertTrue(result.contains("[REDACTED_PII:EMAIL]"));
+        assertTrue(result.contains("[REDACTED_PII:SSN]"));
+        assertTrue(result.contains("[REDACTED_PII:PHONE]"));
     }
 
     @Test
@@ -165,7 +165,7 @@ class DlpScrubberTest {
         String result = scrubber.scrubText(input);
 
         assertFalse(result.contains(secretToken));
-        assertTrue(result.contains("[REDACTED_HIGH_ENTROPY_SECRET]"));
+        assertTrue(result.contains("[REDACTED_SECRET:HIGH_ENTROPY]"));
     }
 
     @Test
@@ -222,8 +222,8 @@ class DlpScrubberTest {
 
         // Verify redacted fields
         JsonNode scrubbedResult = scrubbedTree.get("result");
-        assertEquals("[REDACTED_API_KEY]", scrubbedResult.get("apiKey").asText());
-        assertEquals("[REDACTED_PII]", scrubbedResult.get("email").asText());
+        assertEquals("[REDACTED_SECRET:AWS_KEY]", scrubbedResult.get("apiKey").asText());
+        assertEquals("[REDACTED_PII:EMAIL]", scrubbedResult.get("email").asText());
 
         // Verify preserved primitives
         assertEquals(100, scrubbedResult.get("count").asInt());
@@ -232,7 +232,7 @@ class DlpScrubberTest {
 
         // Verify nested array
         JsonNode scrubbedRecord = scrubbedResult.get("records").get(0);
-        assertEquals("[REDACTED_PII]", scrubbedRecord.get("ssn").asText());
+        assertEquals("[REDACTED_PII:SSN]", scrubbedRecord.get("ssn").asText());
         assertFalse(scrubbedRecord.get("valid").asBoolean());
 
         // Verify serialization back to valid JSON string
@@ -254,7 +254,7 @@ class DlpScrubberTest {
 
         assertEquals(requestId, scrubbed.id());
         assertFalse(scrubbed.isError());
-        assertEquals("[REDACTED_API_KEY]", scrubbed.result().get("secret").asText());
+        assertEquals("[REDACTED_SECRET:AWS_KEY]", scrubbed.result().get("secret").asText());
     }
 
     @Test
@@ -271,9 +271,9 @@ class DlpScrubberTest {
 
         assertEquals(requestId, scrubbed.id());
         assertTrue(scrubbed.isError());
-        assertTrue(scrubbed.error().message().contains("[REDACTED_API_KEY]"));
+        assertTrue(scrubbed.error().message().contains("[REDACTED_SECRET:GITHUB_TOKEN]"));
         assertFalse(scrubbed.error().message().contains("ghp_1234567890abcdefghijklmnopqrstuvwxyz"));
-        assertEquals("[REDACTED_API_KEY]", scrubbed.error().data().get("token").asText());
+        assertEquals("[REDACTED_SECRET:OPENAI_KEY]", scrubbed.error().data().get("token").asText());
     }
 
     @Test
@@ -289,7 +289,7 @@ class DlpScrubberTest {
         assertTrue(scrubbed.contains("\"creditCard\":4111111111111111"),
                 "Numeric JSON values must not be rewritten");
         assertFalse(scrubbed.contains("4111-1111-1111-1111"));
-        assertTrue(scrubbed.contains("[REDACTED_PII]"));
+        assertTrue(scrubbed.contains("[REDACTED_PII:CREDIT_CARD]"));
         // Object keys keep their name: a redacted key silently renames an upstream result field.
         assertTrue(scrubbed.contains("\"AKIAIOSFODNN7EXAMPLE\":\"value\""),
                 "JSON object keys must not be redacted");
@@ -303,8 +303,8 @@ class DlpScrubberTest {
 
         assertFalse(scrubbed.contains("AKIAIOSFODNN7EXAMPLE"));
         assertFalse(scrubbed.contains("admin@corp.net"));
-        assertTrue(scrubbed.contains("[REDACTED_API_KEY]"));
-        assertTrue(scrubbed.contains("[REDACTED_PII]"));
+        assertTrue(scrubbed.contains("[REDACTED_SECRET:AWS_KEY]"));
+        assertTrue(scrubbed.contains("[REDACTED_PII:EMAIL]"));
     }
 
     @Test
@@ -352,8 +352,8 @@ class DlpScrubberTest {
         String scrubbed = scrubber.scrubText(largePayload);
         assertNotNull(scrubbed);
         assertFalse(scrubbed.contains("AKIAIOSFODNN7EXAMPLE"));
-        assertTrue(scrubbed.contains("[REDACTED_API_KEY]"));
-        assertTrue(scrubbed.contains("[REDACTED_PII]"));
+        assertTrue(scrubbed.contains("[REDACTED_SECRET:AWS_KEY]"));
+        assertTrue(scrubbed.contains("[REDACTED_PII:EMAIL]"));
 
         // Verify warm latency on 1MB payload
         long warmStart = System.nanoTime();
