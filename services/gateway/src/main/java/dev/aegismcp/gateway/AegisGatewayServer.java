@@ -55,6 +55,8 @@ import dev.aegismcp.gateway.proxy.UpstreamClient;
 import dev.aegismcp.gateway.proxy.UpstreamClientFactory;
 import dev.aegismcp.gateway.validation.DynamicParameterValidator;
 import dev.aegismcp.gateway.validation.DynamicValidationInterceptor;
+import dev.aegismcp.gateway.validation.ToolSchemaRegistry;
+import dev.aegismcp.gateway.validation.UpstreamToolSchemaSource;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -478,7 +480,12 @@ public class AegisGatewayServer {
     }
 
     private ToolCallInterceptor buildInterceptorChain(GatewayConfiguration configuration) {
-        DynamicParameterValidator parameterValidator = new DynamicParameterValidator();
+        // Parameter validation reads each tool's published JSON schema from the upstream MCP server's
+        // own manifest (FEAT-012), so a tool the gateway has not seen is still validated against the
+        // definition its server publishes rather than against a gateway-side copy.
+        DynamicParameterValidator parameterValidator = new DynamicParameterValidator(
+                new ToolSchemaRegistry(),
+                new UpstreamToolSchemaSource(upstreamClient));
         PolicyEvaluator policyEvaluator =
                 new InspectorPolicyEvaluator(policyCache, parameterValidator, trafficObservations);
         TrafficEventFactory trafficEvents = new TrafficEventFactory(DlpScrubber.getInstance());

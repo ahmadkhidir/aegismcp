@@ -68,7 +68,9 @@ public class ToolChainingAnomalyInterceptor implements ToolCallInterceptor {
         if (circuitBreaker.isQuarantined(agentId, now)) {
             String quarantineReason = circuitBreaker.getQuarantineReason(agentId, now);
             return CompletableFuture.completedFuture(
-                    InterceptionVerdict.block(JsonRpcError.policyViolation("Agent session is quarantined: " + quarantineReason))
+                    InterceptionVerdict.block(JsonRpcError.policyViolation(
+                            JsonRpcError.MACHINE_TOOL_CHAIN_BLOCKED,
+                            "Agent session is quarantined: " + quarantineReason))
             );
         }
 
@@ -97,9 +99,11 @@ public class ToolChainingAnomalyInterceptor implements ToolCallInterceptor {
                 // Dispatch security alert
                 alertDispatcher.dispatchAlert(violation);
 
-                // Fail-closed with -32001 Policy Violation (C-001 -> HTTP 403)
+                // Fail-closed with -32001 Policy Violation and the C-001 TOOL_CHAIN_BLOCKED machine
+                // code (HTTP 403); the session is quarantined for every later call.
                 return CompletableFuture.completedFuture(
-                        InterceptionVerdict.block(JsonRpcError.policyViolation(anomaly.reason()))
+                        InterceptionVerdict.block(JsonRpcError.policyViolation(
+                                JsonRpcError.MACHINE_TOOL_CHAIN_BLOCKED, anomaly.reason()))
                 );
             }
         }

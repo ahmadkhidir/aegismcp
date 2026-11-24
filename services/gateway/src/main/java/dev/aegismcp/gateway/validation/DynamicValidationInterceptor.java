@@ -20,14 +20,13 @@ import java.util.concurrent.CompletableFuture;
 
 /**
  * Netty proxy pipeline interceptor enforcing dynamic parameter validation and injection sanitization.
- * Intercepts tool calls before reaching upstream servers, rejecting invalid requests with JSON-RPC -32005
- * and appending SecurityViolation records to AuditLedger.
+ * Intercepts tool calls before reaching upstream servers, rejects them with the C-001 row that names
+ * the failing check, and appends SecurityViolation records to AuditLedger.
  * Anchors: FEAT-012, NFR-024, C-001, schema.md#SecurityViolation.
  */
 public class DynamicValidationInterceptor implements ToolCallInterceptor {
 
     private static final Logger logger = LoggerFactory.getLogger(DynamicValidationInterceptor.class);
-    public static final int ERROR_CODE_SCHEMA_PARAMETER_VIOLATION = -32005;
 
     private final DynamicParameterValidator validator;
     private final AuditLedger auditLedger;
@@ -90,13 +89,29 @@ public class DynamicValidationInterceptor implements ToolCallInterceptor {
             auditFuture = auditLedger.append(record).thenAccept(r -> {});
         }
 
-        // Fail-closed with JSON-RPC error -32005 Schema/Parameter Violation
-        JsonRpcError error = new JsonRpcError(
-                ERROR_CODE_SCHEMA_PARAMETER_VIOLATION,
-                "Schema/Parameter Violation: " + summary
-        );
+        // Fail-closed with the C-001 row that matches the check that fired.
+        JsonRpcError error = contractError(result);
 
         return auditFuture.thenApply(v -> InterceptionVerdict.block(error));
+    }
+
+    /**
+     * Resolves the C-001 response row for a validation result. C-001 gives the schema family its own
+     * numeric code ({@code -32602}) and keeps the traversal and injection families in the policy
+     * family ({@code -32001}); each carries its own machine code so an agent can tell them apart.
+     * Command injection has no row of its own in C-001, so it is reported as the declared-constraint
+     * family rather than the internal-error row the previous -32005 code produced.
+     */
+    private static JsonRpcError contractError(ValidationResult result) {
+        String summary = result.summaryMessage();
+        return switch (result.primaryFamily()) {
+            case PATH_TRAVERSAL -> JsonRpcError.policyViolation(
+                    JsonRpcError.MACHINE_PATH_TRAVERSAL, summary);
+            case SQL_INJECTION -> JsonRpcError.policyViolation(
+                    JsonRpcError.MACHINE_SQL_INJECTION, summary);
+            case COMMAND_INJECTION -> JsonRpcError.argumentConstraintViolated(summary);
+            case SCHEMA -> JsonRpcError.schemaValidationFailed(summary);
+        };
     }
 
     private String extractAgentId(SecurityContext context) {

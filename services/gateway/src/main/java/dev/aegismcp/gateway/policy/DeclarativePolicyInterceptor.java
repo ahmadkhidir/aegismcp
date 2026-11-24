@@ -61,9 +61,14 @@ public class DeclarativePolicyInterceptor implements ToolCallInterceptor {
             );
         }
 
-        // Policy denial / argument constraint violation (-32001 Policy Violation -> HTTP 403 Forbidden)
+        // Policy denial / argument constraint violation (-32001 Policy Violation -> HTTP 403 Forbidden).
+        // C-001 separates an argument that violates a declared constraint from a tool the policy does
+        // not carry, so the machine code follows the evaluator's finding instead of defaulting.
+        String machineCode = result.argumentViolation()
+                ? JsonRpcError.MACHINE_ARGUMENT_CONSTRAINT_VIOLATED
+                : JsonRpcError.MACHINE_TOOL_NOT_PERMITTED;
         return CompletableFuture.completedFuture(
-                InterceptionVerdict.block(JsonRpcError.policyViolation(result.reason()))
+                InterceptionVerdict.block(JsonRpcError.policyViolation(machineCode, result.reason()))
         );
     }
 

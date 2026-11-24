@@ -118,6 +118,38 @@ class JsonRpcCodecTest {
     }
 
     @Test
+    @DisplayName("C-001: a request without an id is -32600 INVALID_REQUEST and is never forwarded")
+    void testMissingIdIsInvalidRequest() {
+        String json = """
+                {
+                  "jsonrpc": "2.0",
+                  "method": "ping"
+                }
+                """;
+
+        JsonRpcCodecException ex = assertThrows(JsonRpcCodecException.class, () ->
+                codec.decodeRequest(json.getBytes(StandardCharsets.UTF_8))
+        );
+
+        assertEquals(JsonRpcError.INVALID_REQUEST, ex.getError().code());
+        assertEquals(JsonRpcError.MACHINE_INVALID_REQUEST, ex.getError().machineCode());
+        assertTrue(ex.getError().message().contains("id"));
+    }
+
+    @Test
+    @DisplayName("C-001: a null or structured id is -32600 INVALID_REQUEST")
+    void testInvalidIdIsInvalidRequest() {
+        for (String json : new String[]{
+                "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"ping\"}",
+                "{\"jsonrpc\":\"2.0\",\"id\":{\"nested\":1},\"method\":\"ping\"}"}) {
+            JsonRpcCodecException ex = assertThrows(JsonRpcCodecException.class, () ->
+                    codec.decodeRequest(json.getBytes(StandardCharsets.UTF_8)));
+            assertEquals(JsonRpcError.INVALID_REQUEST, ex.getError().code());
+            assertEquals(JsonRpcError.MACHINE_INVALID_REQUEST, ex.getError().machineCode());
+        }
+    }
+
+    @Test
     @DisplayName("FEAT-001: Reject missing method with -32600 Invalid Request")
     void testMissingMethod() {
         String json = """
