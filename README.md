@@ -66,6 +66,17 @@ make down      # stop the stack
 [`infra/compose/compose.yaml`](infra/compose/compose.yaml); credentials are generated into the
 gitignored `infra/compose/.env`, never committed.
 
+### Local login
+
+| User | Role | Password variable |
+|---|---|---|
+| `aegis-admin` | `admin` | `AEGIS_OIDC_ADMIN_USER_PASSWORD` |
+| `aegis-operator` | `operator` | `AEGIS_OIDC_OPERATOR_USER_PASSWORD` |
+| `aegis-auditor` | `auditor` | `AEGIS_OIDC_AUDITOR_USER_PASSWORD` |
+| `aegis-viewer` | `viewer` | `AEGIS_OIDC_VIEWER_USER_PASSWORD` |
+
+Passwords are in the gitignored `infra/compose/.env`.
+
 ## Build and run
 
 Requires JDK 21. The console requires Node.js and npm.
