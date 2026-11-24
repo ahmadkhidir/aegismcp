@@ -1,6 +1,11 @@
 /**
  * Specification Anchors: FEAT-002, FEAT-008, FEAT-012, C-005, C-006, C-012, C-017, C-018
- * Policy manager behaviour with contract fixtures held in this test module.
+ * Policy screen behaviour with contract fixtures held in this test module.
+ *
+ * The screen owns the lint finding and the submit rules, so this file drives
+ * the screen through a light editor stand-in that mirrors the real editor's
+ * contract (value, change callback, and the issue it should mark). The CodeMirror
+ * surface itself is exercised in PolicyCodeEditor.test.tsx.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -8,6 +13,38 @@ import { render, screen, fireEvent, waitFor, within, act } from '@testing-librar
 import { PolicyManagerScreen } from '../screens/PolicyManagerScreen';
 import { AegisApi, ApiError } from '../services/api';
 import { PolicyRecord, PolicySimulateResponse } from '../types/contracts';
+
+vi.mock('../components/PolicyCodeEditor', () => ({
+  default: ({
+    value,
+    onChange,
+    issues,
+    readOnly,
+    ariaLabel,
+    describedBy,
+    invalid,
+  }: {
+    value: string;
+    onChange: (value: string) => void;
+    issues?: Array<{ line: number | null; column: number | null; message: string }>;
+    readOnly?: boolean;
+    ariaLabel?: string;
+    describedBy?: string;
+    invalid?: boolean;
+  }) => (
+    <textarea
+      data-testid="policy-yaml-editor"
+      aria-label={ariaLabel}
+      aria-invalid={invalid ? 'true' : undefined}
+      aria-describedby={describedBy}
+      data-issue-line={issues?.[0]?.line ?? ''}
+      data-issue-column={issues?.[0]?.column ?? ''}
+      readOnly={readOnly}
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+    />
+  ),
+}));
 
 const RAW_YAML = `apiVersion: security.aegis.io/v1alpha1
 kind: SecurityPolicy
@@ -44,6 +81,17 @@ const DRAFT_POLICY: PolicyRecord = {
 const INVALID_YAML =
   'apiVersion: security.aegis.io/v1alpha1\nkind: SecurityPolicy\nspec:\n\tdefaultAction: BLOCK\n';
 
+/**
+ * The screen mounts the editor from a lazy chunk. Warm the (mocked) module now
+ * so the first test measures the screen rather than Vite's first transform of
+ * that chunk, and give every appearance the same load budget.
+ */
+await import('../components/PolicyCodeEditor');
+
+function findEditor(): Promise<HTMLElement> {
+  return screen.findByTestId('policy-yaml-editor', undefined, { timeout: 4000 });
+}
+
 describe('PolicyManagerScreen', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -76,7 +124,9 @@ describe('PolicyManagerScreen', () => {
     expect(await screen.findByText('Declarative Policy Manager')).toBeInTheDocument();
     // The header renders before the catalogue resolves, so wait for the loaded
     // document rather than asserting against the loading state.
-    expect(await screen.findByTestId('policy-yaml-editor')).toHaveValue(RAW_YAML);
+    const editor = await findEditor();
+    expect(editor).toHaveValue(RAW_YAML);
+    expect(editor).toHaveAttribute('aria-label', 'Policy YAML editor');
     expect(screen.getByTestId('policy-name-input')).toHaveValue('Production Gateway Guardrails');
     expect(screen.getByText('Active version')).toBeInTheDocument();
     expect(screen.getByTestId('policy-version-input')).toHaveValue('2.4.0');
@@ -136,7 +186,7 @@ describe('PolicyManagerScreen', () => {
     const publish = vi.mocked(AegisApi.publishPolicy);
     render(<PolicyManagerScreen />);
 
-    fireEvent.change(await screen.findByTestId('policy-yaml-editor'), {
+    fireEvent.change(await findEditor(), {
       target: { value: `${RAW_YAML}# updated\n` },
     });
     fireEvent.change(screen.getByTestId('policy-version-input'), {
@@ -162,7 +212,7 @@ describe('PolicyManagerScreen', () => {
     const activate = vi.mocked(AegisApi.activatePolicy);
     render(<PolicyManagerScreen />);
 
-    fireEvent.change(await screen.findByTestId('policy-yaml-editor'), {
+    fireEvent.change(await findEditor(), {
       target: { value: `${RAW_YAML}# updated\n` },
     });
 
@@ -182,33 +232,39 @@ describe('PolicyManagerScreen', () => {
     );
   });
 
-  it('keeps a parsed document deployable and clears the lint error', async () => {
+  it('marks the failing line through the editor and clears it for a parsed document', async () => {
     render(<PolicyManagerScreen />);
-    const editor = await screen.findByTestId('policy-yaml-editor');
+    const editor = await findEditor();
 
     fireEvent.change(editor, { target: { value: INVALID_YAML } });
+
     expect(await screen.findByTestId('policy-lint-error')).toBeInTheDocument();
+    expect(editor).toHaveAttribute('data-issue-line', '4');
+    expect(editor).toHaveAttribute('data-issue-column', '1');
+    expect(editor).toHaveAttribute('aria-invalid', 'true');
+    expect(editor).toHaveAttribute('aria-describedby', 'policy-lint-error');
 
     fireEvent.change(editor, { target: { value: `${RAW_YAML}# reviewed\n` } });
 
     expect(screen.queryByTestId('policy-lint-error')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('policy-lint-line')).not.toBeInTheDocument();
+    expect(editor).toHaveAttribute('data-issue-line', '');
+    expect(editor).not.toHaveAttribute('aria-invalid');
     expect(screen.getByTestId('deploy-policy-button')).not.toBeDisabled();
   });
 
-  it('blocks submission and reports the failing line for invalid YAML', async () => {
+  it('blocks submission and reports the position of invalid YAML', async () => {
     const activate = vi.mocked(AegisApi.activatePolicy);
     render(<PolicyManagerScreen />);
 
-    fireEvent.change(await screen.findByTestId('policy-yaml-editor'), {
+    fireEvent.change(await findEditor(), {
       target: { value: INVALID_YAML },
     });
 
     const lint = await screen.findByTestId('policy-lint-error');
     expect(lint).toHaveTextContent('Lint Error');
     expect(lint).toHaveTextContent('line 4');
+    expect(screen.getByTestId('policy-lint-position')).toHaveTextContent(/column \d+/);
     expect(lint).toHaveTextContent('Tabs are not allowed as indentation');
-    expect(screen.getByTestId('policy-lint-line')).toHaveTextContent('4');
     expect(screen.getByTestId('policy-lint-badge')).toBeInTheDocument();
     expect(screen.getByTestId('deploy-policy-button')).toBeDisabled();
     expect(screen.getByTestId('save-draft-button')).toBeDisabled();
@@ -221,9 +277,8 @@ describe('PolicyManagerScreen', () => {
     );
     render(<PolicyManagerScreen />);
 
-    fireEvent.change(await screen.findByTestId('policy-yaml-editor'), {
-      target: { value: `${RAW_YAML}# reviewed\n` },
-    });
+    const editor = await findEditor();
+    fireEvent.change(editor, { target: { value: `${RAW_YAML}# reviewed\n` } });
     fireEvent.click(screen.getByTestId('save-draft-button'));
 
     const lint = await screen.findByTestId('policy-lint-error');
@@ -232,6 +287,8 @@ describe('PolicyManagerScreen', () => {
       'spec.rules[0].action: must be one of BLOCK, ALLOW, REQUIRE_APPROVAL.'
     );
     expect(lint).toHaveTextContent(/active policy is unchanged/i);
+    // The gateway names no document position, so no line is marked inline.
+    expect(editor).toHaveAttribute('data-issue-line', '');
     expect(screen.queryByTestId('policy-action-error')).not.toBeInTheDocument();
   });
 
@@ -266,10 +323,12 @@ describe('PolicyManagerScreen', () => {
     expect(await screen.findByTestId('policy-readonly-notice')).toHaveTextContent(
       /admin role/i
     );
+    const editor = await findEditor();
+    expect(editor).toHaveValue(RAW_YAML);
+    expect(editor).toHaveAttribute('readonly');
     expect(screen.getByTestId('save-draft-button')).toBeDisabled();
     expect(screen.getByTestId('deploy-policy-button')).toBeDisabled();
     expect(screen.getByTestId('simulate-test-button')).toBeDisabled();
-    expect(screen.getByTestId('policy-yaml-editor')).toHaveValue(RAW_YAML);
   });
 
   it('lets an operator simulate without publishing or activating', async () => {
@@ -281,7 +340,7 @@ describe('PolicyManagerScreen', () => {
     expect(screen.getByTestId('simulate-test-button')).not.toBeDisabled();
   });
 
-  it('disables the deployment controls while activation is in flight', async () => {
+  it('disables the deployment controls and the editor while activation is in flight', async () => {
     let resolveActivation: (value: PolicyRecord) => void = () => {};
     vi.mocked(AegisApi.activatePolicy).mockReturnValue(
       new Promise((resolve) => {
@@ -290,15 +349,15 @@ describe('PolicyManagerScreen', () => {
     );
 
     render(<PolicyManagerScreen />);
-    fireEvent.change(await screen.findByTestId('policy-yaml-editor'), {
-      target: { value: `${RAW_YAML}# edited\n` },
-    });
+    const editor = await findEditor();
+    fireEvent.change(editor, { target: { value: `${RAW_YAML}# edited\n` } });
 
     const deploy = screen.getByTestId('deploy-policy-button');
     fireEvent.click(deploy);
 
     await waitFor(() => expect(deploy).toBeDisabled());
     expect(screen.getByTestId('save-draft-button')).toBeDisabled();
+    expect(editor).toHaveAttribute('readonly');
 
     resolveActivation({ ...ACTIVE_POLICY, version: '2.5.0', rawYaml: `${RAW_YAML}# edited\n` });
     await act(async () => {});
@@ -308,12 +367,10 @@ describe('PolicyManagerScreen', () => {
   it('switches from synced to unsaved when the document changes', async () => {
     render(<PolicyManagerScreen />);
 
-    await screen.findByTestId('policy-yaml-editor');
+    const editor = await findEditor();
     expect(screen.getByText('Synced')).toBeInTheDocument();
 
-    fireEvent.change(screen.getByTestId('policy-yaml-editor'), {
-      target: { value: `${RAW_YAML}# edited\n` },
-    });
+    fireEvent.change(editor, { target: { value: `${RAW_YAML}# edited\n` } });
 
     expect(screen.getByText('Draft unsaved')).toBeInTheDocument();
   });

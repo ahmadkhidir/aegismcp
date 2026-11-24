@@ -1,11 +1,12 @@
 /**
  * Specification Anchors: FEAT-002, FEAT-008, FEAT-012, C-005, C-006, C-012, C-017, C-018
  * Screen 4: Policy Manager. Loads real policy versions and the active
- * document, lints the YAML locally before submission, publishes drafts through
- * C-006, activates through C-018, and evaluates sample payloads through C-012.
+ * document into the lazily loaded code editor, lints the YAML locally before
+ * submission, publishes drafts through C-006, activates through C-018, and
+ * evaluates sample payloads through C-012.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   FileCode,
   Play,
@@ -69,6 +70,13 @@ function lintPolicyYaml(rawYaml: string): PolicyLintIssue | null {
   };
 }
 
+/**
+ * The editor engine (CodeMirror plus the YAML grammar) is a separate chunk:
+ * the toolbar, policy list, simulator, and lint banner render immediately and
+ * the rest of the console is never blocked behind it.
+ */
+const PolicyCodeEditor = lazy(() => import('../components/PolicyCodeEditor'));
+
 export const PolicyManagerScreen: React.FC<PolicyManagerScreenProps> = ({
   canManagePolicy = true,
   canSimulatePolicy = true,
@@ -88,13 +96,22 @@ export const PolicyManagerScreen: React.FC<PolicyManagerScreenProps> = ({
   const [actionError, setActionError] = useState<string | null>(null);
   /** A document the gateway refused as invalid; cleared by the next edit. */
   const [gatewayLint, setGatewayLint] = useState<PolicyLintIssue | null>(null);
-  const gutterRef = useRef<HTMLDivElement>(null);
 
   const editorLint = useMemo(() => lintPolicyYaml(editorYaml), [editorYaml]);
   const lintIssue = editorLint ?? gatewayLint;
   /** A local parse failure is the only lint finding that can block a submit. */
   const lintBlocksSubmit = editorLint !== null;
   const editorLineCount = useMemo(() => editorYaml.split('\n').length, [editorYaml]);
+  /** Findings the editor marks inline; a null line stays in the banner only. */
+  const editorIssues = useMemo(
+    () =>
+      lintIssue
+        ? [{ line: lintIssue.line, column: lintIssue.column, message: lintIssue.message }]
+        : [],
+    [lintIssue]
+  );
+  /** screens/04-policy-manager.md: the Deploying state disables editor input. */
+  const editorReadOnly = !canManagePolicy || isPublishing || isDeploying;
 
   const [simTool, setSimTool] = useState('');
   const [simAgent, setSimAgent] = useState('');
@@ -493,6 +510,7 @@ export const PolicyManagerScreen: React.FC<PolicyManagerScreenProps> = ({
           <div className="px-space-md py-space-xs bg-grey-100 border-b border-grey-300 flex items-center justify-between text-caption text-grey-500 font-mono">
             <span>policy.yaml</span>
             <span className="flex items-center gap-2">
+              <span className="hidden desktop:inline text-grey-400">Tab indents · Esc exits</span>
               {lintIssue && (
                 <span
                   data-testid="policy-lint-badge"
@@ -510,50 +528,23 @@ export const PolicyManagerScreen: React.FC<PolicyManagerScreenProps> = ({
               <Skeleton className="h-64 w-full" />
             </div>
           ) : (
-            <div className="flex-1 flex min-h-0">
-              {/*
-                The editor is a textarea, so the failing line is marked in a
-                line gutter that scrolls with the document: the number carries
-                the red wavy underline the Lint Error state declares.
-              */}
-              <div
-                ref={gutterRef}
-                aria-hidden="true"
-                data-testid="policy-editor-gutter"
-                className="w-12 shrink-0 overflow-hidden select-none bg-grey-100 border-r border-grey-300 py-space-md pr-space-xs text-right font-mono text-caption leading-relaxed"
-              >
-                {Array.from({ length: editorLineCount }, (_, index) => {
-                  const lineNumber = index + 1;
-                  const isFailingLine = lintIssue?.line === lineNumber;
-                  return (
-                    <div
-                      key={lineNumber}
-                      data-testid={isFailingLine ? 'policy-lint-line' : undefined}
-                      className={
-                        isFailingLine
-                          ? 'text-error-700 font-semibold underline decoration-wavy decoration-error-500'
-                          : 'text-grey-400'
-                      }
-                    >
-                      {lineNumber}
-                    </div>
-                  );
-                })}
-              </div>
-              <textarea
-                data-testid="policy-yaml-editor"
-                aria-invalid={lintIssue ? true : undefined}
-                aria-describedby={lintIssue ? 'policy-lint-error' : undefined}
+            <Suspense
+              fallback={
+                <div className="flex-1 min-h-0 p-space-md">
+                  <Skeleton className="h-full w-full" />
+                </div>
+              }
+            >
+              <PolicyCodeEditor
                 value={editorYaml}
-                onChange={(event) => handleEditorChange(event.target.value)}
-                onScroll={(event) => {
-                  if (gutterRef.current) gutterRef.current.scrollTop = event.currentTarget.scrollTop;
-                }}
-                placeholder="apiVersion: security.aegis.io/v1alpha1&#10;kind: SecurityPolicy"
-                className="flex-1 w-full min-h-[220px] lg:min-h-0 p-space-md bg-grey-50 text-grey-800 font-mono text-caption leading-relaxed outline-none resize-none selection:bg-primary-300"
-                spellCheck={false}
+                onChange={handleEditorChange}
+                issues={editorIssues}
+                readOnly={editorReadOnly}
+                ariaLabel="Policy YAML editor"
+                describedBy={lintIssue ? 'policy-lint-error' : undefined}
+                invalid={lintIssue !== null}
               />
-            </div>
+            </Suspense>
           )}
 
           {lintIssue && (
