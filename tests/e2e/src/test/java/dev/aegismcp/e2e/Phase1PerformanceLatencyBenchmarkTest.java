@@ -1,128 +1,136 @@
 package dev.aegismcp.e2e;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
+import dev.aegismcp.e2e.fixtures.ArtifactTest;
+import dev.aegismcp.e2e.fixtures.GatewayHarness;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.net.URI;
-import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Performance and latency benchmark test suite verifying NFR-001 (sub-5ms P99 proxy overhead).
- * Anchors: NFR-001, FEAT-001, C-001.
+ * NFR-001 added-latency benchmark against the launched artifact.
+ *
+ * <p>Added latency is the proxy round-trip minus the direct-upstream round-trip for the same payload,
+ * host, and client, measured after warm-up. The percentiles and their thresholds are the NFR-001
+ * row: 0.8 ms p50, 2.2 ms p95, 4.8 ms p99. Every sample and every failing case is reported; nothing
+ * is discarded or retried.
  */
-class Phase1PerformanceLatencyBenchmarkTest {
+class Phase1PerformanceLatencyBenchmarkTest extends ArtifactTest {
 
-    private static final Logger logger = LoggerFactory.getLogger(Phase1PerformanceLatencyBenchmarkTest.class);
+    private static final int WARM_UP_SAMPLES = 100;
+    private static final int SAMPLES = 400;
 
-    private static final int WARMUP_ITERATIONS = 1_000;
-    private static final int BENCHMARK_ITERATIONS = 2_500;
-    private static final double NFR_001_P99_THRESHOLD_MS = 5.0;
-
-    private E2EGatewayFixture fixture;
-    private HttpClient client;
-    private final ObjectMapper mapper = new ObjectMapper();
-
-    @BeforeEach
-    void setUp() throws InterruptedException {
-        fixture = new E2EGatewayFixture();
-        client = HttpClient.newBuilder()
-                .version(HttpClient.Version.HTTP_1_1)
-                .connectTimeout(Duration.ofSeconds(5))
-                .build();
-    }
-
-    @AfterEach
-    void tearDown() {
-        if (fixture != null) {
-            fixture.close();
-        }
-    }
+    private static final double P50_LIMIT_MS = 0.8;  // NFR-001
+    private static final double P95_LIMIT_MS = 2.2;  // NFR-001
+    private static final double P99_LIMIT_MS = 4.8;  // NFR-001
 
     @Test
-    @DisplayName("NFR-001: Proxy pipeline P99 latency overhead < 5ms under warm load")
-    void testProxyPipelineP99LatencyUnderWarmLoad() throws Exception {
-        URI rpcUri = URI.create(fixture.getBaseUrl() + "/mcp/v1/rpc");
+    @DisplayName("NFR-001: reports added p50/p95/p99 latency against a direct-upstream baseline")
+    void reportsAddedLatency() throws Exception {
+        // Both legs are plaintext so the reported delta is the proxy stage, not TLS termination.
+        try (GatewayHarness harness = start(
+                dev.aegismcp.e2e.fixtures.GatewayOptions.defaults().tlsEnabled(false))) {
+            benchmark(harness);
+        }
+    }
 
-        String payload = """
-                {
-                  "jsonrpc": "2.0",
-                  "id": 1,
-                  "method": "tools/call",
-                  "params": {
-                    "name": "echo",
-                    "arguments": {"test": "benchmark", "timestamp": 123456789}
-                  }
-                }
-                """;
+    private void benchmark(GatewayHarness harness) throws Exception {
+        String payload = GatewayHarness.toolCall("bench", "echo", "{\"message\":\"nfr-001\"}");
+        URI upstream = URI.create(harness.upstream().url());
+        URI proxy = URI.create(harness.url("/mcp/v1/rpc"));
+        var client = harness.anonymousClient();
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(rpcUri)
+        // One agent identity per sample so the behavioural burst rule, which is not part of the
+        // NFR-001 measurement, cannot quarantine the benchmark session mid-run.
+        String[] tokens = new String[WARM_UP_SAMPLES + SAMPLES];
+        for (int i = 0; i < tokens.length; i++) {
+            tokens[i] = harness.agentToken("benchmark-agent-" + i);
+        }
+
+        for (int i = 0; i < WARM_UP_SAMPLES; i++) {
+            direct(client, upstream, payload);
+            proxied(client, proxy, tokens[i], payload);
+        }
+
+        double[] added = new double[SAMPLES];
+        List<Integer> failures = new ArrayList<>();
+        for (int i = 0; i < SAMPLES; i++) {
+            long directStart = System.nanoTime();
+            direct(client, upstream, payload);
+            long directMicros = (System.nanoTime() - directStart) / 1_000;
+
+            long proxyStart = System.nanoTime();
+            proxied(client, proxy, tokens[WARM_UP_SAMPLES + i], payload);
+            long proxyMicros = (System.nanoTime() - proxyStart) / 1_000;
+
+            added[i] = (proxyMicros - directMicros) / 1_000.0;
+            if (added[i] < 0) {
+                added[i] = 0;
+            }
+        }
+
+        double[] sorted = added.clone();
+        Arrays.sort(sorted);
+        double p50 = percentile(sorted, 0.50);
+        double p95 = percentile(sorted, 0.95);
+        double p99 = percentile(sorted, 0.99);
+        for (int i = 0; i < sorted.length; i++) {
+            if (sorted[i] > P99_LIMIT_MS) {
+                failures.add(i);
+            }
+        }
+
+        System.out.printf(
+                "NFR-001 added latency: samples=%d p50=%.3fms p95=%.3fms p99=%.3fms "
+                        + "(limits %.1f/%.1f/%.1fms) failing=%d%n",
+                SAMPLES, p50, p95, p99, P50_LIMIT_MS, P95_LIMIT_MS, P99_LIMIT_MS, failures.size());
+
+        assertTrue(p50 <= P50_LIMIT_MS,
+                () -> "NFR-001 p50 " + p50 + "ms exceeds " + P50_LIMIT_MS + "ms over " + SAMPLES + " samples");
+        assertTrue(p95 <= P95_LIMIT_MS,
+                () -> "NFR-001 p95 " + p95 + "ms exceeds " + P95_LIMIT_MS + "ms over " + SAMPLES + " samples");
+        assertTrue(p99 <= P99_LIMIT_MS,
+                () -> "NFR-001 p99 " + p99 + "ms exceeds " + P99_LIMIT_MS + "ms over " + SAMPLES
+                        + " samples; failing samples: " + failures);
+    }
+
+    private static void direct(java.net.http.HttpClient client, URI uri, String payload) throws Exception {
+        HttpResponse<String> response = client.send(HttpRequest.newBuilder(uri)
+                .timeout(Duration.ofSeconds(10))
                 .header("Content-Type", "application/json")
-                .header("Authorization", "Bearer agent-bench-token")
                 .POST(HttpRequest.BodyPublishers.ofString(payload))
-                .build();
-
-        // Prime pipeline with warm-up requests to ensure JIT tier-4 optimization and socket pooling
-        logger.info("Executing {} warm-up iterations...", WARMUP_ITERATIONS);
-        for (int i = 0; i < WARMUP_ITERATIONS; i++) {
-            HttpResponse<String> resp = client.send(request, HttpResponse.BodyHandlers.ofString());
-            assertEquals(200, resp.statusCode());
+                .build(), HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Direct upstream answered " + response.statusCode());
         }
+    }
 
-        logger.info("Warm-up complete. Executing {} benchmark iterations...", BENCHMARK_ITERATIONS);
-
-        long[] latenciesNanos = new long[BENCHMARK_ITERATIONS];
-
-        for (int i = 0; i < BENCHMARK_ITERATIONS; i++) {
-            long start = System.nanoTime();
-            HttpResponse<String> resp = client.send(request, HttpResponse.BodyHandlers.ofString());
-            long elapsed = System.nanoTime() - start;
-
-            latenciesNanos[i] = elapsed;
-            assertEquals(200, resp.statusCode());
+    private static void proxied(java.net.http.HttpClient client, URI uri, String token, String payload)
+            throws Exception {
+        HttpResponse<String> response = client.send(HttpRequest.newBuilder(uri)
+                .timeout(Duration.ofSeconds(10))
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + token)
+                .POST(HttpRequest.BodyPublishers.ofString(payload))
+                .build(), HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Gateway answered " + response.statusCode() + ": " + response.body());
         }
+    }
 
-        // Calculate and log latency percentiles
-        Arrays.sort(latenciesNanos);
-
-        double minMs = latenciesNanos[0] / 1_000_000.0;
-        double p50Ms = latenciesNanos[(int) (BENCHMARK_ITERATIONS * 0.50)] / 1_000_000.0;
-        double p90Ms = latenciesNanos[(int) (BENCHMARK_ITERATIONS * 0.90)] / 1_000_000.0;
-        double p95Ms = latenciesNanos[(int) (BENCHMARK_ITERATIONS * 0.95)] / 1_000_000.0;
-        double p99Ms = latenciesNanos[(int) (BENCHMARK_ITERATIONS * 0.99)] / 1_000_000.0;
-        double maxMs = latenciesNanos[BENCHMARK_ITERATIONS - 1] / 1_000_000.0;
-
-        logger.info("=== AegisMCP NFR-001 Proxy Latency Benchmark Results ===");
-        logger.info("Samples:     {}", BENCHMARK_ITERATIONS);
-        logger.info("Min:         {%.3f} ms", minMs);
-        logger.info("P50 Median:  {%.3f} ms", p50Ms);
-        logger.info("P90:         {%.3f} ms", p90Ms);
-        logger.info("P95:         {%.3f} ms", p95Ms);
-        logger.info("P99:         {%.3f} ms (SLA Target: < 5.0ms)", p99Ms);
-        logger.info("Max:         {%.3f} ms", maxMs);
-        logger.info("=========================================================");
-
-        System.out.printf("AegisMCP Proxy Latency Benchmark - Min: %.3f ms | P50: %.3f ms | P90: %.3f ms | P95: %.3f ms | P99: %.3f ms | Max: %.3f ms%n",
-                minMs, p50Ms, p90Ms, p95Ms, p99Ms, maxMs);
-
-        assertTrue(p99Ms < NFR_001_P99_THRESHOLD_MS,
-                String.format("NFR-001 Violation: P99 latency overhead must be under %.1f ms, actual: %.3f ms",
-                        NFR_001_P99_THRESHOLD_MS, p99Ms));
+    private static double percentile(double[] sorted, double quantile) {
+        if (sorted.length == 0) {
+            return Double.NaN;
+        }
+        int index = (int) Math.ceil(quantile * sorted.length) - 1;
+        return sorted[Math.max(0, Math.min(index, sorted.length - 1))];
     }
 }

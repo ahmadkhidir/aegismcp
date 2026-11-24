@@ -1,4 +1,4 @@
-package dev.aegismcp.e2e;
+package dev.aegismcp.e2e.generators;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
